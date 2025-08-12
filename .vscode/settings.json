@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "C:/Users/Administrador/Documents/INGENIERIA_EN_SOFTWARE/TESIS/CODIGO/validador_retratos_flutter/windows"
+    "cmake.sourceDirectory": "C:/Users/Administrador/Documents/INGENIERIA_EN_SOFTWARE/TESIS/CODIGO/validador_retratos_flutter/windows",
+    "cmake.ignoreCMakeListsMissing": true
 }

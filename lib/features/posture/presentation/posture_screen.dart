@@ -3,12 +3,21 @@ import 'dart:math' as math;
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 
-import '../../posture/services/posture_camera_service.dart';
-import 'widgets/overlays.dart';
+import '../services/posture_camera_service.dart';
+import '../services/pose_ws_service.dart';
+import 'widgets/overlays.dart'; // Provides PoseFrame, PoseSkeletonOverlay, CircularMaskPainter, TopShade, ProgressRing
 
 class PostureScreen extends StatefulWidget {
-  const PostureScreen({super.key, required this.cameraService});
+  const PostureScreen({
+    super.key,
+    required this.cameraService,
+    required this.poseService,   // ← NEW: service to start/stop streaming
+    required this.poseFrames,    // ← Stream<PoseFrame> from /ws/pose
+  });
+
   final PostureCameraService cameraService;
+  final PoseWsService poseService;          // ← NEW
+  final Stream<PoseFrame> poseFrames;
 
   @override
   State<PostureScreen> createState() => _PostureScreenState();
@@ -19,9 +28,28 @@ class _PostureScreenState extends State<PostureScreen> {
   double? _lastLoggedPct;
 
   @override
+  void initState() {
+    super.initState();
+    // Start streaming AFTER first frame so preview/surfaces are ready.
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // tiny delay lets Camera2 settle on some devices
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (!mounted) return;
+      final ctrl = widget.cameraService.controller;
+      if (ctrl.value.isInitialized) {
+        await widget.poseService.startStreamingFromCamera(ctrl);
+      }
+    });
+  }
+
+  @override
   void dispose() {
+    // Stop streaming but do NOT dispose the camera here (let the service/app own it).
+    final ctrl = widget.cameraService.controller;
+    if (ctrl.value.isStreamingImages) {
+      widget.poseService.stopStreamingFromCamera(ctrl);
+    }
     _isCorrect.dispose();
-    widget.cameraService.dispose();
     super.dispose();
   }
 
@@ -33,30 +61,45 @@ class _PostureScreenState extends State<PostureScreen> {
         final borderColor = isCorrect ? Colors.greenAccent : Colors.redAccent;
         final title = isCorrect ? 'Stay in that position' : 'Incorrect posture';
 
+        final mirrorPreview =
+            widget.cameraService.controller.description.lensDirection ==
+                CameraLensDirection.front;
+
         return Scaffold(
           body: Stack(
             fit: StackFit.expand,
             children: [
-              // 1) PREVIEW pantalla completa
+              // 1) Camera preview (full screen)
               _FullScreenCameraPreview(
                 controller: widget.cameraService.controller,
               ),
 
-              // 2) Overlays y máscara con un solo LayoutBuilder
+              // 2) Pose skeleton overlay (fed by /ws/pose)
+              StreamBuilder<PoseFrame>(
+                stream: widget.poseFrames,
+                builder: (_, snap) => PoseSkeletonOverlay(
+                  data: snap.data,                 // null => nothing drawn
+                  color: Colors.limeAccent,
+                  mirror: mirrorPreview,           // mirror front camera
+                ),
+              ),
+
+              // 3) Mask / guides (circle + top shade)
               LayoutBuilder(
                 builder: (context, constraints) {
                   final m = _calcCircleLayout(context, constraints);
 
-                  // Log: tamaños lógicos/físicos + % (con throttle)
+                  // Optional: throttle debug logging (kept from your original)
                   if (_lastLoggedPct == null ||
                       (m.pct - _lastLoggedPct!).abs() >= 0.1) {
                     _lastLoggedPct = m.pct;
-                    final view = View.of(context);
+                    // final view = View.of(context); // available if you need dpr/metrics
                   }
 
                   return Stack(
                     fit: StackFit.expand,
                     children: [
+                      // Dim everything except the circular region
                       CustomPaint(
                         size: Size(constraints.maxWidth, constraints.maxHeight),
                         painter: CircularMaskPainter(
@@ -65,28 +108,20 @@ class _PostureScreenState extends State<PostureScreen> {
                         ),
                       ),
                       const TopShade(),
+                      // Circular border
                       Positioned(
                         left: (constraints.maxWidth - m.diameter) / 2,
                         top: m.circleCenter.dy - m.diameter / 2,
                         width: m.diameter,
                         height: m.diameter,
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            Container(
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: borderColor,
-                                  width: m.borderWidth,
-                                ),
-                              ),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: borderColor,
+                              width: m.borderWidth,
                             ),
-                            CustomPaint(
-                              size: Size.square(m.diameter),
-                              painter: SkeletonPainter(color: borderColor),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ],
@@ -94,7 +129,7 @@ class _PostureScreenState extends State<PostureScreen> {
                 },
               ),
 
-              // 3) UI de estado + acciones
+              // 4) Status/UI
               Positioned.fill(
                 child: Column(
                   children: [
@@ -104,10 +139,9 @@ class _PostureScreenState extends State<PostureScreen> {
                       style: TextStyle(
                         fontSize: 26,
                         fontWeight: FontWeight.bold,
-                        color:
-                            _isCorrect.value
-                                ? Colors.greenAccent
-                                : Colors.redAccent,
+                        color: _isCorrect.value
+                            ? Colors.greenAccent
+                            : Colors.redAccent,
                       ),
                     ),
                     if (!_isCorrect.value)
@@ -125,6 +159,8 @@ class _PostureScreenState extends State<PostureScreen> {
                   ],
                 ),
               ),
+
+              // 5) Buttons
               Positioned(
                 top: 16,
                 right: 16,
@@ -188,7 +224,7 @@ class _FullScreenCameraPreview extends StatelessWidget {
     final deviceRatio = size.width / size.height;
     final previewRatio = controller.value.aspectRatio;
 
-    Widget preview = CameraPreview(controller);
+    final preview = CameraPreview(controller);
 
     return OverflowBox(
       alignment: Alignment.center,

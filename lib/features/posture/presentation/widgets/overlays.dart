@@ -1,6 +1,8 @@
 // lib/features/posture/presentation/widgets/overlays.dart
 import 'package:flutter/material.dart';
 
+/// ───────────────────────── Existing widgets (unchanged) ─────────────────────────
+
 class CircularMaskPainter extends CustomPainter {
   const CircularMaskPainter({required this.circleCenter, required this.circleRadius});
   final Offset circleCenter;
@@ -62,36 +64,163 @@ class ProgressRing extends StatelessWidget {
       );
 }
 
+/// ───────────────────────── Pose model + helpers ─────────────────────────
+/// What the painter needs: server image size and poses in **pixel** coords (px,py)
+class PoseFrame {
+  PoseFrame({required this.imageSize, required this.posesPx});
+  final Size imageSize;                  // server "image_size" (w,h)
+  final List<List<Offset>> posesPx;      // each pose is a list of 33 Offsets (px,py)
+}
+
+/// Convert server JSON (from /ws/pose or /pose) into PoseFrame
+/// Expects: {"poses":[[{"x":..,"y":..,"px":..,"py":..}, ...], ...], "image_size":{"w":W,"h":H}}
+PoseFrame? poseFrameFromMap(Map<String, dynamic>? m) {
+  if (m == null) return null;
+  final img = m['image_size'] as Map<String, dynamic>?;
+  if (img == null) return null;
+
+  final w = (img['w'] as num).toDouble();
+  final h = (img['h'] as num).toDouble();
+
+  final rawPoses = (m['poses'] as List?) ?? const [];
+  final posesPx = <List<Offset>>[];
+
+  for (final p in rawPoses) {
+    final pts = <Offset>[];
+    for (final lm in (p as List)) {
+      final map = (lm as Map<String, dynamic>);
+      // Prefer px/py; fallback to normalized x,y
+      final px = (map['px'] ?? ((map['x'] as num?) ?? 0.0) * w) as num;
+      final py = (map['py'] ?? ((map['y'] as num?) ?? 0.0) * h) as num;
+      pts.add(Offset(px.toDouble(), py.toDouble()));
+    }
+    posesPx.add(pts);
+  }
+
+  return PoseFrame(imageSize: Size(w, h), posesPx: posesPx);
+}
+
+/// MediaPipe Pose connections (33 pts)
+const List<List<int>> kPoseConnections = [
+  [0,1],[1,2],[2,3],[3,7],
+  [0,4],[4,5],[5,6],[6,8],
+  [9,10],
+  [11,12],
+  [11,13],[13,15],
+  [12,14],[14,16],
+  [15,17],[17,19],[19,21],
+  [16,18],[18,20],[20,22],
+  [11,23],[12,24],
+  [23,24],
+  [23,25],[25,27],
+  [24,26],[26,28],
+  [27,29],[29,31],
+  [28,30],[30,32],
+  [27,31],[28,32],
+];
+
+/// ───────────────────────── Pose skeleton painter ─────────────────────────
 class SkeletonPainter extends CustomPainter {
-  SkeletonPainter({required this.color});
+  SkeletonPainter({
+    required this.frame,         // PoseFrame from the server
+    required this.color,
+    this.strokeWidth = 2.0,
+    this.drawPoints = true,
+    this.mirror = false,         // set true if your preview is mirrored
+  });
+
+  final PoseFrame frame;
   final Color color;
+  final double strokeWidth;
+  final bool drawPoints;
+  final bool mirror;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white
-      ..strokeWidth = 3
+    final imgW = frame.imageSize.width;
+    final imgH = frame.imageSize.height;
+    if (imgW <= 0 || imgH <= 0) return;
+
+    // Scale server pixels (imgW,imgH) -> overlay size
+    final sx = size.width / imgW;
+    final sy = size.height / imgH;
+
+    final line = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidth
+      ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round;
 
-    final pts = <Offset>[
-      Offset(0.3, 0.55),
-      Offset(0.7, 0.55),
-      Offset(0.5, 0.35),
-      Offset(0.5, 0.8),
-    ].map((p) => Offset(p.dx * size.width, p.dy * size.height)).toList();
+    final dot = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill;
 
-    canvas
-      ..drawLine(pts[0], pts[1], paint)
-      ..drawLine(pts[2], pts[0], paint)
-      ..drawLine(pts[2], pts[1], paint)
-      ..drawLine(pts[2], pts[3], paint);
+    for (final pose in frame.posesPx) {
+      if (pose.isEmpty) continue;
 
-    for (final p in pts) {
-      canvas.drawCircle(p, 6, paint..color = color);
-      paint.color = Colors.white;
+      // Map to overlay coords
+      final pts = List<Offset>.generate(pose.length, (i) {
+        var x = pose[i].dx * sx;
+        var y = pose[i].dy * sy;
+        if (mirror) x = size.width - x;
+        return Offset(x, y);
+      });
+
+      // Lines (connections)
+      for (final e in kPoseConnections) {
+        final a = e[0], b = e[1];
+        if (a < pts.length && b < pts.length) {
+          canvas.drawLine(pts[a], pts[b], line);
+        }
+      }
+
+      // Dots
+      if (drawPoints) {
+        for (final p in pts) {
+          canvas.drawCircle(p, strokeWidth + 0.5, dot);
+        }
+      }
     }
   }
 
   @override
-  bool shouldRepaint(covariant CustomPainter old) => false;
+  bool shouldRepaint(covariant SkeletonPainter old) =>
+      old.frame != frame ||
+      old.color != color ||
+      old.strokeWidth != strokeWidth ||
+      old.drawPoints != drawPoints ||
+      old.mirror != mirror;
+}
+
+/// ───────────────────────── Overlay widget ─────────────────────────
+/// Drop this on top of your camera preview. Pass the latest PoseFrame from your WS/HTTP service.
+class PoseSkeletonOverlay extends StatelessWidget {
+  const PoseSkeletonOverlay({
+    super.key,
+    required this.data,           // PoseFrame? (null => nothing to draw)
+    this.color = Colors.limeAccent,
+    this.strokeWidth = 2.0,
+    this.drawPoints = true,
+    this.mirror = false,
+  });
+
+  final PoseFrame? data;
+  final Color color;
+  final double strokeWidth;
+  final bool drawPoints;
+  final bool mirror;
+
+  @override
+  Widget build(BuildContext context) {
+    if (data == null) return const SizedBox.shrink();
+    return CustomPaint(
+      painter: SkeletonPainter(
+        frame: data!,
+        color: color,
+        strokeWidth: strokeWidth,
+        drawPoints: drawPoints,
+        mirror: mirror,
+      ),
+    );
+  }
 }
