@@ -68,6 +68,9 @@ class PoseWebRTCService {
 
   bool _disposed = false;
 
+  // ───────────────────────── State for delta-decoding ('PD') ─────────────────────────
+  List<List<Offset>>? _lastPoses;
+
   Future<void> init() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
@@ -110,30 +113,30 @@ class PoseWebRTCService {
     }
 
     // Try to keep uplink predictable/low-latency.
-try {
-  final senders = await _pc!.getSenders();
-  final vSender = senders.firstWhere(
-    (s) => s.track != null && s.track!.kind == 'video',
-    orElse: () => throw Exception('No video sender'),
-  );
+    try {
+      final senders = await _pc!.getSenders();
+      final vSender = senders.firstWhere(
+        (s) => s.track != null && s.track!.kind == 'video',
+        orElse: () => throw Exception('No video sender'),
+      );
 
-  // Build parameters directly; don't call getParameters() (not available in your version)
-  final params = RTCRtpParameters(
-    encodings: [
-      RTCRtpEncoding(
-        maxBitrate: 300 * 1000, // ~300 kbps for 640x480@15
-        maxFramerate: idealFps, // <-- int, not double
-      ),
-    ],
-  );
+      // Build parameters directly; don't call getParameters() (not available in your version)
+      final params = RTCRtpParameters(
+        encodings: [
+          RTCRtpEncoding(
+            maxBitrate: 300 * 1000, // ~300 kbps for 640x480@15
+            maxFramerate: idealFps, // <-- int, not double
+          ),
+        ],
+      );
 
-  await vSender.setParameters(params);
-} catch (e) {
-  if (kDebugMode) {
-    // ignore: avoid_print
-    print('Setting RTCRtpParameters failed/unsupported: $e');
-  }
-}
+      await vSender.setParameters(params);
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('Setting RTCRtpParameters failed/unsupported: $e');
+      }
+    }
 
     // Remote track (if the server returns annotated video)
     _pc!.onTrack = (RTCTrackEvent e) {
@@ -226,55 +229,104 @@ try {
 
   // ───────────────────────── Incoming results (binary fast path) ─────────────────────
   //
-  // Binary packet layout (little endian):
-  // u8  'P' (0x50)
-  // u8  'O' (0x4F)
-  // u8  version (0)
-  // u8  numPoses (N)
-  // u16 imgWidth
-  // u16 imgHeight
-  // Repeat N times:
-  //   u8  numPts (M, e.g., 33)
-  //   Repeat M times:
-  //     u16 x_px
-  //     u16 y_px
-void _handlePoseBinary(Uint8List bytes) {
-  // Use a ByteData view that respects the list's offset/length.
-  // Either of these two lines is fine:
-  final bd = ByteData.sublistView(bytes);
-  // or: final bd = bytes.buffer.asByteData(bytes.offsetInBytes, bytes.lengthInBytes);
+  // Supported layouts (little endian):
+  // "PO": Absolute pixels
+  //   u8 'P', u8 'O', u8 ver, u8 nPoses, u16 imgW, u16 imgH,
+  //   repeat nPoses: u8 nPts, repeat nPts: u16 x, u16 y
+  //
+  // "PD": Delta-coded pixels (bit0 of flags = keyframe)
+  //   u8 'P', u8 'D', u8 ver, u8 flags, u8 nPoses, u16 imgW, u16 imgH,
+  //   if keyframe: same body as "PO"
+  //   else: for each pose: u8 nPts, u64 bitmask (changed points), then (int8 dx, int8 dy) per bit set
+  void _handlePoseBinary(Uint8List bytes) {
+    final bd = ByteData.sublistView(bytes);
+    if (bd.lengthInBytes < 8) return;
+    int i = 0;
 
-  if (bytes.lengthInBytes < 8) return;
-  int i = 0;
+    final m0 = bd.getUint8(i++), m1 = bd.getUint8(i++);
+    // ── Path 1: "PO" absolute packets (back-compat) ──
+    if (m0 == 0x50 && m1 == 0x4F) {
+      final ver = bd.getUint8(i++); // unused
+      final nPoses = bd.getUint8(i++);
+      if (i + 4 > bd.lengthInBytes) return;
+      final w = bd.getUint16(i, Endian.little); i += 2;
+      final h = bd.getUint16(i, Endian.little); i += 2;
 
-  final m0 = bd.getUint8(i++), m1 = bd.getUint8(i++);
-  if (m0 != 0x50 || m1 != 0x4F) return; // not "PO"
+      final poses = <List<Offset>>[];
+      for (int p = 0; p < nPoses; p++) {
+        if (i >= bd.lengthInBytes) break;
+        final nPts = bd.getUint8(i++);
+        final pts = <Offset>[];
+        for (int k = 0; k < nPts; k++) {
+          if (i + 4 > bd.lengthInBytes) break;
+          final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          pts.add(Offset(x, y));
+        }
+        poses.add(pts);
+      }
 
-  final ver = bd.getUint8(i++); // currently 0 (unused)
-  final nPoses = bd.getUint8(i++);
-  if (i + 4 > bd.lengthInBytes) return;
-
-  final w = bd.getUint16(i, Endian.little); i += 2;
-  final h = bd.getUint16(i, Endian.little); i += 2;
-
-  final poses = <List<Offset>>[];
-  for (int p = 0; p < nPoses; p++) {
-    if (i >= bd.lengthInBytes) break;
-    final nPts = bd.getUint8(i++);
-    final pts = <Offset>[];
-    for (int k = 0; k < nPts; k++) {
-      if (i + 4 > bd.lengthInBytes) break; // guard short packets
-      final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
-      final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
-      pts.add(Offset(x, y));
+      _lastPoses = poses; // seed delta state
+      final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+      latestFrame.value = pf;
+      if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
+      return;
     }
-    poses.add(pts);
-  }
 
-  final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
-  latestFrame.value = pf;
-  if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
-}
+    // ── Path 2: "PD" delta-coded packets ──
+    if (m0 != 0x50 || m1 != 0x44) return; // not "PD"
+
+    final ver = bd.getUint8(i++);   // 0
+    final flags = bd.getUint8(i++); // bit0: keyframe
+    final nPoses = bd.getUint8(i++);
+    final w = bd.getUint16(i, Endian.little); i += 2;
+    final h = bd.getUint16(i, Endian.little); i += 2;
+
+    _lastPoses ??= <List<Offset>>[];
+    final poses = <List<Offset>>[];
+
+    for (int p = 0; p < nPoses; p++) {
+      if (i >= bd.lengthInBytes) break;
+      final nPts = bd.getUint8(i++);
+
+      // Keyframe => absolute coords like "PO"
+      if ((flags & 1) != 0) {
+        final pts = <Offset>[];
+        for (int k = 0; k < nPts; k++) {
+          if (i + 4 > bd.lengthInBytes) break;
+          final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          pts.add(Offset(x, y));
+        }
+        poses.add(pts);
+        continue;
+      }
+
+      // Delta frame: bitmask + (dx,dy) for changed points
+      if (i + 8 > bd.lengthInBytes) break;
+      final mask = bd.getUint64(i, Endian.little); i += 8;
+
+      final base = (_lastPoses != null && _lastPoses!.length > p)
+          ? List<Offset>.from(_lastPoses![p])
+          : List<Offset>.filled(nPts, const Offset(0, 0));
+
+      for (int k = 0; k < nPts; k++) {
+        if (((mask >> k) & 1) != 0) {
+          if (i + 2 > bd.lengthInBytes) break;
+          final dx = bd.getInt8(i++).toDouble();
+          final dy = bd.getInt8(i++).toDouble();
+          final prev = base[k];
+          base[k] = Offset(prev.dx + dx, prev.dy + dy);
+        }
+      }
+      poses.add(base);
+    }
+
+    _lastPoses = poses;
+    final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+    latestFrame.value = pf;
+    if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
+  }
 
   // ───────────────────────── Camera controls ─────────────────────────
   Future<void> switchCamera() async {
