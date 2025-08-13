@@ -125,7 +125,7 @@ class PoseWebRTCService {
         encodings: [
           RTCRtpEncoding(
             maxBitrate: 300 * 1000, // ~300 kbps for 640x480@15
-            maxFramerate: idealFps, // <-- int, not double
+            maxFramerate: idealFps, // int
           ),
         ],
       );
@@ -137,6 +137,42 @@ class PoseWebRTCService {
         print('Setting RTCRtpParameters failed/unsupported: $e');
       }
     }
+
+    // ── Prefer specific codecs (only if supported on this device/build) ──
+try {
+  final transceivers = await _pc!.getTransceivers();
+  final vTrans = transceivers.firstWhere(
+    (t) => t.sender.track?.kind == 'video' || t.receiver.track?.kind == 'video',
+  );
+
+  // Capabilities may be null/partial on some platforms/versions
+  final caps = await getRtpSenderCapabilities('video'); // RTCRtpCapabilities?
+  final codecs = caps?.codecs ?? const <RTCRtpCodecCapability>[]; // <-- null-safe
+
+  // Order by your preference (compare in uppercase to be safe)
+  const prefer = ['VIDEO/AV1', 'VIDEO/H265', 'VIDEO/VP9', 'VIDEO/H264'];
+
+  final prefs = <RTCRtpCodecCapability>[
+    for (final mt in prefer)
+      ...codecs.where((c) => ((c.mimeType ?? '').toUpperCase()) == mt),
+  ];
+
+  if (prefs.isNotEmpty) {
+    await vTrans.setCodecPreferences(prefs);
+  } else if (kDebugMode) {
+    // Helpful log to see what the device actually exposes
+    // ignore: avoid_print
+    print('No preferred codecs found in capabilities: '
+          '${codecs.map((c) => c.mimeType).toList()}');
+  }
+} catch (e) {
+  if (kDebugMode) {
+    // ignore: avoid_print
+    print('setCodecPreferences not available/supported: $e');
+  }
+}
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     // Remote track (if the server returns annotated video)
     _pc!.onTrack = (RTCTrackEvent e) {
@@ -249,8 +285,10 @@ class PoseWebRTCService {
       final ver = bd.getUint8(i++); // unused
       final nPoses = bd.getUint8(i++);
       if (i + 4 > bd.lengthInBytes) return;
-      final w = bd.getUint16(i, Endian.little); i += 2;
-      final h = bd.getUint16(i, Endian.little); i += 2;
+      final w = bd.getUint16(i, Endian.little);
+      i += 2;
+      final h = bd.getUint16(i, Endian.little);
+      i += 2;
 
       final poses = <List<Offset>>[];
       for (int p = 0; p < nPoses; p++) {
@@ -259,15 +297,18 @@ class PoseWebRTCService {
         final pts = <Offset>[];
         for (int k = 0; k < nPts; k++) {
           if (i + 4 > bd.lengthInBytes) break;
-          final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
-          final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          final x = bd.getUint16(i, Endian.little).toDouble();
+          i += 2;
+          final y = bd.getUint16(i, Endian.little).toDouble();
+          i += 2;
           pts.add(Offset(x, y));
         }
         poses.add(pts);
       }
 
       _lastPoses = poses; // seed delta state
-      final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+      final pf =
+          PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
       latestFrame.value = pf;
       if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
       return;
@@ -276,11 +317,13 @@ class PoseWebRTCService {
     // ── Path 2: "PD" delta-coded packets ──
     if (m0 != 0x50 || m1 != 0x44) return; // not "PD"
 
-    final ver = bd.getUint8(i++);   // 0
+    final ver = bd.getUint8(i++); // 0
     final flags = bd.getUint8(i++); // bit0: keyframe
     final nPoses = bd.getUint8(i++);
-    final w = bd.getUint16(i, Endian.little); i += 2;
-    final h = bd.getUint16(i, Endian.little); i += 2;
+    final w = bd.getUint16(i, Endian.little);
+    i += 2;
+    final h = bd.getUint16(i, Endian.little);
+    i += 2;
 
     _lastPoses ??= <List<Offset>>[];
     final poses = <List<Offset>>[];
@@ -294,8 +337,10 @@ class PoseWebRTCService {
         final pts = <Offset>[];
         for (int k = 0; k < nPts; k++) {
           if (i + 4 > bd.lengthInBytes) break;
-          final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
-          final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          final x = bd.getUint16(i, Endian.little).toDouble();
+          i += 2;
+          final y = bd.getUint16(i, Endian.little).toDouble();
+          i += 2;
           pts.add(Offset(x, y));
         }
         poses.add(pts);
@@ -304,7 +349,8 @@ class PoseWebRTCService {
 
       // Delta frame: bitmask + (dx,dy) for changed points
       if (i + 8 > bd.lengthInBytes) break;
-      final mask = bd.getUint64(i, Endian.little); i += 8;
+      final mask = bd.getUint64(i, Endian.little);
+      i += 8;
 
       final base = (_lastPoses != null && _lastPoses!.length > p)
           ? List<Offset>.from(_lastPoses![p])
@@ -323,7 +369,8 @@ class PoseWebRTCService {
     }
 
     _lastPoses = poses;
-    final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+    final pf =
+        PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
     latestFrame.value = pf;
     if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
   }
