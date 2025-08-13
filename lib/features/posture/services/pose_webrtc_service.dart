@@ -18,6 +18,9 @@ Map<String, dynamic> _parseJson(String text) =>
 /// - publishes the local camera,
 /// - receives pose results over a data channel (binary preferred, JSON fallback),
 /// - exposes both a latest-frame ValueNotifier (low-latency) and a Stream.
+/// Uses **two** data channels:
+///   - "results": unordered + lossy (no retransmits) for pose packets
+///   - "ctrl": reliable for control messages like "KF"
 class PoseWebRTCService {
   PoseWebRTCService({
     required this.offerUri,
@@ -29,10 +32,11 @@ class PoseWebRTCService {
     String? turnUrl,
     String? turnUsername,
     String? turnPassword,
-  })  : _stunUrl = stunUrl ?? const String.fromEnvironment(
-          'STUN_URL',
-          defaultValue: 'stun:stun.l.google.com:19302',
-        ),
+  })  : _stunUrl = stunUrl ??
+            const String.fromEnvironment(
+              'STUN_URL',
+              defaultValue: 'stun:stun.l.google.com:19302',
+            ),
         _turnUrl = turnUrl ?? const String.fromEnvironment('TURN_URL'),
         _turnUsername =
             turnUsername ?? const String.fromEnvironment('TURN_USERNAME'),
@@ -51,7 +55,8 @@ class PoseWebRTCService {
   final String? _turnPassword;
 
   RTCPeerConnection? _pc;
-  RTCDataChannel? _dc;
+  RTCDataChannel? _dc;    // results (unordered, lossy)
+  RTCDataChannel? _ctrl;  // control (reliable)
   MediaStream? _localStream;
   bool _parsing = false;
   String? _pendingJson; // holds the most recent unparsed JSON
@@ -69,7 +74,10 @@ class PoseWebRTCService {
   bool _disposed = false;
 
   // ───────────────────────── State for delta-decoding ('PD') ─────────────────────────
-  List<List<Offset>>? _lastPoses;
+  List<List<Offset>>? _lastPoses; // reference state for deltas
+  int _lastPktMs = 0;             // last time a results packet arrived (ms)
+  bool _needKeyframe = false;     // client-side request for a keyframe
+  int _lastKfReqMs = 0;           // rate-limit KF requests
 
   Future<void> init() async {
     await localRenderer.initialize();
@@ -79,9 +87,9 @@ class PoseWebRTCService {
       'audio': false,
       'video': {
         'facingMode': facingMode,
-        'width': {'ideal': idealWidth},
-        'height': {'ideal': idealHeight},
-        'frameRate': {'ideal': idealFps, 'max': 30},
+        'width': {'max': idealWidth, 'ideal': idealWidth},
+        'height': {'max': idealHeight, 'ideal': idealHeight},
+        'frameRate': {'max': idealFps, 'ideal': idealFps},
       }
     };
 
@@ -112,7 +120,7 @@ class PoseWebRTCService {
       await _pc!.addTrack(track, _localStream!);
     }
 
-    // Try to keep uplink predictable/low-latency.
+    // Try to keep uplink predictable/low-latency (without using sender.getParameters()).
     try {
       final senders = await _pc!.getSenders();
       final vSender = senders.firstWhere(
@@ -120,12 +128,13 @@ class PoseWebRTCService {
         orElse: () => throw Exception('No video sender'),
       );
 
-      // Build parameters directly; don't call getParameters() (not available in your version)
       final params = RTCRtpParameters(
         encodings: [
           RTCRtpEncoding(
-            maxBitrate: 300 * 1000, // ~300 kbps for 640x480@15
-            maxFramerate: idealFps, // int
+            maxBitrate: 220 * 1000,            // ~220 kbps target
+            maxFramerate: idealFps,            // int (not double)
+            scaleResolutionDownBy: 1.5,        // reduce resolution a bit
+            numTemporalLayers: 2,              // better latency trade-offs
           ),
         ],
       );
@@ -138,41 +147,35 @@ class PoseWebRTCService {
       }
     }
 
-    // ── Prefer specific codecs (only if supported on this device/build) ──
-try {
-  final transceivers = await _pc!.getTransceivers();
-  final vTrans = transceivers.firstWhere(
-    (t) => t.sender.track?.kind == 'video' || t.receiver.track?.kind == 'video',
-  );
+    // Prefer codecs if supported (best-effort).
+    try {
+      final transceivers = await _pc!.getTransceivers();
+      final vTrans = transceivers.firstWhere(
+        (t) => t.sender.track?.kind == 'video' || t.receiver.track?.kind == 'video',
+      );
 
-  // Capabilities may be null/partial on some platforms/versions
-  final caps = await getRtpSenderCapabilities('video'); // RTCRtpCapabilities?
-  final codecs = caps?.codecs ?? const <RTCRtpCodecCapability>[]; // <-- null-safe
+      final caps = await getRtpSenderCapabilities('video'); // RTCRtpCapabilities?
+      final codecs = caps?.codecs ?? const <RTCRtpCodecCapability>[];
 
-  // Order by your preference (compare in uppercase to be safe)
-  const prefer = ['VIDEO/AV1', 'VIDEO/H265', 'VIDEO/VP9', 'VIDEO/H264'];
+      const prefer = ['VIDEO/AV1', 'VIDEO/H265', 'VIDEO/VP9', 'VIDEO/H264'];
+      final prefs = <RTCRtpCodecCapability>[
+        for (final mt in prefer)
+          ...codecs.where((c) => ((c.mimeType ?? '').toUpperCase()) == mt),
+      ];
 
-  final prefs = <RTCRtpCodecCapability>[
-    for (final mt in prefer)
-      ...codecs.where((c) => ((c.mimeType ?? '').toUpperCase()) == mt),
-  ];
-
-  if (prefs.isNotEmpty) {
-    await vTrans.setCodecPreferences(prefs);
-  } else if (kDebugMode) {
-    // Helpful log to see what the device actually exposes
-    // ignore: avoid_print
-    print('No preferred codecs found in capabilities: '
-          '${codecs.map((c) => c.mimeType).toList()}');
-  }
-} catch (e) {
-  if (kDebugMode) {
-    // ignore: avoid_print
-    print('setCodecPreferences not available/supported: $e');
-  }
-}
-
-    // ─────────────────────────────────────────────────────────────────────────
+      if (prefs.isNotEmpty) {
+        await vTrans.setCodecPreferences(prefs);
+      } else if (kDebugMode) {
+        // ignore: avoid_print
+        print('No preferred codecs found in capabilities: '
+            '${codecs.map((c) => c.mimeType).toList()}');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('setCodecPreferences not available/supported: $e');
+      }
+    }
 
     // Remote track (if the server returns annotated video)
     _pc!.onTrack = (RTCTrackEvent e) {
@@ -181,14 +184,14 @@ try {
       }
     };
 
-    // ---- Data channel for pose results ----
-    // Unreliable + unordered => drop late packets, keep latest-only behavior
+    // ---- Data channels ----
+
+    // RESULTS: unordered + lossy (server sends results this way to avoid HoL blocking)
     final dcInit = RTCDataChannelInit()
       ..ordered = false
       ..maxRetransmits = 0;
-    _dc = await _pc!.createDataChannel('results', dcInit);
 
-    void _wireChannel(RTCDataChannel ch) {
+    void _wireResults(RTCDataChannel ch) {
       ch.onMessage = (RTCDataChannelMessage m) {
         if (m.isBinary) {
           _handlePoseBinary(m.binary);
@@ -198,15 +201,24 @@ try {
       };
     }
 
-    _wireChannel(_dc!);
+    _dc = await _pc!.createDataChannel('results', dcInit);
+    _wireResults(_dc!);
+
+    // CTRL: reliable for keyframe (KF) and future control messages
+    final ctrlInit = RTCDataChannelInit()..ordered = true;
+    _ctrl = await _pc!.createDataChannel('ctrl', ctrlInit);
+
+    // Also listen for server-created/recycled channels.
     _pc!.onDataChannel = (RTCDataChannel ch) {
       if (ch.label == 'results') {
         _dc = ch;
-        _wireChannel(_dc!);
+        _wireResults(ch);
+      } else if (ch.label == 'ctrl') {
+        _ctrl = ch;
       }
     };
 
-    // Offer/Answer (HTTP signaling)
+    // ---- Signaling ----
     final offer = await _pc!.createOffer();
     await _pc!.setLocalDescription(offer);
 
@@ -215,6 +227,7 @@ try {
       headers: const {'content-type': 'application/json'},
       body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
     );
+
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw Exception('Signaling failed: ${res.statusCode} ${res.body}');
     }
@@ -229,8 +242,7 @@ try {
 
   // ───────────────────────── Incoming results (JSON fallback) ─────────────────────────
   void _handlePoseText(String text) {
-    // Keep only the most recent JSON; drop older ones while we are parsing.
-    _pendingJson = text;
+    _pendingJson = text; // Keep only most recent JSON
     if (_parsing) return;
     _drainJsonQueue();
   }
@@ -248,13 +260,12 @@ try {
       final map = await compute(_parseJson, text); // off UI thread
       final pf = poseFrameFromMap(map);
       if (pf != null) {
-        latestFrame.value = pf; // triggers only the painter via ValueListenable
+        latestFrame.value = pf; // triggers only the painter
         if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
       }
     } catch (_) {
       // ignore malformed messages
     } finally {
-      // If more JSON arrived while parsing, loop once more with the newest one.
       if (_pendingJson != null) {
         _drainJsonQueue();
       } else {
@@ -275,14 +286,25 @@ try {
   //   if keyframe: same body as "PO"
   //   else: for each pose: u8 nPts, u64 bitmask (changed points), then (int8 dx, int8 dy) per bit set
   void _handlePoseBinary(Uint8List bytes) {
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    // If we haven't received packets for a while, request a keyframe.
+    // Do NOT clear _lastPoses here; we'll simply ignore unsafe deltas.
+    if (now - _lastPktMs > 700) { // was 1200ms
+      _needKeyframe = true;
+      _maybeRequestKeyframe(now);
+    }
+    _lastPktMs = now;
+
     final bd = ByteData.sublistView(bytes);
     if (bd.lengthInBytes < 8) return;
     int i = 0;
 
     final m0 = bd.getUint8(i++), m1 = bd.getUint8(i++);
-    // ── Path 1: "PO" absolute packets (back-compat) ──
+
+    // ── Path 1: "PO" absolute packets ──
     if (m0 == 0x50 && m1 == 0x4F) {
-      final ver = bd.getUint8(i++); // unused
+      final _ = bd.getUint8(i++); // ver (unused)
       final nPoses = bd.getUint8(i++);
       if (i + 4 > bd.lengthInBytes) return;
       final w = bd.getUint16(i, Endian.little);
@@ -306,7 +328,8 @@ try {
         poses.add(pts);
       }
 
-      _lastPoses = poses; // seed delta state
+      _lastPoses = poses;          // seed delta state
+      _needKeyframe = false;       // satisfied by absolute
       final pf =
           PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
       latestFrame.value = pf;
@@ -317,7 +340,7 @@ try {
     // ── Path 2: "PD" delta-coded packets ──
     if (m0 != 0x50 || m1 != 0x44) return; // not "PD"
 
-    final ver = bd.getUint8(i++); // 0
+    final _ver = bd.getUint8(i++); // 0 (ignored)
     final flags = bd.getUint8(i++); // bit0: keyframe
     final nPoses = bd.getUint8(i++);
     final w = bd.getUint16(i, Endian.little);
@@ -325,40 +348,57 @@ try {
     final h = bd.getUint16(i, Endian.little);
     i += 2;
 
-    _lastPoses ??= <List<Offset>>[];
+    final isKey = (flags & 1) != 0;
     final poses = <List<Offset>>[];
 
-    for (int p = 0; p < nPoses; p++) {
-      if (i >= bd.lengthInBytes) break;
-      final nPts = bd.getUint8(i++);
-
-      // Keyframe => absolute coords like "PO"
-      if ((flags & 1) != 0) {
+    // Keyframe in PD => carry absolutes
+    if (isKey) {
+      for (int p = 0; p < nPoses; p++) {
+        if (i >= bd.lengthInBytes) break;
+        final nPts = bd.getUint8(i++);
         final pts = <Offset>[];
         for (int k = 0; k < nPts; k++) {
-          if (i + 4 > bd.lengthInBytes) break;
-          final x = bd.getUint16(i, Endian.little).toDouble();
-          i += 2;
-          final y = bd.getUint16(i, Endian.little).toDouble();
-          i += 2;
+          if (i + 4 > bd.lengthInBytes) { _needKeyframe = true; _maybeRequestKeyframe(now); return; }
+          final x = bd.getUint16(i, Endian.little).toDouble(); i += 2;
+          final y = bd.getUint16(i, Endian.little).toDouble(); i += 2;
           pts.add(Offset(x, y));
         }
         poses.add(pts);
-        continue;
+      }
+      _lastPoses = poses;
+      _needKeyframe = false;
+      final pf =
+          PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+      latestFrame.value = pf;
+      if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
+      return;
+    }
+
+    // Non-keyframe PD (delta). We need a valid reference for each pose.
+    _lastPoses ??= <List<Offset>>[];
+    for (int p = 0; p < nPoses; p++) {
+      if (i >= bd.lengthInBytes) return;
+      final nPts = bd.getUint8(i++);
+
+      final hasRef = _lastPoses != null &&
+          _lastPoses!.length > p &&
+          _lastPoses![p].length == nPts;
+
+      if (!hasRef) {
+        // Can't safely decode this delta. Ask for a keyframe and abort.
+        _needKeyframe = true;
+        _maybeRequestKeyframe(now);
+        return;
       }
 
-      // Delta frame: bitmask + (dx,dy) for changed points
-      if (i + 8 > bd.lengthInBytes) break;
+      if (i + 8 > bd.lengthInBytes) return;
       final mask = bd.getUint64(i, Endian.little);
       i += 8;
 
-      final base = (_lastPoses != null && _lastPoses!.length > p)
-          ? List<Offset>.from(_lastPoses![p])
-          : List<Offset>.filled(nPts, const Offset(0, 0));
-
+      final base = List<Offset>.from(_lastPoses![p]);
       for (int k = 0; k < nPts; k++) {
         if (((mask >> k) & 1) != 0) {
-          if (i + 2 > bd.lengthInBytes) break;
+          if (i + 2 > bd.lengthInBytes) return;
           final dx = bd.getInt8(i++).toDouble();
           final dy = bd.getInt8(i++).toDouble();
           final prev = base[k];
@@ -369,10 +409,29 @@ try {
     }
 
     _lastPoses = poses;
-    final pf =
-        PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
+    final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
     latestFrame.value = pf;
     if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
+  }
+
+  void _maybeRequestKeyframe(int nowMs) {
+    // Best effort: ask server to send a keyframe soon (rate-limited).
+    if (!_needKeyframe) return;
+    if (nowMs - _lastKfReqMs < 300) return;
+
+    final ch = _ctrl ?? _dc; // prefer reliable ctrl, fallback to results
+    if (ch == null) return;
+
+    try {
+      ch.send(RTCDataChannelMessage('KF'));
+      _lastKfReqMs = nowMs;
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('Requested keyframe (KF)');
+      }
+    } catch (_) {
+      // ignore send failures
+    }
   }
 
   // ───────────────────────── Camera controls ─────────────────────────
@@ -398,7 +457,7 @@ try {
         await track.setTorch(on);
       }
     } catch (_) {
-      // Not supported on many devices; ignore.
+      // ignore
     }
   }
 
@@ -407,6 +466,9 @@ try {
     if (_disposed) return;
     _disposed = true;
 
+    try {
+      await _ctrl?.close();
+    } catch (_) {}
     try {
       await _dc?.close();
     } catch (_) {}
