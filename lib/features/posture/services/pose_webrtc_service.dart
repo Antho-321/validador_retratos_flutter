@@ -78,19 +78,32 @@ class PoseWebRTCService {
   int _lastPktMs = 0;             // last time a results packet arrived (ms)
   bool _needKeyframe = false;     // client-side request for a keyframe
   int _lastKfReqMs = 0;           // rate-limit KF requests
+  int? _expectedSeq;              // detects loss/reorder when server adds seq
 
+  // ───────────────────────── Media / Peer connection ─────────────────────────
   Future<void> init() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
 
+    // Stronger constraints: keep camera from throttling when the scene is static.
     final mediaConstraints = <String, dynamic>{
       'audio': false,
       'video': {
         'facingMode': facingMode,
-        'width': {'max': idealWidth, 'ideal': idealWidth},
-        'height': {'max': idealHeight, 'ideal': idealHeight},
-        'frameRate': {'max': idealFps, 'ideal': idealFps},
-      }
+        'width':  {'min': idealWidth,  'ideal': idealWidth,  'max': idealWidth},
+        'height': {'min': idealHeight, 'ideal': idealHeight, 'max': idealHeight},
+        // IMPORTANT: request a minimum framerate
+        'frameRate': {'min': idealFps, 'ideal': idealFps, 'max': idealFps},
+
+        // WebRTC hint: prefer keeping FPS over resolution/bitrate when under load
+        'degradationPreference': 'maintain-framerate',
+
+        // Extra knobs some devices honor via the plugin’s mapping:
+        'mandatory': {'minFrameRate': idealFps},
+        'optional':  [
+          {'minFrameRate': idealFps},
+        ],
+      },
     };
 
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
@@ -115,12 +128,12 @@ class PoseWebRTCService {
 
     _pc = await createPeerConnection(config);
 
-    // Attach local camera to PeerConnection
+    // Attach local camera
     for (final track in _localStream!.getTracks()) {
       await _pc!.addTrack(track, _localStream!);
     }
 
-    // Try to keep uplink predictable/low-latency (without using sender.getParameters()).
+    // Keep uplink predictable/low-latency and maintain FPS.
     try {
       final senders = await _pc!.getSenders();
       final vSender = senders.firstWhere(
@@ -128,22 +141,24 @@ class PoseWebRTCService {
         orElse: () => throw Exception('No video sender'),
       );
 
+      // Directly set encodings (no getParameters() on your flutter_webrtc version).
       final params = RTCRtpParameters(
         encodings: [
           RTCRtpEncoding(
-            maxBitrate: 220 * 1000,            // ~220 kbps target
-            maxFramerate: idealFps,            // int (not double)
-            scaleResolutionDownBy: 1.5,        // reduce resolution a bit
-            numTemporalLayers: 2,              // better latency trade-offs
+            // Keep FPS steady and avoid big resolution scaling
+            maxFramerate: idealFps,
+            scaleResolutionDownBy: 1.0,
+            numTemporalLayers: 2,
+            // Bitrate budget (tweak to your network)
+            maxBitrate: 350 * 1000,
           ),
         ],
       );
-
       await vSender.setParameters(params);
     } catch (e) {
       if (kDebugMode) {
         // ignore: avoid_print
-        print('Setting RTCRtpParameters failed/unsupported: $e');
+        print('RTCRtpParameters tuning not available: $e');
       }
     }
 
@@ -154,7 +169,7 @@ class PoseWebRTCService {
         (t) => t.sender.track?.kind == 'video' || t.receiver.track?.kind == 'video',
       );
 
-      final caps = await getRtpSenderCapabilities('video'); // RTCRtpCapabilities?
+      final caps = await getRtpSenderCapabilities('video');
       final codecs = caps?.codecs ?? const <RTCRtpCodecCapability>[];
 
       const prefer = ['VIDEO/AV1', 'VIDEO/H265', 'VIDEO/VP9', 'VIDEO/H264'];
@@ -186,7 +201,7 @@ class PoseWebRTCService {
 
     // ---- Data channels ----
 
-    // RESULTS: unordered + lossy (server sends results this way to avoid HoL blocking)
+    // RESULTS: unordered + lossy (avoid HoL blocking)
     final dcInit = RTCDataChannelInit()
       ..ordered = false
       ..maxRetransmits = 0;
@@ -282,15 +297,14 @@ class PoseWebRTCService {
   //   repeat nPoses: u8 nPts, repeat nPts: u16 x, u16 y
   //
   // "PD": Delta-coded pixels (bit0 of flags = keyframe)
-  //   u8 'P', u8 'D', u8 ver, u8 flags, u8 nPoses, u16 imgW, u16 imgH,
+  //   u8 'P', u8 'D', u8 ver, u8 flags, [u16 seq if ver>=1], u8 nPoses, u16 imgW, u16 imgH,
   //   if keyframe: same body as "PO"
   //   else: for each pose: u8 nPts, u64 bitmask (changed points), then (int8 dx, int8 dy) per bit set
   void _handlePoseBinary(Uint8List bytes) {
     final now = DateTime.now().millisecondsSinceEpoch;
 
-    // If we haven't received packets for a while, request a keyframe.
-    // Do NOT clear _lastPoses here; we'll simply ignore unsafe deltas.
-    if (now - _lastPktMs > 700) { // was 1200ms
+    // If we haven't received packets for a while, request a keyframe (faster).
+    if (now - _lastPktMs > 300) {
       _needKeyframe = true;
       _maybeRequestKeyframe(now);
     }
@@ -329,6 +343,7 @@ class PoseWebRTCService {
       }
 
       _lastPoses = poses;          // seed delta state
+      _expectedSeq = null;         // absolutes reset seq expectations
       _needKeyframe = false;       // satisfied by absolute
       final pf =
           PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
@@ -340,13 +355,27 @@ class PoseWebRTCService {
     // ── Path 2: "PD" delta-coded packets ──
     if (m0 != 0x50 || m1 != 0x44) return; // not "PD"
 
-    final _ver = bd.getUint8(i++); // 0 (ignored)
-    final flags = bd.getUint8(i++); // bit0: keyframe
+    final ver = bd.getUint8(i++);
+    final flags = bd.getUint8(i++);
+
+    int? seq;
+    if (ver >= 1) {
+      if (i + 2 > bd.lengthInBytes) return;
+      seq = bd.getUint16(i, Endian.little);
+      i += 2;
+
+      // Detect loss/reorder and heal via KF.
+      if (_expectedSeq != null && seq != _expectedSeq) {
+        _needKeyframe = true;
+        _maybeRequestKeyframe(now);
+        return; // don't apply unsafe delta
+      }
+    }
+
+    if (i + 1 + 2 + 2 > bd.lengthInBytes) return;
     final nPoses = bd.getUint8(i++);
-    final w = bd.getUint16(i, Endian.little);
-    i += 2;
-    final h = bd.getUint16(i, Endian.little);
-    i += 2;
+    final w = bd.getUint16(i, Endian.little); i += 2;
+    final h = bd.getUint16(i, Endian.little); i += 2;
 
     final isKey = (flags & 1) != 0;
     final poses = <List<Offset>>[];
@@ -367,6 +396,7 @@ class PoseWebRTCService {
       }
       _lastPoses = poses;
       _needKeyframe = false;
+      if (seq != null) _expectedSeq = (seq + 1) & 0xFFFF;
       final pf =
           PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
       latestFrame.value = pf;
@@ -385,7 +415,6 @@ class PoseWebRTCService {
           _lastPoses![p].length == nPts;
 
       if (!hasRef) {
-        // Can't safely decode this delta. Ask for a keyframe and abort.
         _needKeyframe = true;
         _maybeRequestKeyframe(now);
         return;
@@ -409,6 +438,7 @@ class PoseWebRTCService {
     }
 
     _lastPoses = poses;
+    if (seq != null) _expectedSeq = (seq + 1) & 0xFFFF;
     final pf = PoseFrame(imageSize: Size(w.toDouble(), h.toDouble()), posesPx: poses);
     latestFrame.value = pf;
     if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
