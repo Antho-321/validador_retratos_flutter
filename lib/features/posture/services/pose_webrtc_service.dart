@@ -5,7 +5,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 
-import 'package:flutter/foundation.dart' show compute, kDebugMode, ValueNotifier;
+import 'package:flutter/foundation.dart' show compute, ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
@@ -160,12 +160,7 @@ class PoseWebRTCService {
         ],
       );
       await vSender.setParameters(params);
-    } catch (e) {
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('RTCRtpParameters tuning not available: $e');
-      }
-    }
+    } catch (_) {}
 
     // Prefer codecs if supported (best-effort).
     try {
@@ -185,17 +180,8 @@ class PoseWebRTCService {
 
       if (prefs.isNotEmpty) {
         await vTrans.setCodecPreferences(prefs);
-      } else if (kDebugMode) {
-        // ignore: avoid_print
-        print('No preferred codecs found in capabilities: '
-            '${codecs.map((c) => c.mimeType).toList()}');
       }
-    } catch (e) {
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('setCodecPreferences not available/supported: $e');
-      }
-    }
+    } catch (_) {}
 
     // Remote track (if the server returns annotated video)
     _pc!.onTrack = (RTCTrackEvent e) {
@@ -512,10 +498,6 @@ class PoseWebRTCService {
     try {
       ch.send(RTCDataChannelMessage('KF'));
       _lastKfReqMs = nowMs;
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('Requested keyframe (KF)');
-      }
     } catch (_) {
       // ignore send failures
     }
@@ -527,12 +509,7 @@ class PoseWebRTCService {
     if (videoTracks == null || videoTracks.isEmpty) return;
     try {
       await Helper.switchCamera(videoTracks.first);
-    } catch (e) {
-      if (kDebugMode) {
-        // ignore: avoid_print
-        print('switchCamera not supported on this device: $e');
-      }
-    }
+    } catch (_) {}
   }
 
   Future<void> setTorch(bool on) async {
