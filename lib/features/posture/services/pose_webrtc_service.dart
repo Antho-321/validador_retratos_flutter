@@ -153,7 +153,7 @@ class PoseWebRTCService {
             // Keep FPS steady and avoid big resolution scaling
             maxFramerate: idealFps,
             scaleResolutionDownBy: 1.0,
-            numTemporalLayers: 2,
+            numTemporalLayers: 2, // ignored by H.264 but harmless
             // Bitrate budget (tweak to your network)
             maxBitrate: 350 * 1000,
           ),
@@ -162,7 +162,7 @@ class PoseWebRTCService {
       await vSender.setParameters(params);
     } catch (_) {}
 
-    // Prefer codecs if supported (best-effort).
+    // ───────────── Prefer H.264 encoding (packetization-mode=1 first) ─────────────
     try {
       final transceivers = await _pc!.getTransceivers();
       final vTrans = transceivers.firstWhere(
@@ -170,18 +170,64 @@ class PoseWebRTCService {
       );
 
       final caps = await getRtpSenderCapabilities('video');
-      final codecs = caps?.codecs ?? const <RTCRtpCodecCapability>[];
+      final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
 
-      const prefer = ['VIDEO/AV1', 'VIDEO/H265', 'VIDEO/VP9', 'VIDEO/H264'];
-      final prefs = <RTCRtpCodecCapability>[
-        for (final mt in prefer)
-          ...codecs.where((c) => ((c.mimeType ?? '').toUpperCase()) == mt),
+      String _mime(RTCRtpCodecCapability c) =>
+          (c.mimeType ?? '').toLowerCase(); // e.g., "video/h264"
+      String _fmtp(RTCRtpCodecCapability c) =>
+          (c.sdpFmtpLine ?? '').toLowerCase();
+
+      // Build preferred ordering list without using preferredPayloadType.
+      final preferred = <RTCRtpCodecCapability>[];
+      final seenKeys = <String>{};
+
+      String _codecKey(RTCRtpCodecCapability c) => '${_mime(c)}|${_fmtp(c)}';
+
+      // 1) H.264 first (packetization-mode=1 preferred, then by profile-level-id)
+      final h264 = all.where((c) => _mime(c) == 'video/h264').toList();
+
+      int _h264Rank(RTCRtpCodecCapability c) {
+        final f = _fmtp(c);
+        final pkt = f.contains('packetization-mode=1') ? 0 : 1;
+        // Prefer High (640c1f) or Constrained Baseline (42e01f) if available
+        final prof = f.contains('profile-level-id=640c1f')
+            ? 0
+            : (f.contains('profile-level-id=42e01f') ? 1 : 2);
+        return pkt * 10 + prof;
+      }
+
+      h264.sort((a, b) => _h264Rank(a).compareTo(_h264Rank(b)));
+      for (final c in h264) {
+        final key = _codecKey(c);
+        if (seenKeys.add(key)) preferred.add(c);
+      }
+
+      // 2) Fallbacks in sensible real-time order
+      final order = <String>[
+        'video/vp8',
+        'video/vp9',
+        'video/h265',
+        'video/av1',
       ];
 
-      if (prefs.isNotEmpty) {
-        await vTrans.setCodecPreferences(prefs);
+      for (final name in order) {
+        for (final c in all) {
+          if (_mime(c) == name) {
+            final key = _codecKey(c);
+            if (seenKeys.add(key)) {
+              preferred.add(c);
+            }
+          }
+        }
       }
-    } catch (_) {}
+
+      if (preferred.isNotEmpty) {
+        await vTrans.setCodecPreferences(preferred);
+        // print('[client] codec → ${preferred.first.mimeType} ${preferred.first.sdpFmtpLine}');
+      }
+    } catch (_) {
+      // Best-effort: some platforms may not support setting codec preferences.
+    }
 
     // Remote track (if the server returns annotated video)
     _pc!.onTrack = (RTCTrackEvent e) {
