@@ -1,53 +1,59 @@
 // lib/features/posture/services/pose_webrtc_service.dart
+//
+// NOTE: If you want to use a non-libwebrtc encoder on Android,
+// you must inject a custom VideoEncoderFactory in the NATIVE plugin
+// (see the Kotlin patch after this file). This Dart code stays the same;
+// the encoder used is decided by the native PeerConnectionFactory.
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 
-import 'package:flutter/foundation.dart' show compute, ValueNotifier;
+import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
 
+/// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
     jsonDecode(text) as Map<String, dynamic>;
 
-/// WebRTC client that:
-/// - publishes the local camera,
-/// - receives pose results over a data channel (binary preferred, JSON fallback),
-/// - exposes both a latest-frame ValueNotifier (low-latency) and a Stream.
-/// Uses **two** data channels:
-///   - "results": unordered + lossy (no retransmits) for pose packets
-///   - "ctrl": reliable for control messages like "KF"
 class PoseWebRTCService {
   PoseWebRTCService({
     required this.offerUri,
-    this.facingMode = 'user', // 'user' or 'environment'
+    this.facingMode = 'user',
+    // Match Python client by default (16:9 @ 30fps)
     this.idealWidth = 640,
-    this.idealHeight = 480,
-    this.idealFps = 15,
+    this.idealHeight = 360,
+    this.idealFps = 30,
+    this.maxBitrateKbps = 800,
     String? stunUrl,
     String? turnUrl,
     String? turnUsername,
     String? turnPassword,
-  })  : _stunUrl = stunUrl ??
-            const String.fromEnvironment(
-              'STUN_URL',
-              defaultValue: 'stun:stun.l.google.com:19302',
-            ),
-        _turnUrl = turnUrl ?? const String.fromEnvironment('TURN_URL'),
-        _turnUsername =
-            turnUsername ?? const String.fromEnvironment('TURN_USERNAME'),
-        _turnPassword =
-            turnPassword ?? const String.fromEnvironment('TURN_PASSWORD');
+    this.preferHevc = true,
+    // If true, pre-create DCs so OFFER contains m=application
+    this.preCreateDataChannels = true,
+    // If no results for N seconds, nudge server; try negotiated DCs only if
+    // channels are not open
+    this.negotiatedFallbackAfterSeconds = 5,
+  })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
+        _turnUrl = turnUrl,
+        _turnUsername = turnUsername,
+        _turnPassword = turnPassword;
 
   final Uri offerUri;
   final String facingMode;
   final int idealWidth;
   final int idealHeight;
   final int idealFps;
+  final int maxBitrateKbps;
+  final bool preferHevc;
+  final bool preCreateDataChannels;
+  final int negotiatedFallbackAfterSeconds;
 
   final String? _stunUrl;
   final String? _turnUrl;
@@ -55,71 +61,75 @@ class PoseWebRTCService {
   final String? _turnPassword;
 
   RTCPeerConnection? _pc;
-  RTCDataChannel? _dc; // results (unordered, lossy)
-  RTCDataChannel? _ctrl; // control (reliable)
+  RTCDataChannel? _dc; // 'results' (unordered, lossy)
+  RTCDataChannel? _ctrl; // 'ctrl' (reliable)
   MediaStream? _localStream;
-  bool _parsing = false;
-  String? _pendingJson; // holds the most recent unparsed JSON
+  RTCRtpTransceiver? _videoTransceiver;
+
+  Timer? _rtpStatsTimer;
+  Timer? _dcGuardTimer;
+  bool _disposed = false;
 
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
-
-  /// Low-latency "latest-only" sink for the overlay.
   final ValueNotifier<PoseFrame?> latestFrame = ValueNotifier<PoseFrame?>(null);
 
-  /// Back-compat stream (optional consumers).
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
-  bool _disposed = false;
+  // ─────── Binary PO/PD state ───────
+  List<List<Offset>>? _lastPoses;
+  int? _expectedSeq;
+  int _parseErrors = 0;
 
-  // ───────────────────────── State for delta-decoding ('PD') ─────────────────────────
-  List<List<Offset>>? _lastPoses; // reference state for deltas
-  int _lastPktMs = 0; // last time a results packet arrived (ms)
-  bool _needKeyframe = false; // client-side request for a keyframe
-  int _lastKfReqMs = 0; // rate-limit KF requests
-  int? _expectedSeq; // detects loss/reorder when server adds seq
+  // ================================
+  // Lifecycle
+  // ================================
 
-  // --- optimization ---
-  // keep only the most recent binary packet;
-  Uint8List? _pendingBin;
-  bool _parsingBin = false;
-
-  // ───────────────────────── Media / Peer connection ─────────────────────────
   Future<void> init() async {
+    print('[client] init()');
     await localRenderer.initialize();
     await remoteRenderer.initialize();
+    print('[client] renderers initialized');
 
-    // Stronger constraints: keep camera from throttling when the scene is static.
     final mediaConstraints = <String, dynamic>{
       'audio': false,
       'video': {
         'facingMode': facingMode,
-        'width': {'min': idealWidth, 'ideal': idealWidth, 'max': idealWidth},
-        'height': {'min': idealHeight, 'ideal': idealHeight, 'max': idealHeight},
-        // IMPORTANT: request a minimum framerate
-        'frameRate': {'min': idealFps, 'ideal': idealFps, 'max': idealFps},
-
-        // WebRTC hint: prefer keeping FPS over resolution/bitrate when under load
+        'mandatory': {
+          'minWidth': '$idealWidth',
+          'maxWidth': '$idealWidth',
+          'minHeight': '$idealHeight',
+          'maxHeight': '$idealHeight',
+          'minFrameRate': '$idealFps',
+          'maxFrameRate': '$idealFps',
+        },
+        'optional': [],
         'degradationPreference': 'maintain-framerate',
-
-        // Extra knobs some devices honor via the plugin’s mapping:
-        'mandatory': {'minFrameRate': idealFps},
-        'optional': [
-          {'minFrameRate': idealFps},
-        ],
       },
     };
 
-    _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+    print('[client] getUserMedia constraints: ${mediaConstraints['video']}');
 
-    // Show local preview
+    _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     localRenderer.srcObject = _localStream;
+
+    print(
+      '[client] local stream acquired: '
+      'videoTracks=${_localStream!.getVideoTracks().length}',
+    );
   }
 
   Future<void> connect() async {
+    print(
+      '[client] connect() STUN=${_stunUrl ?? "-"} '
+      'TURN=${_turnUrl != null ? "True" : "False"} '
+      'preferHevc=$preferHevc',
+    );
+
     final config = <String, dynamic>{
       'sdpSemantics': 'unified-plan',
+      'bundlePolicy': 'max-bundle',
       'iceServers': [
         if (_stunUrl != null && _stunUrl!.isNotEmpty) {'urls': _stunUrl},
         if (_turnUrl != null && _turnUrl!.isNotEmpty)
@@ -132,449 +142,765 @@ class PoseWebRTCService {
     };
 
     _pc = await createPeerConnection(config);
+    print('[client] RTCPeerConnection created');
 
-    // Attach local camera
-    for (final track in _localStream!.getTracks()) {
-      await _pc!.addTrack(track, _localStream!);
-    }
-
-    // Keep uplink predictable/low-latency and maintain FPS.
-    try {
-      final senders = await _pc!.getSenders();
-      final vSender = senders.firstWhere(
-        (s) => s.track != null && s.track!.kind == 'video',
-        orElse: () => throw Exception('No video sender'),
-      );
-
-      // Directly set encodings (no getParameters() on some plugin versions).
-      final params = RTCRtpParameters(
-        encodings: [
-          RTCRtpEncoding(
-            // Keep FPS steady and avoid big resolution scaling
-            maxFramerate: idealFps,
-            scaleResolutionDownBy: 1.0,
-            numTemporalLayers: 2, // ignored by H.264 but harmless
-            // Bitrate budget (tweak to your network)
-            maxBitrate: 350 * 1000,
-          ),
-        ],
-      );
-      await vSender.setParameters(params);
-    } catch (_) {}
-
-    // ───────────── Prefer H.264 encoding (packetization-mode=1 first) ─────────────
-    try {
-      final transceivers = await _pc!.getTransceivers();
-      final vTrans = transceivers.firstWhere(
-        (t) => t.sender.track?.kind == 'video' || t.receiver.track?.kind == 'video',
-      );
-
-      final caps = await getRtpSenderCapabilities('video');
-      final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
-
-      String _mime(RTCRtpCodecCapability c) =>
-          (c.mimeType ?? '').toLowerCase(); // e.g., "video/h264"
-      String _fmtp(RTCRtpCodecCapability c) =>
-          (c.sdpFmtpLine ?? '').toLowerCase();
-
-      // Build preferred ordering list without using preferredPayloadType.
-      final preferred = <RTCRtpCodecCapability>[];
-      final seenKeys = <String>{};
-
-      String _codecKey(RTCRtpCodecCapability c) => '${_mime(c)}|${_fmtp(c)}';
-
-      // 1) H.264 first (packetization-mode=1 preferred, then by profile-level-id)
-      final h264 = all.where((c) => _mime(c) == 'video/h264').toList();
-
-      int _h264Rank(RTCRtpCodecCapability c) {
-        final f = _fmtp(c);
-        final pkt = f.contains('packetization-mode=1') ? 0 : 1;
-        // Prefer High (640c1f) or Constrained Baseline (42e01f) if available
-        final prof = f.contains('profile-level-id=640c1f')
-            ? 0
-            : (f.contains('profile-level-id=42e01f') ? 1 : 2);
-        return pkt * 10 + prof;
-      }
-
-      h264.sort((a, b) => _h264Rank(a).compareTo(_h264Rank(b)));
-      for (final c in h264) {
-        final key = _codecKey(c);
-        if (seenKeys.add(key)) preferred.add(c);
-      }
-
-      // 2) Fallbacks in sensible real-time order
-      final order = <String>[
-        'video/vp8',
-        'video/vp9',
-        'video/h265',
-        'video/av1',
-      ];
-
-      for (final name in order) {
-        for (final c in all) {
-          if (_mime(c) == name) {
-            final key = _codecKey(c);
-            if (seenKeys.add(key)) {
-              preferred.add(c);
-            }
-          }
-        }
-      }
-
-      if (preferred.isNotEmpty) {
-        await vTrans.setCodecPreferences(preferred);
-        // print('[client] codec → ${preferred.first.mimeType} ${preferred.first.sdpFmtpLine}');
-      }
-    } catch (_) {
-      // Best-effort: some platforms may not support setting codec preferences.
-    }
-
-    // Remote track (if the server returns annotated video)
-    _pc!.onTrack = (RTCTrackEvent e) {
-      if (e.track.kind == 'video' && e.streams.isNotEmpty) {
-        remoteRenderer.srcObject = e.streams.first;
-      }
+    _pc!.onIceGatheringState = (state) {
+      print('[client] ICE gathering: $state');
+    };
+    _pc!.onIceConnectionState = (state) {
+      print('[client] ICE connection: $state');
+    };
+    _pc!.onSignalingState = (state) {
+      print('[client] signaling state: $state');
+    };
+    _pc!.onConnectionState = (state) {
+      print('[client] peer connection state: $state');
+    };
+    _pc!.onRenegotiationNeeded = () {
+      print('[client] on-negotiation-needed');
     };
 
-    // ---- Data channels ----
+    // Data channels: optionally pre-create so the OFFER carries m=application.
+    if (preCreateDataChannels) {
+      _dc = await _pc!.createDataChannel(
+        'results',
+        RTCDataChannelInit()
+          ..ordered = false
+          ..maxRetransmits = 0,
+      );
+      print("[client] created datachannel 'results' id=${_dc!.id}");
+      _wireResults(_dc!);
 
-    // RESULTS: unordered + lossy (avoid HoL blocking)
-    final dcInit = RTCDataChannelInit()
-      ..ordered = false
-      ..maxRetransmits = 0;
+      _ctrl = await _pc!.createDataChannel('ctrl', RTCDataChannelInit());
+      print("[client] created datachannel 'ctrl' id=${_ctrl!.id}");
+      _wireCtrl(_ctrl!);
 
-    void _wireResults(RTCDataChannel ch) {
-      ch.onMessage = (RTCDataChannelMessage m) {
-        if (m.isBinary) {
-          _handlePoseBinary(m.binary);
-        } else {
-          _handlePoseText(m.text);
-        }
-      };
+      print(
+        "[client] pre-offer datachannels 'results' (unordered, maxRetransmits=0) "
+        "and 'ctrl' (reliable) created",
+      );
+    } else {
+      print(
+        "[client] preCreateDataChannels=false → waiting for peer-announced channels",
+      );
     }
 
-    _dc = await _pc!.createDataChannel('results', dcInit);
-    _wireResults(_dc!);
-
-    // CTRL: reliable for keyframe (KF) and future control messages
-    final ctrlInit = RTCDataChannelInit()..ordered = true;
-    _ctrl = await _pc!.createDataChannel('ctrl', ctrlInit);
-
-    // Also listen for server-created/recycled channels.
+    // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
+      print("[client] datachannel announced by peer: ${ch.label} id=${ch.id}");
       if (ch.label == 'results') {
         _dc = ch;
         _wireResults(ch);
       } else if (ch.label == 'ctrl') {
         _ctrl = ch;
+        _wireCtrl(ch);
       }
     };
 
-    // ---- Signaling ----
-    final offer = await _pc!.createOffer();
-    await _pc!.setLocalDescription(offer);
+    // Add video as sendonly.
+    final videoTrack = _localStream!.getVideoTracks().first;
+    _videoTransceiver = await _pc!.addTransceiver(
+      track: videoTrack,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
+    );
+    print('[client] video transceiver added as SendOnly');
 
+    _pc!.onTrack = (RTCTrackEvent e) {
+      print(
+        '[client] onTrack kind=${e.track.kind} streams=${e.streams.length}',
+      );
+      if (e.track.kind == 'video' && e.streams.isNotEmpty) {
+        remoteRenderer.srcObject = e.streams.first;
+        print('[client] remote video bound to renderer');
+      }
+    };
+
+    // ─────────────────────────────────────────────────────────────
+    // Prefer codecs — PREFER H.264 (fallback allowed if missing)
+    // ─────────────────────────────────────────────────────────────
+    try {
+      final caps = await getRtpSenderCapabilities('video');
+      final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
+
+      // Pick H.264 variants first (prefer packetization-mode=1).
+      final h264First = all.where((c) {
+        final mime = (c.mimeType ?? '').toLowerCase();
+        final fmtp = (c.sdpFmtpLine ?? '').toLowerCase();
+        return mime == 'video/h264' &&
+            (fmtp.contains('packetization-mode=1') || fmtp.isEmpty);
+      }).toList();
+
+      if (h264First.isEmpty) {
+        print('[client] H.264 not supported on this device.');
+      } else {
+        // Put H.264 first, then append everything else for graceful fallback.
+        final preferred = <RTCRtpCodecCapability>[
+          ...h264First,
+          ...all.where((c) => !h264First.contains(c)),
+        ];
+        await _videoTransceiver!.setCodecPreferences(preferred);
+        print('[client] preferring H.264 (${h264First.length} variant(s))');
+      }
+
+      // Keep your existing sender params (bitrate/FPS) as-is
+      await _videoTransceiver!.sender.setParameters(
+        RTCRtpParameters(
+          encodings: [
+            RTCRtpEncoding(
+              maxFramerate: idealFps,
+              scaleResolutionDownBy: 1.0,
+              maxBitrate: 1_500 * 1000,
+            ),
+          ],
+        ),
+      );
+    } catch (e) {
+      print('[client] codec preference failed (best-effort): $e');
+    }
+
+    // Cap bitrate/FPS so encoder queue doesn't overflow.
+    await _applySenderLimits(maxKbps: maxBitrateKbps, maxFps: idealFps);
+
+    // Create offer and log SDP parts like the Python client
+    print('[client] creating offer…');
+    final offer = await _pc!.createOffer({});
+    final hasApp = (offer.sdp?.contains('m=application') ?? false);
+    print('[client] offer created (has m=application: $hasApp )');
+
+    await _pc!.setLocalDescription(offer);
+    print('[client] local description set');
+
+    _dumpSdp('local-offer', offer.sdp);
+
+    await _waitIceGatheringComplete(_pc!);
+
+    final local = await _pc!.getLocalDescription();
+
+    print('[client] posting offer to server…');
     final res = await http.post(
       offerUri,
       headers: const {'content-type': 'application/json'},
-      body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
+      body: jsonEncode({'type': local!.type, 'sdp': local.sdp}),
     );
 
     if (res.statusCode < 200 || res.statusCode >= 300) {
+      print('[client] signaling failed: ${res.statusCode} ${res.body}');
       throw Exception('Signaling failed: ${res.statusCode} ${res.body}');
     }
 
-    final ans = jsonDecode(res.body) as Map<String, dynamic>;
-    final answer = RTCSessionDescription(
-      ans['sdp'] as String,
-      ans['type'] as String,
+    final ansMap = jsonDecode(res.body) as Map<String, dynamic>;
+    await _pc!.setRemoteDescription(
+      RTCSessionDescription(
+        ansMap['sdp'] as String,
+        (ansMap['type'] as String?) ?? 'answer',
+      ),
     );
-    await _pc!.setRemoteDescription(answer);
+
+    final ansSdp = (ansMap['sdp'] as String?) ?? '';
+    print(
+      "[client] remote answer has m=application: "
+      "${ansSdp.contains('m=application')}",
+    );
+    print('[client] remote answer set');
+
+    _dumpSdp('remote-answer', ansSdp);
+
+    _startRtpStatsProbe();
+    _startNoResultsGuard();
   }
 
-  // ───────────────────────── Incoming results (JSON fallback) ─────────────────────────
-  void _handlePoseText(String text) {
-    _pendingJson = text; // Keep only most recent JSON
-    if (_parsing) return;
-    _drainJsonQueue();
-  }
+  // ================================
+  // Helpers (apply limits, ICE, etc.)
+  // ================================
 
-  void _drainJsonQueue() async {
-    final text = _pendingJson;
-    if (text == null) {
-      _parsing = false;
-      return;
-    }
-    _pendingJson = null;
-    _parsing = true;
-
+  Future<void> _applySenderLimits({
+    required int maxKbps,
+    required int maxFps,
+  }) async {
     try {
-      final map = await compute(_parseJson, text); // off UI thread
-      final pf = poseFrameFromMap(map);
-      if (pf != null) {
-        latestFrame.value = pf; // triggers only the painter
-        if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
-      }
-    } catch (_) {
-      // ignore malformed messages
-    } finally {
-      if (_pendingJson != null) {
-        _drainJsonQueue();
-      } else {
-        _parsing = false;
-      }
-    }
-  }
+      final sender = _videoTransceiver?.sender;
+      if (sender == null) return;
 
-  // ───────────────────────── Incoming results (binary fast path) ─────────────────────
-  //
-  // Supported layouts (little endian):
-  // "PO": Absolute pixels
-  //   u8 'P', u8 'O', u8 ver, u8 nPoses, u16 imgW, u16 imgH,
-  //   repeat nPoses: u8 nPts, repeat nPts: u16 x, u16 y
-  //
-  // "PD": Delta-coded pixels (bit0 of flags = keyframe)
-  //   u8 'P', u8 'D', u8 ver, u8 flags, [u16 seq if ver>=1], u8 nPoses, u16 imgW, u16 imgH,
-  //   if keyframe: same body as "PO"
-  //   else: for each pose:
-  //         u8 nPts,
-  //         (ver>=2) ceil(nPts/8) bytes mask (LE)  OR  (ver==1) u64 mask,
-  //         then (int8 dx, int8 dy) per bit set
-  void _handlePoseBinary(Uint8List bytes) {
-    // latest-only: keep newest, drop older; parse on a microtask loop
-    _pendingBin = bytes;
-    if (_parsingBin) return;
-    _drainBinQueue();
-  }
-
-  void _drainBinQueue() {
-    final pkt = _pendingBin;
-    if (pkt == null) {
-      _parsingBin = false;
-      return;
-    }
-    _pendingBin = null;
-    _parsingBin = true;
-
-    try {
-      final pf = _parsePoseBinaryInline(pkt);
-      if (pf != null) {
-        latestFrame.value = pf;
-        if (!_framesCtrl.isClosed) _framesCtrl.add(pf);
-      }
-    } finally {
-      if (_pendingBin != null) {
-        // parse the freshest packet soon without blocking the UI thread
-        scheduleMicrotask(_drainBinQueue);
-      } else {
-        _parsingBin = false;
-      }
-    }
-  }
-
-  PoseFrame? _parsePoseBinaryInline(Uint8List bytes) {
-    final now = DateTime.now().millisecondsSinceEpoch;
-
-    // If we haven't received packets for a while, request a keyframe.
-    if (now - _lastPktMs > 300) {
-      _needKeyframe = true;
-      _maybeRequestKeyframe(now);
-    }
-    _lastPktMs = now;
-
-    final bd = ByteData.sublistView(bytes);
-    if (bd.lengthInBytes < 8) return null;
-    int i = 0;
-
-    final m0 = bd.getUint8(i++), m1 = bd.getUint8(i++);
-
-    // ── Path 1: "PO" absolute packets ──
-    if (m0 == 0x50 && m1 == 0x4F) {
-      final _ = bd.getUint8(i++); // ver (unused)
-      final nPoses = bd.getUint8(i++);
-      if (i + 4 > bd.lengthInBytes) return null;
-      final w = bd.getUint16(i, Endian.little);
-      i += 2;
-      final h = bd.getUint16(i, Endian.little);
-      i += 2;
-
-      final poses = <List<Offset>>[];
-      for (int p = 0; p < nPoses; p++) {
-        if (i >= bd.lengthInBytes) break;
-        final nPts = bd.getUint8(i++);
-        final pts = <Offset>[];
-        for (int k = 0; k < nPts; k++) {
-          if (i + 4 > bd.lengthInBytes) break;
-          final x = bd.getUint16(i, Endian.little).toDouble();
-          i += 2;
-          final y = bd.getUint16(i, Endian.little).toDouble();
-          i += 2;
-          pts.add(Offset(x, y));
-        }
-        poses.add(pts);
-      }
-
-      _lastPoses = poses; // seed delta state
-      _expectedSeq = null; // absolutes reset seq expectations
-      _needKeyframe = false; // satisfied by absolute
-      return PoseFrame(
-        imageSize: Size(w.toDouble(), h.toDouble()),
-        posesPx: poses,
+      print(
+        '[client] applying sender limits: '
+        'maxBitrate=${maxKbps}kbps, maxFramerate=$maxFps',
       );
+
+      await sender.setParameters(
+        RTCRtpParameters(
+          encodings: [
+            RTCRtpEncoding(
+              maxBitrate: maxKbps * 1000,
+              maxFramerate: maxFps,
+              scaleResolutionDownBy: 1.0,
+            ),
+          ],
+        ),
+      );
+
+      print('[client] sender limits applied');
+    } catch (e) {
+      print('[client] sender limits best-effort failed: $e');
+    }
+  }
+
+  Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
+    if (pc.iceGatheringState ==
+        RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      return;
     }
 
-    // ── Path 2: "PD" delta-coded packets ──
-    if (m0 != 0x50 || m1 != 0x44) return null; // not "PD"
+    final c = Completer<void>();
+    final prev = pc.onIceGatheringState;
 
-    final ver = bd.getUint8(i++);
-    final flags = bd.getUint8(i++);
+    pc.onIceGatheringState = (s) {
+      if (prev != null) prev(s);
+      if (s == RTCIceGatheringState.RTCIceGatheringStateComplete &&
+          !c.isCompleted) {
+        print('[client] ICE gathering complete');
+        c.complete();
+        pc.onIceGatheringState = prev;
+      }
+    };
 
-    int? seq;
-    if (ver >= 1) {
-      if (i + 2 > bd.lengthInBytes) return null;
-      seq = bd.getUint16(i, Endian.little);
-      i += 2;
+    Timer(const Duration(seconds: 2), () {
+      if (!c.isCompleted) {
+        print('[client] ICE gathering timeout — continuing');
+        c.complete();
+        pc.onIceGatheringState = prev;
+      }
+    });
 
-      // Detect loss/reorder and heal via KF.
-      if (_expectedSeq != null && seq != _expectedSeq) {
-        _needKeyframe = true;
-        _maybeRequestKeyframe(now);
-        return null; // don't apply unsafe delta
+    return c.future;
+  }
+
+  // ================================
+  // Data channels
+  // ================================
+
+  void _wireResults(RTCDataChannel ch) {
+    ch.onDataChannelState = (s) {
+      if (s == RTCDataChannelState.RTCDataChannelOpen) {
+        print("[client] 'results' open (id=${ch.id})");
+      } else if (s == RTCDataChannelState.RTCDataChannelClosed) {
+        print("[client] 'results' closed (id=${ch.id})");
+      }
+    };
+
+    ch.onMessage = (RTCDataChannelMessage m) {
+      // UNIVERSAL MESSAGE LOGGER (before parsing)
+      if (m.isBinary) {
+        final bin = m.binary;
+        final head = bin.length >= 2
+            ? '${bin[0].toRadixString(16)} ${bin[1].toRadixString(16)}'
+            : '<short>';
+        print("[client] results RECV bin len=${bin.length} head=$head");
+      } else {
+        final t = m.text ?? '';
+        final preview = t.length <= 48 ? t : t.substring(0, 48);
+        print(
+          "[client] results RECV txt len=${t.length} "
+          "preview='${preview.replaceAll('\n', ' ')}'",
+        );
+      }
+
+      // Actual handling
+      if (m.isBinary) {
+        try {
+          _handlePoseBinary(m.binary);
+        } catch (e) {
+          print('[client] error parsing results packet: $e');
+          _sendCtrlKF();
+        }
+      } else {
+        final txtRaw = m.text ?? '';
+        final txt = txtRaw.trim();
+        if (txt.toUpperCase() == 'KF') {
+          print(
+            "[client] 'results' got KF request (string) — ignoring on client",
+          );
+        } else {
+          _handlePoseText(txtRaw);
+        }
+      }
+    };
+  }
+
+  void _wireCtrl(RTCDataChannel ch) {
+    ch.onDataChannelState = (s) {
+      if (s == RTCDataChannelState.RTCDataChannelOpen) {
+        print("[client] 'ctrl' open (id=${ch.id})");
+        _nudgeServer();
+      } else if (s == RTCDataChannelState.RTCDataChannelClosed) {
+        print("[client] 'ctrl' closed (id=${ch.id})");
+      }
+    };
+
+    ch.onMessage = (RTCDataChannelMessage m) {
+      if (m.isBinary) {
+        print('[client] ctrl RECV bin len=${m.binary.length}');
+      } else {
+        final t = m.text ?? '';
+        final prev = t.length <= 48 ? t : t.substring(0, 48);
+        print(
+          "[client] ctrl RECV txt len=${t.length} "
+          "preview='${prev.replaceAll('\n', ' ')}'",
+        );
+      }
+    };
+  }
+
+  void _nudgeServer() {
+    final c = _ctrl;
+    if (c == null) return;
+    if (c.state != RTCDataChannelState.RTCDataChannelOpen) return;
+
+    print('[client] ctrl nudge: HELLO + KF');
+    c.send(RTCDataChannelMessage('HELLO'));
+    c.send(RTCDataChannelMessage('KF'));
+  }
+
+  Future<void> _recreateNegotiatedChannels() async {
+    final pc = _pc;
+    if (pc == null) return;
+
+    // Only attempt if channels are absent or closed.
+    if (_dc?.state == RTCDataChannelState.RTCDataChannelOpen ||
+        _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen) {
+      print('[client] negotiated fallback skipped — channels already open');
+      return;
+    }
+
+    try {
+      await _dc?.close();
+    } catch (_) {}
+    try {
+      await _ctrl?.close();
+    } catch (_) {}
+
+    _dc = null;
+    _ctrl = null;
+
+    Future<RTCDataChannel?> _tryCreate(
+      String label,
+      int id, {
+      required bool lossy,
+    }) async {
+      try {
+        final init = RTCDataChannelInit()
+          ..negotiated = true
+          ..id = id
+          ..ordered = !lossy;
+
+        if (lossy) {
+          // NOTE: cannot set null on some plugin versions; set only when lossy
+          init.maxRetransmits = 0;
+        }
+
+        final ch = await pc.createDataChannel(label, init);
+        print("[client] created negotiated DC '$label' id=$id");
+        return ch;
+      } catch (e) {
+        print("[client] failed to create negotiated DC '$label' id=$id: $e");
+        return null;
       }
     }
 
-    if (i + 1 + 2 + 2 > bd.lengthInBytes) return null;
-    final nPoses = bd.getUint8(i++);
-    final w = bd.getUint16(i, Endian.little);
+    final newResults = await _tryCreate('results', 0, lossy: true);
+    final newCtrl = await _tryCreate('ctrl', 1, lossy: false);
+
+    if (newResults == null || newCtrl == null) {
+      print(
+        "[client] negotiated fallback aborted — "
+        "could not create DCs (ids may be in use)",
+      );
+      return;
+    }
+
+    _dc = newResults;
+    _wireResults(_dc!);
+
+    _ctrl = newCtrl;
+    _wireCtrl(_ctrl!);
+  }
+
+  // ================================
+  // JSON Fallback
+  // ================================
+
+  void _handlePoseText(String text) {
+    try {
+      final m = _parseJson(text);
+      final frame = poseFrameFromMap(m);
+      latestFrame.value = frame;
+
+      if (frame != null && !_framesCtrl.isClosed) {
+        _framesCtrl.add(frame);
+      }
+
+      print('[client] results: JSON pose(s) -> emitted frame');
+    } catch (e) {
+      print('[client] JSON pose parse error: $e -> requesting KF');
+      _sendCtrlKF();
+    }
+  }
+
+  // ================================
+  // Binary PO/PD Parsing
+  // ================================
+
+  void _handlePoseBinary(Uint8List b) {
+    try {
+      if (b.length < 2) return;
+
+      if (b[0] == 0x50 && b[1] == 0x4F) {
+        final parsed = _parsePO(b);
+        _lastPoses = parsed.poses;
+        _expectedSeq = null;
+
+        print(
+          '[client] results: PO ${parsed.poses.length} pose(s) '
+          '${parsed.w}x${parsed.h}',
+        );
+
+        _emitBinary(parsed.w, parsed.h, parsed.poses, kind: 'PO', seq: null);
+        return;
+      }
+
+      if (b[0] == 0x50 && b[1] == 0x44) {
+        final parsed = _parsePD(b, _lastPoses);
+        _lastPoses = parsed.poses;
+
+        if (_expectedSeq != null && parsed.seq != _expectedSeq) {
+          print(
+            '[client] PD seq mismatch: got=${parsed.seq} expected=$_expectedSeq -> requesting KF',
+          );
+          _sendCtrlKF();
+          _expectedSeq = null;
+        }
+
+        _expectedSeq = (parsed.seq + 1) & 0xFFFF;
+
+        print(
+          '[client] results: PD seq=${parsed.seq} '
+          '${parsed.poses.length} pose(s) ${parsed.w}x${parsed.h}',
+        );
+
+        _emitBinary(parsed.w, parsed.h, parsed.poses,
+            kind: 'PD', seq: parsed.seq);
+        _sendCtrlAck(parsed.seq);
+        return;
+      }
+
+      print(
+        '[client] unknown binary packet head: '
+        '${b[0].toRadixString(16)} ${b[1].toRadixString(16)} -> KF',
+      );
+      _sendCtrlKF();
+    } catch (e) {
+      _parseErrors++;
+      print('[client] binary parse error #$_parseErrors: $e -> KF');
+      _sendCtrlKF();
+    }
+  }
+
+  ({int w, int h, List<List<Offset>> poses}) _parsePO(Uint8List b) {
+    int i = 2;
+    if (i >= b.length) throw StateError('PO missing ver');
+    i++; // ver
+
+    if (i + 1 + 2 + 2 > b.length) {
+      throw StateError('PO header short');
+    }
+
+    final nposes = b[i];
+    i += 1;
+
+    final w = b[i] | (b[i + 1] << 8);
     i += 2;
-    final h = bd.getUint16(i, Endian.little);
+
+    final h = b[i] | (b[i + 1] << 8);
+    i += 2;
+
+    final poses = <List<Offset>>[];
+
+    for (int p = 0; p < nposes; p++) {
+      if (i >= b.length) throw StateError('PO npts short');
+      final npts = b[i];
+      i += 1;
+
+      final need = npts * 4;
+      if (i + need > b.length) throw StateError('PO pts short');
+
+      final pts = <Offset>[];
+      for (int k = 0; k < npts; k++) {
+        final x = b[i] | (b[i + 1] << 8);
+        i += 2;
+        final y = b[i] | (b[i + 1] << 8);
+        i += 2;
+        pts.add(Offset(x.toDouble(), y.toDouble()));
+      }
+
+      poses.add(pts);
+    }
+
+    return (w: w, h: h, poses: poses);
+  }
+
+  ({int w, int h, int seq, List<List<Offset>> poses}) _parsePD(
+    Uint8List b,
+    List<List<Offset>>? prev,
+  ) {
+    int i = 2;
+    if (i + 1 + 1 + 2 + 1 + 2 + 2 > b.length) {
+      throw StateError('PD header short');
+    }
+
+    i++; // ver
+    final flags = b[i];
+    i += 1;
+
+    final seq = b[i] | (b[i + 1] << 8);
+    i += 2;
+
+    final nposes = b[i];
+    i += 1;
+
+    final w = b[i] | (b[i + 1] << 8);
+    i += 2;
+
+    final h = b[i] | (b[i + 1] << 8);
     i += 2;
 
     final isKey = (flags & 1) != 0;
-    final poses = <List<Offset>>[];
 
-    // Keyframe in PD => carry absolutes
-    if (isKey) {
-      for (int p = 0; p < nPoses; p++) {
-        if (i >= bd.lengthInBytes) break;
-        final nPts = bd.getUint8(i++);
+    if (isKey || prev == null) {
+      final poses = <List<Offset>>[];
+      for (int p = 0; p < nposes; p++) {
+        if (i >= b.length) throw StateError('PD KF npts short');
+        final npts = b[i];
+        i += 1;
+
+        final need = npts * 4;
+        if (i + need > b.length) throw StateError('PD KF pts short');
+
         final pts = <Offset>[];
-        for (int k = 0; k < nPts; k++) {
-          if (i + 4 > bd.lengthInBytes) {
-            _needKeyframe = true;
-            _maybeRequestKeyframe(now);
-            return null;
-          }
-          final x = bd.getUint16(i, Endian.little).toDouble();
+        for (int k = 0; k < npts; k++) {
+          final x = b[i] | (b[i + 1] << 8);
           i += 2;
-          final y = bd.getUint16(i, Endian.little).toDouble();
+          final y = b[i] | (b[i + 1] << 8);
           i += 2;
-          pts.add(Offset(x, y));
+          pts.add(Offset(x.toDouble(), y.toDouble()));
         }
         poses.add(pts);
       }
-      _lastPoses = poses;
-      _needKeyframe = false;
-      if (seq != null) _expectedSeq = (seq + 1) & 0xFFFF;
-      return PoseFrame(
-        imageSize: Size(w.toDouble(), h.toDouble()),
-        posesPx: poses,
-      );
-    }
-
-    // Non-keyframe PD (delta). We need a valid reference for each pose.
-    _lastPoses ??= <List<Offset>>[];
-    for (int p = 0; p < nPoses; p++) {
-      if (i >= bd.lengthInBytes) return null;
-      final nPts = bd.getUint8(i++);
-
-      final hasRef = _lastPoses != null &&
-          _lastPoses!.length > p &&
-          _lastPoses![p].length == nPts;
-
-      if (!hasRef) {
-        _needKeyframe = true;
-        _maybeRequestKeyframe(now);
-        return null;
+      return (w: w, h: h, seq: seq, poses: poses);
+    } else {
+      if (prev.length != nposes) {
+        throw StateError('PD Δ nposes mismatch');
       }
 
-      // === variable-length mask if ver>=2, else fixed u64 for back-compat ===
-      int mask = 0;
-      if (ver >= 2) {
-        final maskBytes = (nPts + 7) >> 3;
-        if (i + maskBytes > bd.lengthInBytes) return null;
-        for (int b = 0; b < maskBytes; b++) {
-          mask |= (bd.getUint8(i++) << (8 * b));
+      final poses = <List<Offset>>[];
+      for (int p = 0; p < nposes; p++) {
+        if (i >= b.length) throw StateError('PD Δ npts short');
+        final npts = b[i];
+        i += 1;
+
+        final maskBytes = ((npts + 7) >> 3);
+        if (i + maskBytes > b.length) {
+          throw StateError('PD Δ mask short');
         }
-      } else {
-        if (i + 8 > bd.lengthInBytes) return null;
-        mask = bd.getUint64(i, Endian.little);
-        i += 8;
-      }
 
-      final base = List<Offset>.from(_lastPoses![p]);
-      for (int k = 0; k < nPts; k++) {
-        if (((mask >> k) & 1) != 0) {
-          if (i + 2 > bd.lengthInBytes) return null;
-          final dx = bd.getInt8(i++).toDouble();
-          final dy = bd.getInt8(i++).toDouble();
-          final prev = base[k];
-          base[k] = Offset(prev.dx + dx, prev.dy + dy);
+        int mask = 0;
+        for (int mb = 0; mb < maskBytes; mb++) {
+          mask |= (b[i + mb] << (8 * mb));
         }
-      }
-      poses.add(base);
-    }
+        i += maskBytes;
 
-    _lastPoses = poses;
-    if (seq != null) _expectedSeq = (seq + 1) & 0xFFFF;
-    return PoseFrame(
+        final prevPts = prev[p];
+        if (prevPts.length != npts) {
+          throw StateError('PD Δ npts mismatch');
+        }
+
+        final out = <Offset>[];
+        for (int j = 0; j < npts; j++) {
+          int x = prevPts[j].dx.toInt();
+          int y = prevPts[j].dy.toInt();
+
+          if (((mask >> j) & 1) == 1) {
+            if (i + 2 > b.length) {
+              throw StateError('PD Δ dxdy short');
+            }
+            int dx = _asInt8(b[i]);
+            i += 1;
+            int dy = _asInt8(b[i]);
+            i += 1;
+            x += dx;
+            y += dy;
+          }
+
+          x = math.max(0, math.min(w - 1, x));
+          y = math.max(0, math.min(h - 1, y));
+          out.add(Offset(x.toDouble(), y.toDouble()));
+        }
+
+        poses.add(out);
+      }
+      return (w: w, h: h, seq: seq, poses: poses);
+    }
+  }
+
+  int _asInt8(int u) => (u & 0x80) != 0 ? (u - 256) : u;
+
+  void _emitBinary(
+    int w,
+    int h,
+    List<List<Offset>> poses, {
+    required String kind,
+    int? seq,
+  }) {
+    if (_disposed) return;
+
+    final frame = PoseFrame(
       imageSize: Size(w.toDouble(), h.toDouble()),
       posesPx: poses,
     );
-  }
 
-  void _maybeRequestKeyframe(int nowMs) {
-    // Best effort: ask server to send a keyframe soon (rate-limited).
-    if (!_needKeyframe) return;
-    if (nowMs - _lastKfReqMs < 300) return;
+    print(
+      '[client] emit frame kind=$kind seq=${seq ?? "-"} '
+      'poses=${poses.length} size=${w}x$h',
+    );
 
-    final ch = _ctrl ?? _dc; // prefer reliable ctrl, fallback to results
-    if (ch == null) return;
-
-    try {
-      ch.send(RTCDataChannelMessage('KF'));
-      _lastKfReqMs = nowMs;
-    } catch (_) {
-      // ignore send failures
+    latestFrame.value = frame;
+    if (!_framesCtrl.isClosed) {
+      _framesCtrl.add(frame);
     }
   }
 
-  // ───────────────────────── Camera controls ─────────────────────────
-  Future<void> switchCamera() async {
-    final videoTracks = _localStream?.getVideoTracks();
-    if (videoTracks == null || videoTracks.isEmpty) return;
-    try {
-      await Helper.switchCamera(videoTracks.first);
-    } catch (_) {}
+  void _sendCtrlKF() {
+    final c = _ctrl;
+    if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
+
+    print('[client] sending KF request over ctrl');
+    c.send(RTCDataChannelMessage('KF'));
   }
 
-  Future<void> setTorch(bool on) async {
-    final videoTracks = _localStream?.getVideoTracks();
-    if (videoTracks == null || videoTracks.isEmpty) return;
-    try {
-      final track = videoTracks.first;
-      if (await track.hasTorch()) {
-        await track.setTorch(on);
+  void _sendCtrlAck(int seq) {
+    final c = _ctrl;
+    if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
+
+    final out = Uint8List(5);
+    out[0] = 0x41; // 'A'
+    out[1] = 0x43; // 'C'
+    out[2] = 0x4B; // 'K'
+    out[3] = (seq & 0xFF);
+    out[4] = ((seq >> 8) & 0xFF);
+
+    print('[client] sending ACK seq=$seq over ctrl');
+    c.send(RTCDataChannelMessage.fromBinary(out));
+  }
+
+  // ================================
+  // Diagnostics
+  // ================================
+
+  void _dumpSdp(String tag, String? sdp) {
+    if (sdp == null) return;
+    final lines = sdp.split(RegExp(r'\r?\n'));
+
+    final take = <String>[];
+    bool inVideo = false;
+
+    for (final l in lines) {
+      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
+      if (inVideo &&
+          (l.startsWith('m=video') ||
+              l.startsWith('a=rtpmap:') ||
+              l.startsWith('a=fmtp:'))) {
+        take.add(l);
       }
-    } catch (_) {
-      // ignore
+    }
+
+    print('--- [$tag] SDP video ---\n${take.join('\n')}\n------------------------');
+  }
+
+  void _startRtpStatsProbe() {
+    _rtpStatsTimer?.cancel();
+    _rtpStatsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final pc = _pc;
+      if (pc == null) return;
+
+      try {
+        final reports = await pc.getStats();
+        for (final r in reports) {
+          if (r.type == 'outbound-rtp' &&
+              (r.values['kind'] == 'video' ||
+                  r.values['mediaType'] == 'video')) {
+            final p = r.values['packetsSent'];
+            final b = r.values['bytesSent'];
+            print('[RTP] video packetsSent=$p bytesSent=$b');
+          }
+        }
+      } catch (e) {
+        print('[client] stats probe error: $e');
+      }
+    });
+    print('[client] RTP stats probe started (2s)');
+  }
+
+  void _startNoResultsGuard() {
+    _dcGuardTimer?.cancel();
+    if (negotiatedFallbackAfterSeconds <= 0) return;
+
+    _dcGuardTimer = Timer(
+      Duration(seconds: negotiatedFallbackAfterSeconds),
+      () async {
+        if (_disposed) return;
+        if (latestFrame.value != null) return;
+
+        final dcOpen = _dc?.state == RTCDataChannelState.RTCDataChannelOpen;
+        final ctrlOpen = _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen;
+
+        // If channels are open, don't try creating negotiated ones — just nudge.
+        if (dcOpen || ctrlOpen) {
+          print(
+            '[client] no results yet, channels open → re-nudge (HELLO+KF)',
+          );
+          _nudgeServer();
+          return;
+        }
+
+        // Channels not open: try negotiated(0/1) once.
+        print(
+          '[client] no results and channels not open → trying negotiated DCs (0/1)',
+        );
+        await _recreateNegotiatedChannels();
+      },
+    );
+  }
+
+  // ================================
+  // Camera and cleanup
+  // ================================
+
+  Future<void> switchCamera() async {
+    final tracks = _localStream?.getVideoTracks();
+    if (tracks == null || tracks.isEmpty) return;
+
+    try {
+      await Helper.switchCamera(tracks.first);
+      print('[client] camera switched');
+      await _applySenderLimits(maxKbps: maxBitrateKbps, maxFps: idealFps);
+    } catch (e) {
+      print('[client] switchCamera failed: $e');
     }
   }
 
-  // ───────────────────────── Cleanup ─────────────────────────
-  Future<void> close() async {
-    if (_disposed) return;
+  Future<void> close() => dispose();
+
+  Future<void> dispose() async {
     _disposed = true;
+    print('[client] dispose()');
 
     try {
       await _ctrl?.close();
@@ -586,13 +912,19 @@ class PoseWebRTCService {
       await _pc?.close();
     } catch (_) {}
     try {
+      await localRenderer.dispose();
+    } catch (_) {}
+    try {
+      await remoteRenderer.dispose();
+    } catch (_) {}
+    try {
       await _localStream?.dispose();
     } catch (_) {}
 
-    await localRenderer.dispose();
-    await remoteRenderer.dispose();
-
-    latestFrame.dispose();
+    _rtpStatsTimer?.cancel();
+    _dcGuardTimer?.cancel();
     await _framesCtrl.close();
+
+    print('[client] disposed');
   }
 }
