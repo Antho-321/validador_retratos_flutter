@@ -16,6 +16,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
+import 'webrtc/rtc_video_encoder.dart'; // ← NEW: centralized encoder configuration
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
@@ -40,10 +41,17 @@ class PoseWebRTCService {
     // If no results for N seconds, nudge server; try negotiated DCs only if
     // channels are not open
     this.negotiatedFallbackAfterSeconds = 5,
+    RtcVideoEncoder? encoder, // ← NEW (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
-        _turnPassword = turnPassword;
+        _turnPassword = turnPassword,
+        encoder = encoder ??
+            RtcVideoEncoder(
+              idealFps: idealFps,
+              maxBitrateKbps: maxBitrateKbps,
+              preferHevc: preferHevc,
+            );
 
   final Uri offerUri;
   final String facingMode;
@@ -59,6 +67,9 @@ class PoseWebRTCService {
   final String? _turnUrl;
   final String? _turnUsername;
   final String? _turnPassword;
+
+  // ← NEW
+  final RtcVideoEncoder encoder;
 
   RTCPeerConnection? _pc;
   RTCDataChannel? _dc; // 'results' (unordered, lossy)
@@ -122,8 +133,8 @@ class PoseWebRTCService {
 
   Future<void> connect() async {
     print(
-      '[client] connect() STUN=${_stunUrl ?? "-"} '
-      'TURN=${_turnUrl != null ? "True" : "False"} '
+      '[client] connect() STUN=${_stunUrl ?? '-'} '
+      'TURN=${_turnUrl != null ? 'True' : 'False'} '
       'preferHevc=$preferHevc',
     );
 
@@ -164,27 +175,27 @@ class PoseWebRTCService {
 
     // Data channels: optionally pre-create so the OFFER carries m=application.
     if (preCreateDataChannels) {
-  // results: unordered + lossy, negotiated id=0
-  final lossy = RTCDataChannelInit()
-    ..negotiated = true
-    ..id = 0
-    ..ordered = false
-    ..maxRetransmits = 0;
-  _dc = await _pc!.createDataChannel('results', lossy);
-  print("[client] created negotiated DC 'results' id=0");
-  _wireResults(_dc!);
+      // results: unordered + lossy, negotiated id=0
+      final lossy = RTCDataChannelInit()
+        ..negotiated = true
+        ..id = 0
+        ..ordered = false
+        ..maxRetransmits = 0;
+      _dc = await _pc!.createDataChannel('results', lossy);
+      print("[client] created negotiated DC 'results' id=0");
+      _wireResults(_dc!);
 
-  // ctrl: reliable, negotiated id=1
-  final reliable = RTCDataChannelInit()
-    ..negotiated = true
-    ..id = 1
-    ..ordered = true;
-  _ctrl = await _pc!.createDataChannel('ctrl', reliable);
-  print("[client] created negotiated DC 'ctrl' id=1");
-  _wireCtrl(_ctrl!);
-} else {
-  print("[client] preCreateDataChannels=false → waiting for peer-announced channels");
-}
+      // ctrl: reliable, negotiated id=1
+      final reliable = RTCDataChannelInit()
+        ..negotiated = true
+        ..id = 1
+        ..ordered = true;
+      _ctrl = await _pc!.createDataChannel('ctrl', reliable);
+      print("[client] created negotiated DC 'ctrl' id=1");
+      _wireCtrl(_ctrl!);
+    } else {
+      print("[client] preCreateDataChannels=false → waiting for peer-announced channels");
+    }
 
     // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
@@ -217,49 +228,27 @@ class PoseWebRTCService {
     };
 
     // ─────────────────────────────────────────────────────────────
-// Prefer codecs — low-latency H.264 (packetization-mode=1; baseline/CB)
-// ─────────────────────────────────────────────────────────────
-try {
-  final caps = await getRtpSenderCapabilities('video');
-  final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
-
-  bool _isLowLatencyH264(RTCRtpCodecCapability c) {
-    final mime = (c.mimeType ?? '').toLowerCase();
-    final fmtp = (c.sdpFmtpLine ?? '').toLowerCase();
-    return mime == 'video/h264'
-        && fmtp.contains('packetization-mode=1')
-        && (fmtp.contains('profile-level-id=42e01f') // constrained-baseline
-            || fmtp.contains('profile-level-id=42001f')); // baseline
-  }
-
-  final h264LowLatency = all.where(_isLowLatencyH264).toList();
-  final h264Any = all.where((c) => (c.mimeType ?? '').toLowerCase() == 'video/h264').toList();
-
-  final preferred = <RTCRtpCodecCapability>[
-    ...h264LowLatency,
-    ...h264Any.where((c) => !h264LowLatency.contains(c)),
-    ...all.where((c) => (c.mimeType ?? '').toLowerCase() != 'video/h265'), // push HEVC to the end (or drop)
-  ];
-
-  if (preferred.isNotEmpty) {
-    await _videoTransceiver!.setCodecPreferences(preferred);
-    print('[client] preferring H.264 low-latency profile');
-  }
-} catch (e) {
-  print('[client] codec preference failed (best-effort): $e');
-}
-
-    // Cap bitrate/FPS so encoder queue doesn't overflow.
-    await _applySenderLimits(maxKbps: maxBitrateKbps, maxFps: idealFps);
+    // Centralized encoder setup (codec prefs + sender limits)
+    // ─────────────────────────────────────────────────────────────
+    await encoder.applyTo(_videoTransceiver!);
 
     // Create offer and log SDP parts like the Python client
     print('[client] creating offer…');
-var offer = await _pc!.createOffer({'offerToReceiveVideo': 0, 'offerToReceiveAudio': 0});
-final munged = _mungeVideoBitrateHints(offer.sdp!, kbps: maxBitrateKbps);
-offer = RTCSessionDescription(munged, offer.type);
-final hasApp = (offer.sdp?.contains('m=application') ?? false);
-print('[client] offer created (has m=application: $hasApp )');
-await _pc!.setLocalDescription(offer);
+    var offer = await _pc!.createOffer({
+      'offerToReceiveVideo': 0,
+      'offerToReceiveAudio': 0,
+    });
+
+    // Hint initial bitrate for H.264
+    final munged = RtcVideoEncoder.mungeH264BitrateHints(
+      offer.sdp!,
+      kbps: maxBitrateKbps,
+    );
+    offer = RTCSessionDescription(munged, offer.type);
+
+    final hasApp = (offer.sdp?.contains('m=application') ?? false);
+    print('[client] offer created (has m=application: $hasApp )');
+    await _pc!.setLocalDescription(offer);
     print('[client] local description set');
 
     _dumpSdp('local-offer', offer.sdp);
@@ -302,39 +291,8 @@ await _pc!.setLocalDescription(offer);
   }
 
   // ================================
-  // Helpers (apply limits, ICE, etc.)
+  // Helpers (ICE, etc.)
   // ================================
-
-  Future<void> _applySenderLimits({
-    required int maxKbps,
-    required int maxFps,
-  }) async {
-    try {
-      final sender = _videoTransceiver?.sender;
-      if (sender == null) return;
-
-      print(
-        '[client] applying sender limits: '
-        'maxBitrate=${maxKbps}kbps, maxFramerate=$maxFps',
-      );
-
-      await sender.setParameters(
-        RTCRtpParameters(
-          encodings: [
-            RTCRtpEncoding(
-              maxBitrate: maxKbps * 1000,
-              maxFramerate: maxFps,
-              scaleResolutionDownBy: 1.0,
-            ),
-          ],
-        ),
-      );
-
-      print('[client] sender limits applied');
-    } catch (e) {
-      print('[client] sender limits best-effort failed: $e');
-    }
-  }
 
   Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
     if (pc.iceGatheringState ==
@@ -759,7 +717,7 @@ await _pc!.setLocalDescription(offer);
     );
 
     print(
-      '[client] emit frame kind=$kind seq=${seq ?? "-"} '
+      '[client] emit frame kind=$kind seq=${seq ?? '-'} '
       'poses=${poses.length} size=${w}x$h',
     );
 
@@ -791,31 +749,6 @@ await _pc!.setLocalDescription(offer);
     print('[client] sending ACK seq=$seq over ctrl');
     c.send(RTCDataChannelMessage.fromBinary(out));
   }
-  // Low-latency SDP munging to hint initial bitrate for H.264
-  String _mungeVideoBitrateHints(String sdp, {required int kbps}) {
-    // Append or update x-google-* on H.264 fmtp lines (those with packetization-mode)
-    // Split safely on any newline variant without raw-string syntax pitfalls.
-    final lines = sdp.split(RegExp('(?:\r\n|\n|\r)'));
-    final out = <String>[];
-    for (final l in lines) {
-      if (l.startsWith('a=fmtp:') && l.contains('packetization-mode')) {
-        var nl = l;
-        if (!nl.contains('x-google-start-bitrate')) {
-          nl += ';x-google-start-bitrate=$kbps';
-        }
-        if (!nl.contains('x-google-min-bitrate')) {
-          nl += ';x-google-min-bitrate=${(kbps * 0.8).round()}';
-        }
-        if (!nl.contains('x-google-max-bitrate')) {
-          nl += ';x-google-max-bitrate=$kbps';
-        }
-        out.add(nl);
-      } else {
-        out.add(l);
-      }
-    }
-    return out.join('\r\n');
-  }
 
   // ================================
   // Diagnostics
@@ -838,7 +771,7 @@ await _pc!.setLocalDescription(offer);
       }
     }
 
-    print('--- ['+tag+'] SDP video ---\n${take.join('\n')}\n------------------------');
+    print('--- [' + tag + '] SDP video ---\n${take.join('\n')}\n------------------------');
   }
 
   void _startRtpStatsProbe() {
@@ -907,7 +840,9 @@ await _pc!.setLocalDescription(offer);
     try {
       await Helper.switchCamera(tracks.first);
       print('[client] camera switched');
-      await _applySenderLimits(maxKbps: maxBitrateKbps, maxFps: idealFps);
+      if (_videoTransceiver != null) {
+        await encoder.applyTo(_videoTransceiver!); // keep limits after switch
+      }
     } catch (e) {
       print('[client] switchCamera failed: $e');
     }
