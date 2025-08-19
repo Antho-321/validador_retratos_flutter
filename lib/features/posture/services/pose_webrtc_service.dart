@@ -217,47 +217,37 @@ class PoseWebRTCService {
     };
 
     // ─────────────────────────────────────────────────────────────
-    // Prefer codecs — PREFER H.264 (fallback allowed if missing)
-    // ─────────────────────────────────────────────────────────────
-    try {
-      final caps = await getRtpSenderCapabilities('video');
-      final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
+// Prefer codecs — low-latency H.264 (packetization-mode=1; baseline/CB)
+// ─────────────────────────────────────────────────────────────
+try {
+  final caps = await getRtpSenderCapabilities('video');
+  final all = caps?.codecs ?? const <RTCRtpCodecCapability>[];
 
-      // Pick H.264 variants first (prefer packetization-mode=1).
-      final h264First = all.where((c) {
-        final mime = (c.mimeType ?? '').toLowerCase();
-        final fmtp = (c.sdpFmtpLine ?? '').toLowerCase();
-        return mime == 'video/h264' &&
-            (fmtp.contains('packetization-mode=1') || fmtp.isEmpty);
-      }).toList();
+  bool _isLowLatencyH264(RTCRtpCodecCapability c) {
+    final mime = (c.mimeType ?? '').toLowerCase();
+    final fmtp = (c.sdpFmtpLine ?? '').toLowerCase();
+    return mime == 'video/h264'
+        && fmtp.contains('packetization-mode=1')
+        && (fmtp.contains('profile-level-id=42e01f') // constrained-baseline
+            || fmtp.contains('profile-level-id=42001f')); // baseline
+  }
 
-      if (h264First.isEmpty) {
-        print('[client] H.264 not supported on this device.');
-      } else {
-        // Put H.264 first, then append everything else for graceful fallback.
-        final preferred = <RTCRtpCodecCapability>[
-          ...h264First,
-          ...all.where((c) => !h264First.contains(c)),
-        ];
-        await _videoTransceiver!.setCodecPreferences(preferred);
-        print('[client] preferring H.264 (${h264First.length} variant(s))');
-      }
+  final h264LowLatency = all.where(_isLowLatencyH264).toList();
+  final h264Any = all.where((c) => (c.mimeType ?? '').toLowerCase() == 'video/h264').toList();
 
-      // Keep your existing sender params (bitrate/FPS) as-is
-      await _videoTransceiver!.sender.setParameters(
-        RTCRtpParameters(
-          encodings: [
-            RTCRtpEncoding(
-              maxFramerate: idealFps,
-              scaleResolutionDownBy: 1.0,
-              maxBitrate: 1_500 * 1000,
-            ),
-          ],
-        ),
-      );
-    } catch (e) {
-      print('[client] codec preference failed (best-effort): $e');
-    }
+  final preferred = <RTCRtpCodecCapability>[
+    ...h264LowLatency,
+    ...h264Any.where((c) => !h264LowLatency.contains(c)),
+    ...all.where((c) => (c.mimeType ?? '').toLowerCase() != 'video/h265'), // push HEVC to the end (or drop)
+  ];
+
+  if (preferred.isNotEmpty) {
+    await _videoTransceiver!.setCodecPreferences(preferred);
+    print('[client] preferring H.264 low-latency profile');
+  }
+} catch (e) {
+  print('[client] codec preference failed (best-effort): $e');
+}
 
     // Cap bitrate/FPS so encoder queue doesn't overflow.
     await _applySenderLimits(maxKbps: maxBitrateKbps, maxFps: idealFps);
