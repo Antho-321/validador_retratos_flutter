@@ -34,7 +34,7 @@ class PoseWebRTCService {
     String? turnUrl,
     String? turnUsername,
     String? turnPassword,
-    this.preferHevc = true,
+    this.preferHevc = false,
     // If true, pre-create DCs so OFFER contains m=application
     this.preCreateDataChannels = true,
     // If no results for N seconds, nudge server; try negotiated DCs only if
@@ -127,9 +127,11 @@ class PoseWebRTCService {
       'preferHevc=$preferHevc',
     );
 
+    // ── UPDATED: added iceCandidatePoolSize: 4 ──────────────────────────────
     final config = <String, dynamic>{
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
+      'iceCandidatePoolSize': 4,
       'iceServers': [
         if (_stunUrl != null && _stunUrl!.isNotEmpty) {'urls': _stunUrl},
         if (_turnUrl != null && _turnUrl!.isNotEmpty)
@@ -821,7 +823,7 @@ class PoseWebRTCService {
       }
     }
 
-    print('--- [$tag] SDP video ---\n${take.join('\n')}\n------------------------');
+    print('--- ['+tag+'] SDP video ---\n${take.join('\n')}\n------------------------');
   }
 
   void _startRtpStatsProbe() {
