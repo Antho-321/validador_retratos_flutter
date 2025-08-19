@@ -254,11 +254,12 @@ try {
 
     // Create offer and log SDP parts like the Python client
     print('[client] creating offer…');
-    final offer = await _pc!.createOffer({});
-    final hasApp = (offer.sdp?.contains('m=application') ?? false);
-    print('[client] offer created (has m=application: $hasApp )');
-
-    await _pc!.setLocalDescription(offer);
+var offer = await _pc!.createOffer({'offerToReceiveVideo': 0, 'offerToReceiveAudio': 0});
+final munged = _mungeVideoBitrateHints(offer.sdp!, kbps: maxBitrateKbps);
+offer = RTCSessionDescription(munged, offer.type);
+final hasApp = (offer.sdp?.contains('m=application') ?? false);
+print('[client] offer created (has m=application: $hasApp )');
+await _pc!.setLocalDescription(offer);
     print('[client] local description set');
 
     _dumpSdp('local-offer', offer.sdp);
@@ -789,6 +790,31 @@ try {
 
     print('[client] sending ACK seq=$seq over ctrl');
     c.send(RTCDataChannelMessage.fromBinary(out));
+  }
+  // Low-latency SDP munging to hint initial bitrate for H.264
+  String _mungeVideoBitrateHints(String sdp, {required int kbps}) {
+    // Append or update x-google-* on H.264 fmtp lines (those with packetization-mode)
+    // Split safely on any newline variant without raw-string syntax pitfalls.
+    final lines = sdp.split(RegExp('(?:\r\n|\n|\r)'));
+    final out = <String>[];
+    for (final l in lines) {
+      if (l.startsWith('a=fmtp:') && l.contains('packetization-mode')) {
+        var nl = l;
+        if (!nl.contains('x-google-start-bitrate')) {
+          nl += ';x-google-start-bitrate=$kbps';
+        }
+        if (!nl.contains('x-google-min-bitrate')) {
+          nl += ';x-google-min-bitrate=${(kbps * 0.8).round()}';
+        }
+        if (!nl.contains('x-google-max-bitrate')) {
+          nl += ';x-google-max-bitrate=$kbps';
+        }
+        out.add(nl);
+      } else {
+        out.add(l);
+      }
+    }
+    return out.join('\r\n');
   }
 
   // ================================
