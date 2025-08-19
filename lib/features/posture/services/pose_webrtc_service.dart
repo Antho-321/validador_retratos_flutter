@@ -164,28 +164,27 @@ class PoseWebRTCService {
 
     // Data channels: optionally pre-create so the OFFER carries m=application.
     if (preCreateDataChannels) {
-      _dc = await _pc!.createDataChannel(
-        'results',
-        RTCDataChannelInit()
-          ..ordered = false
-          ..maxRetransmits = 0,
-      );
-      print("[client] created datachannel 'results' id=${_dc!.id}");
-      _wireResults(_dc!);
+  // results: unordered + lossy, negotiated id=0
+  final lossy = RTCDataChannelInit()
+    ..negotiated = true
+    ..id = 0
+    ..ordered = false
+    ..maxRetransmits = 0;
+  _dc = await _pc!.createDataChannel('results', lossy);
+  print("[client] created negotiated DC 'results' id=0");
+  _wireResults(_dc!);
 
-      _ctrl = await _pc!.createDataChannel('ctrl', RTCDataChannelInit());
-      print("[client] created datachannel 'ctrl' id=${_ctrl!.id}");
-      _wireCtrl(_ctrl!);
-
-      print(
-        "[client] pre-offer datachannels 'results' (unordered, maxRetransmits=0) "
-        "and 'ctrl' (reliable) created",
-      );
-    } else {
-      print(
-        "[client] preCreateDataChannels=false → waiting for peer-announced channels",
-      );
-    }
+  // ctrl: reliable, negotiated id=1
+  final reliable = RTCDataChannelInit()
+    ..negotiated = true
+    ..id = 1
+    ..ordered = true;
+  _ctrl = await _pc!.createDataChannel('ctrl', reliable);
+  print("[client] created negotiated DC 'ctrl' id=1");
+  _wireCtrl(_ctrl!);
+} else {
+  print("[client] preCreateDataChannels=false → waiting for peer-announced channels");
+}
 
     // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
