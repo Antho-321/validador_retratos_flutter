@@ -21,7 +21,7 @@ Future<void> main() async {
 
   final poseService = PoseWebRTCService(
     offerUri: Uri.parse(offerUrl),
-    facingMode: 'user', // or 'environment'
+    facingMode: 'user', // fixed to front camera
     idealWidth: 640,
     idealHeight: 480,
     idealFps: 15,
@@ -63,16 +63,6 @@ class _PoseAppState extends State<PoseApp> {
       home: Scaffold(
         appBar: AppBar(
           title: const Text('Pose WebRTC Demo'),
-          actions: [
-            IconButton(
-              icon: const Icon(Icons.cameraswitch),
-              tooltip: 'Switch camera',
-              onPressed: () async {
-                await svc.switchCamera();
-                setState(() => _mirror = !_mirror); // toggle mirror hint
-              },
-            ),
-          ],
         ),
         body: Stack(
           children: [
