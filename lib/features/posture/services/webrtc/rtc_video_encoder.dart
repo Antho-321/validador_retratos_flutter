@@ -176,32 +176,43 @@ class RtcVideoEncoder {
       final encs = <RTCRtpEncoding>[];
 
       if (enableSimulcast && (simulcastScales != null) && simulcastScales.isNotEmpty) {
-        // First layer should be 1.0 (full res). Others are downscaled.
+        // Simulcast path (keeps previous behavior; assign rids per layer)
+        const rids = ['q', 'h', 'f']; // low, mid, full — order is arbitrary
         for (int i = 0; i < simulcastScales.length; i++) {
           final scale = simulcastScales[i];
-          // Distribute bitrate rudimentarily (highest gets most).
-          final frac = (i == 0) ? 0.6 : (0.4 / math.max(1, simulcastScales.length - 1));
+          final frac = (i == simulcastScales.length - 1) ? 0.6 : (0.4 / (simulcastScales.length - 1).clamp(1, 999));
           encs.add(
             RTCRtpEncoding(
+              rid: rids[i % rids.length],
+              active: true,
               scaleResolutionDownBy: scale,
               maxBitrate: (maxKbps * 1000 * frac).round(),
               maxFramerate: maxFps,
+              // Temporal layers often ignored for H.264; harmless if unsupported
+              numTemporalLayers: 1,
             ),
           );
         }
       } else {
+        // Single-stream, low-latency path (your snippet)
         encs.add(
           RTCRtpEncoding(
+            rid: 'f',
+            active: true,
             scaleResolutionDownBy: 1.0,
             maxBitrate: maxKbps * 1000,
             maxFramerate: maxFps,
+            numTemporalLayers: 1,
           ),
         );
       }
 
-      await sender.setParameters(RTCRtpParameters(encodings: encs));
+      // Safer pattern: read–modify–write
+      final params = sender.parameters; // synchronous getter in flutter_webrtc
+      params.encodings = encs;
+      await sender.setParameters(params);
     } catch (_) {
-      // Best-effort; older plugin versions may not support all fields.
+      // Best-effort: some platforms ignore/limit setParameters fields.
     }
   }
 
