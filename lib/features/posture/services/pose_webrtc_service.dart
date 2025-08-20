@@ -40,7 +40,7 @@ class PoseWebRTCService {
     this.preCreateDataChannels = true,
     // If no results for N seconds, nudge server; try negotiated DCs only if
     // channels are not open
-    this.negotiatedFallbackAfterSeconds = 5,
+    this.negotiatedFallbackAfterSeconds = 3,
     // NEW: master logging switch — when false, this class prints nothing
     this.logEverything = false,
     // NEW: strip FEC payloads from video m-section to reduce latency
