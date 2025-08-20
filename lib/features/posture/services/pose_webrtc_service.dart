@@ -16,7 +16,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
-import 'webrtc/rtc_video_encoder.dart'; // ← NEW: centralized encoder configuration
+import 'webrtc/rtc_video_encoder.dart'; // ← centralized encoder configuration
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
@@ -41,7 +41,9 @@ class PoseWebRTCService {
     // If no results for N seconds, nudge server; try negotiated DCs only if
     // channels are not open
     this.negotiatedFallbackAfterSeconds = 5,
-    RtcVideoEncoder? encoder, // ← NEW (DI optional)
+    // NEW: master logging switch — when false, this class prints nothing
+    this.logEverything = false,
+    RtcVideoEncoder? encoder, // (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
@@ -63,12 +65,16 @@ class PoseWebRTCService {
   final bool preCreateDataChannels;
   final int negotiatedFallbackAfterSeconds;
 
+  /// When true, log detailed diagnostics; when false, suppress ALL prints
+  /// from this class (third-party/native logs may still appear).
+  final bool logEverything;
+
   final String? _stunUrl;
   final String? _turnUrl;
   final String? _turnUsername;
   final String? _turnPassword;
 
-  // ← NEW
+  // ← centralized encoder
   final RtcVideoEncoder encoder;
 
   RTCPeerConnection? _pc;
@@ -93,15 +99,22 @@ class PoseWebRTCService {
   int? _expectedSeq;
   int _parseErrors = 0;
 
+  // Simple logging helper that respects [logEverything]
+  void _log(Object? message) {
+    if (!logEverything) return;
+    // ignore: avoid_print
+    print(message);
+  }
+
   // ================================
   // Lifecycle
   // ================================
 
   Future<void> init() async {
-    print('[client] init()');
+    _log('[client] init()');
     await localRenderer.initialize();
     await remoteRenderer.initialize();
-    print('[client] renderers initialized');
+    _log('[client] renderers initialized');
 
     final mediaConstraints = <String, dynamic>{
       'audio': false,
@@ -120,19 +133,19 @@ class PoseWebRTCService {
       },
     };
 
-    print('[client] getUserMedia constraints: ${mediaConstraints['video']}');
+    _log('[client] getUserMedia constraints: ${mediaConstraints['video']}');
 
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     localRenderer.srcObject = _localStream;
 
-    print(
+    _log(
       '[client] local stream acquired: '
       'videoTracks=${_localStream!.getVideoTracks().length}',
     );
   }
 
   Future<void> connect() async {
-    print(
+    _log(
       '[client] connect() STUN=${_stunUrl ?? '-'} '
       'TURN=${_turnUrl != null ? 'True' : 'False'} '
       'preferHevc=$preferHevc',
@@ -155,22 +168,22 @@ class PoseWebRTCService {
     };
 
     _pc = await createPeerConnection(config);
-    print('[client] RTCPeerConnection created');
+    _log('[client] RTCPeerConnection created');
 
     _pc!.onIceGatheringState = (state) {
-      print('[client] ICE gathering: $state');
+      _log('[client] ICE gathering: $state');
     };
     _pc!.onIceConnectionState = (state) {
-      print('[client] ICE connection: $state');
+      _log('[client] ICE connection: $state');
     };
     _pc!.onSignalingState = (state) {
-      print('[client] signaling state: $state');
+      _log('[client] signaling state: $state');
     };
     _pc!.onConnectionState = (state) {
-      print('[client] peer connection state: $state');
+      _log('[client] peer connection state: $state');
     };
     _pc!.onRenegotiationNeeded = () {
-      print('[client] on-negotiation-needed');
+      _log('[client] on-negotiation-needed');
     };
 
     // Data channels: optionally pre-create so the OFFER carries m=application.
@@ -182,7 +195,7 @@ class PoseWebRTCService {
         ..ordered = false
         ..maxRetransmits = 0;
       _dc = await _pc!.createDataChannel('results', lossy);
-      print("[client] created negotiated DC 'results' id=0");
+      _log("[client] created negotiated DC 'results' id=0");
       _wireResults(_dc!);
 
       // ctrl: reliable, negotiated id=1
@@ -191,15 +204,15 @@ class PoseWebRTCService {
         ..id = 1
         ..ordered = true;
       _ctrl = await _pc!.createDataChannel('ctrl', reliable);
-      print("[client] created negotiated DC 'ctrl' id=1");
+      _log("[client] created negotiated DC 'ctrl' id=1");
       _wireCtrl(_ctrl!);
     } else {
-      print("[client] preCreateDataChannels=false → waiting for peer-announced channels");
+      _log("[client] preCreateDataChannels=false → waiting for peer-announced channels");
     }
 
     // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
-      print("[client] datachannel announced by peer: ${ch.label} id=${ch.id}");
+      _log("[client] datachannel announced by peer: ${ch.label} id=${ch.id}");
       if (ch.label == 'results') {
         _dc = ch;
         _wireResults(ch);
@@ -215,15 +228,15 @@ class PoseWebRTCService {
       track: videoTrack,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.SendOnly),
     );
-    print('[client] video transceiver added as SendOnly');
+    _log('[client] video transceiver added as SendOnly');
 
     _pc!.onTrack = (RTCTrackEvent e) {
-      print(
+      _log(
         '[client] onTrack kind=${e.track.kind} streams=${e.streams.length}',
       );
       if (e.track.kind == 'video' && e.streams.isNotEmpty) {
         remoteRenderer.srcObject = e.streams.first;
-        print('[client] remote video bound to renderer');
+        _log('[client] remote video bound to renderer');
       }
     };
 
@@ -233,7 +246,7 @@ class PoseWebRTCService {
     await encoder.applyTo(_videoTransceiver!);
 
     // Create offer and log SDP parts like the Python client
-    print('[client] creating offer…');
+    _log('[client] creating offer…');
     var offer = await _pc!.createOffer({
       'offerToReceiveVideo': 0,
       'offerToReceiveAudio': 0,
@@ -247,9 +260,9 @@ class PoseWebRTCService {
     offer = RTCSessionDescription(munged, offer.type);
 
     final hasApp = (offer.sdp?.contains('m=application') ?? false);
-    print('[client] offer created (has m=application: $hasApp )');
+    _log('[client] offer created (has m=application: $hasApp )');
     await _pc!.setLocalDescription(offer);
-    print('[client] local description set');
+    _log('[client] local description set');
 
     _dumpSdp('local-offer', offer.sdp);
 
@@ -257,7 +270,7 @@ class PoseWebRTCService {
 
     final local = await _pc!.getLocalDescription();
 
-    print('[client] posting offer to server…');
+    _log('[client] posting offer to server…');
     final res = await http.post(
       offerUri,
       headers: const {'content-type': 'application/json'},
@@ -265,7 +278,7 @@ class PoseWebRTCService {
     );
 
     if (res.statusCode < 200 || res.statusCode >= 300) {
-      print('[client] signaling failed: ${res.statusCode} ${res.body}');
+      _log('[client] signaling failed: ${res.statusCode} ${res.body}');
       throw Exception('Signaling failed: ${res.statusCode} ${res.body}');
     }
 
@@ -278,11 +291,11 @@ class PoseWebRTCService {
     );
 
     final ansSdp = (ansMap['sdp'] as String?) ?? '';
-    print(
+    _log(
       "[client] remote answer has m=application: "
       "${ansSdp.contains('m=application')}",
     );
-    print('[client] remote answer set');
+    _log('[client] remote answer set');
 
     _dumpSdp('remote-answer', ansSdp);
 
@@ -307,7 +320,7 @@ class PoseWebRTCService {
       if (prev != null) prev(s);
       if (s == RTCIceGatheringState.RTCIceGatheringStateComplete &&
           !c.isCompleted) {
-        print('[client] ICE gathering complete');
+        _log('[client] ICE gathering complete');
         c.complete();
         pc.onIceGatheringState = prev;
       }
@@ -315,7 +328,7 @@ class PoseWebRTCService {
 
     Timer(const Duration(seconds: 2), () {
       if (!c.isCompleted) {
-        print('[client] ICE gathering timeout — continuing');
+        _log('[client] ICE gathering timeout — continuing');
         c.complete();
         pc.onIceGatheringState = prev;
       }
@@ -331,9 +344,9 @@ class PoseWebRTCService {
   void _wireResults(RTCDataChannel ch) {
     ch.onDataChannelState = (s) {
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
-        print("[client] 'results' open (id=${ch.id})");
+        _log("[client] 'results' open (id=${ch.id})");
       } else if (s == RTCDataChannelState.RTCDataChannelClosed) {
-        print("[client] 'results' closed (id=${ch.id})");
+        _log("[client] 'results' closed (id=${ch.id})");
       }
     };
 
@@ -344,11 +357,11 @@ class PoseWebRTCService {
         final head = bin.length >= 2
             ? '${bin[0].toRadixString(16)} ${bin[1].toRadixString(16)}'
             : '<short>';
-        print("[client] results RECV bin len=${bin.length} head=$head");
+        _log("[client] results RECV bin len=${bin.length} head=$head");
       } else {
         final t = m.text ?? '';
         final preview = t.length <= 48 ? t : t.substring(0, 48);
-        print(
+        _log(
           "[client] results RECV txt len=${t.length} "
           "preview='${preview.replaceAll('\n', ' ')}'",
         );
@@ -359,14 +372,14 @@ class PoseWebRTCService {
         try {
           _handlePoseBinary(m.binary);
         } catch (e) {
-          print('[client] error parsing results packet: $e');
+          _log('[client] error parsing results packet: $e');
           _sendCtrlKF();
         }
       } else {
         final txtRaw = m.text ?? '';
         final txt = txtRaw.trim();
         if (txt.toUpperCase() == 'KF') {
-          print(
+          _log(
             "[client] 'results' got KF request (string) — ignoring on client",
           );
         } else {
@@ -379,20 +392,20 @@ class PoseWebRTCService {
   void _wireCtrl(RTCDataChannel ch) {
     ch.onDataChannelState = (s) {
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
-        print("[client] 'ctrl' open (id=${ch.id})");
+        _log("[client] 'ctrl' open (id=${ch.id})");
         _nudgeServer();
       } else if (s == RTCDataChannelState.RTCDataChannelClosed) {
-        print("[client] 'ctrl' closed (id=${ch.id})");
+        _log("[client] 'ctrl' closed (id=${ch.id})");
       }
     };
 
     ch.onMessage = (RTCDataChannelMessage m) {
       if (m.isBinary) {
-        print('[client] ctrl RECV bin len=${m.binary.length}');
+        _log('[client] ctrl RECV bin len=${m.binary.length}');
       } else {
         final t = m.text ?? '';
         final prev = t.length <= 48 ? t : t.substring(0, 48);
-        print(
+        _log(
           "[client] ctrl RECV txt len=${t.length} "
           "preview='${prev.replaceAll('\n', ' ')}'",
         );
@@ -405,7 +418,7 @@ class PoseWebRTCService {
     if (c == null) return;
     if (c.state != RTCDataChannelState.RTCDataChannelOpen) return;
 
-    print('[client] ctrl nudge: HELLO + KF');
+    _log('[client] ctrl nudge: HELLO + KF');
     c.send(RTCDataChannelMessage('HELLO'));
     c.send(RTCDataChannelMessage('KF'));
   }
@@ -417,7 +430,7 @@ class PoseWebRTCService {
     // Only attempt if channels are absent or closed.
     if (_dc?.state == RTCDataChannelState.RTCDataChannelOpen ||
         _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen) {
-      print('[client] negotiated fallback skipped — channels already open');
+      _log('[client] negotiated fallback skipped — channels already open');
       return;
     }
 
@@ -448,10 +461,10 @@ class PoseWebRTCService {
         }
 
         final ch = await pc.createDataChannel(label, init);
-        print("[client] created negotiated DC '$label' id=$id");
+        _log("[client] created negotiated DC '$label' id=$id");
         return ch;
       } catch (e) {
-        print("[client] failed to create negotiated DC '$label' id=$id: $e");
+        _log("[client] failed to create negotiated DC '$label' id=$id: $e");
         return null;
       }
     }
@@ -460,7 +473,7 @@ class PoseWebRTCService {
     final newCtrl = await _tryCreate('ctrl', 1, lossy: false);
 
     if (newResults == null || newCtrl == null) {
-      print(
+      _log(
         "[client] negotiated fallback aborted — "
         "could not create DCs (ids may be in use)",
       );
@@ -488,9 +501,9 @@ class PoseWebRTCService {
         _framesCtrl.add(frame);
       }
 
-      print('[client] results: JSON pose(s) -> emitted frame');
+      _log('[client] results: JSON pose(s) -> emitted frame');
     } catch (e) {
-      print('[client] JSON pose parse error: $e -> requesting KF');
+      _log('[client] JSON pose parse error: $e -> requesting KF');
       _sendCtrlKF();
     }
   }
@@ -508,7 +521,7 @@ class PoseWebRTCService {
         _lastPoses = parsed.poses;
         _expectedSeq = null;
 
-        print(
+        _log(
           '[client] results: PO ${parsed.poses.length} pose(s) '
           '${parsed.w}x${parsed.h}',
         );
@@ -522,7 +535,7 @@ class PoseWebRTCService {
         _lastPoses = parsed.poses;
 
         if (_expectedSeq != null && parsed.seq != _expectedSeq) {
-          print(
+          _log(
             '[client] PD seq mismatch: got=${parsed.seq} expected=$_expectedSeq -> requesting KF',
           );
           _sendCtrlKF();
@@ -531,7 +544,7 @@ class PoseWebRTCService {
 
         _expectedSeq = (parsed.seq + 1) & 0xFFFF;
 
-        print(
+        _log(
           '[client] results: PD seq=${parsed.seq} '
           '${parsed.poses.length} pose(s) ${parsed.w}x${parsed.h}',
         );
@@ -542,14 +555,14 @@ class PoseWebRTCService {
         return;
       }
 
-      print(
+      _log(
         '[client] unknown binary packet head: '
         '${b[0].toRadixString(16)} ${b[1].toRadixString(16)} -> KF',
       );
       _sendCtrlKF();
     } catch (e) {
       _parseErrors++;
-      print('[client] binary parse error #$_parseErrors: $e -> KF');
+      _log('[client] binary parse error #$_parseErrors: $e -> KF');
       _sendCtrlKF();
     }
   }
@@ -716,7 +729,7 @@ class PoseWebRTCService {
       posesPx: poses,
     );
 
-    print(
+    _log(
       '[client] emit frame kind=$kind seq=${seq ?? '-'} '
       'poses=${poses.length} size=${w}x$h',
     );
@@ -731,7 +744,7 @@ class PoseWebRTCService {
     final c = _ctrl;
     if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
 
-    print('[client] sending KF request over ctrl');
+    _log('[client] sending KF request over ctrl');
     c.send(RTCDataChannelMessage('KF'));
   }
 
@@ -746,7 +759,7 @@ class PoseWebRTCService {
     out[3] = (seq & 0xFF);
     out[4] = ((seq >> 8) & 0xFF);
 
-    print('[client] sending ACK seq=$seq over ctrl');
+    _log('[client] sending ACK seq=$seq over ctrl');
     c.send(RTCDataChannelMessage.fromBinary(out));
   }
 
@@ -771,7 +784,7 @@ class PoseWebRTCService {
       }
     }
 
-    print('--- [' + tag + '] SDP video ---\n${take.join('\n')}\n------------------------');
+    _log('--- [' + tag + '] SDP video ---\n${take.join('\n')}\n------------------------');
   }
 
   void _startRtpStatsProbe() {
@@ -788,14 +801,14 @@ class PoseWebRTCService {
                   r.values['mediaType'] == 'video')) {
             final p = r.values['packetsSent'];
             final b = r.values['bytesSent'];
-            print('[RTP] video packetsSent=$p bytesSent=$b');
+            _log('[RTP] video packetsSent=$p bytesSent=$b');
           }
         }
       } catch (e) {
-        print('[client] stats probe error: $e');
+        _log('[client] stats probe error: $e');
       }
     });
-    print('[client] RTP stats probe started (2s)');
+    _log('[client] RTP stats probe started (2s)');
   }
 
   void _startNoResultsGuard() {
@@ -813,7 +826,7 @@ class PoseWebRTCService {
 
         // If channels are open, don't try creating negotiated ones — just nudge.
         if (dcOpen || ctrlOpen) {
-          print(
+          _log(
             '[client] no results yet, channels open → re-nudge (HELLO+KF)',
           );
           _nudgeServer();
@@ -821,7 +834,7 @@ class PoseWebRTCService {
         }
 
         // Channels not open: try negotiated(0/1) once.
-        print(
+        _log(
           '[client] no results and channels not open → trying negotiated DCs (0/1)',
         );
         await _recreateNegotiatedChannels();
@@ -839,12 +852,12 @@ class PoseWebRTCService {
 
     try {
       await Helper.switchCamera(tracks.first);
-      print('[client] camera switched');
+      _log('[client] camera switched');
       if (_videoTransceiver != null) {
         await encoder.applyTo(_videoTransceiver!); // keep limits after switch
       }
     } catch (e) {
-      print('[client] switchCamera failed: $e');
+      _log('[client] switchCamera failed: $e');
     }
   }
 
@@ -852,7 +865,7 @@ class PoseWebRTCService {
 
   Future<void> dispose() async {
     _disposed = true;
-    print('[client] dispose()');
+    _log('[client] dispose()');
 
     try {
       await _ctrl?.close();
@@ -877,6 +890,6 @@ class PoseWebRTCService {
     _dcGuardTimer?.cancel();
     await _framesCtrl.close();
 
-    print('[client] disposed');
+    _log('[client] disposed');
   }
 }

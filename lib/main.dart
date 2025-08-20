@@ -25,6 +25,8 @@ Future<void> main() async {
     idealWidth: 640,
     idealHeight: 480,
     idealFps: 15,
+    // Optional: silence service logs too
+    logEverything: false,
   );
 
   await poseService.init();
@@ -45,25 +47,9 @@ class _PoseAppState extends State<PoseApp> {
   // Assume front camera first (mirrored UI)
   bool _mirror = true;
 
-  // ── Log UI state ───────────────────────────────────────────
-  bool _showLogArea = true;
-  final _logScrollCtrl = ScrollController();
-  String _uiLog = 'Hello world\n';
-
-  void appendLog(String msg) {
-    setState(() => _uiLog += '$msg\n');
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_logScrollCtrl.hasClients) {
-        _logScrollCtrl.jumpTo(_logScrollCtrl.position.maxScrollExtent);
-      }
-    });
-  }
-  // ───────────────────────────────────────────────────────────
-
   @override
   void dispose() {
     widget.poseService.close();
-    _logScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -86,11 +72,6 @@ class _PoseAppState extends State<PoseApp> {
                 setState(() => _mirror = !_mirror); // toggle mirror hint
               },
             ),
-            IconButton(
-              icon: Icon(_showLogArea ? Icons.notes : Icons.notes_outlined),
-              tooltip: _showLogArea ? 'Hide log' : 'Show log',
-              onPressed: () => setState(() => _showLogArea = !_showLogArea),
-            ),
           ],
         ),
         body: Stack(
@@ -107,7 +88,7 @@ class _PoseAppState extends State<PoseApp> {
             // 2) Landmarks overlay — SAME BOX & FIT as the full-screen preview
             Positioned.fill(
               child: IgnorePointer(
-                child: RepaintBoundary( // <-- add this
+                child: RepaintBoundary(
                   child: PoseOverlayFast(
                     latest: svc.latestFrame, // ValueNotifier<PoseFrame?>
                     mirror: _mirror,         // must match the preview
@@ -132,29 +113,6 @@ class _PoseAppState extends State<PoseApp> {
                 ),
               ),
             ),
-
-            // 4) Simple log/console area (blank space to print any log)
-            if (_showLogArea)
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                height: 120,
-                child: Container(
-                  padding: const EdgeInsets.all(8),
-                  color: Colors.black54,
-                  child: SingleChildScrollView(
-                    controller: _logScrollCtrl,
-                    child: Text(
-                      _uiLog.isEmpty ? ' ' : _uiLog, // blank by default
-                      style: const TextStyle(
-                        fontFamily: 'monospace',
-                        fontSize: 12,
-                      ),
-                    ),
-                  ),
-                ),
-              ),
           ],
         ),
       ),
