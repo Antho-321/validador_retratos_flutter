@@ -143,6 +143,16 @@ class PoseWebRTCService {
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     localRenderer.srcObject = _localStream;
 
+    // ↓ NEW: hint encoder/algorithms to optimize for motion/latency
+    try {
+      final dynamic dtrack = _localStream!.getVideoTracks().first;
+      // Some flutter_webrtc builds expose this; safe dynamic call.
+      // ignore: avoid_dynamic_calls
+      await dtrack.setVideoContentHint('motion');
+    } catch (_) {
+      // Older flutter_webrtc versions don't expose setVideoContentHint — ignore.
+    }
+
     _log(
       '[client] local stream acquired: '
       'videoTracks=${_localStream!.getVideoTracks().length}',
@@ -595,48 +605,54 @@ class PoseWebRTCService {
   // ================================
 
   void _dumpSdp(String tag, String? sdp) {
-    if (sdp == null) return;
-    final lines = sdp.split(RegExp(r'\r?\n'));
+  if (!logEverything || sdp == null) return;
 
-    final take = <String>[];
-    bool inVideo = false;
+  // Split SDP into lines safely (CRLF or LF)
+  final lines = sdp.split(RegExp(r'\r?\n'));
 
-    for (final l in lines) {
-      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
-      if (inVideo &&
-          (l.startsWith('m=video') ||
-              l.startsWith('a=rtpmap:') ||
-              l.startsWith('a=fmtp:'))) {
-        take.add(l);
-      }
+  final take = <String>[];
+  var inVideo = false;
+
+  for (final l in lines) {
+    if (l.startsWith('m=')) {
+      inVideo = l.startsWith('m=video');
     }
-
-    _log('--- [' + tag + '] SDP video ---\n${take.join('\n')}\n------------------------');
+    if (inVideo &&
+        (l.startsWith('m=video') ||
+         l.startsWith('a=rtpmap:') ||
+         l.startsWith('a=fmtp:'))) {
+      take.add(l);
+    }
   }
 
-  void _startRtpStatsProbe() {
-    _rtpStatsTimer?.cancel();
-    _rtpStatsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-      final pc = _pc;
-      if (pc == null) return;
+  _log('--- [$tag] SDP video ---\n${take.join('\n')}\n------------------------');
+}
 
-      try {
-        final reports = await pc.getStats();
-        for (final r in reports) {
-          if (r.type == 'outbound-rtp' &&
-              (r.values['kind'] == 'video' ||
-                  r.values['mediaType'] == 'video')) {
-            final p = r.values['packetsSent'];
-            final b = r.values['bytesSent'];
-            _log('[RTP] video packetsSent=$p bytesSent=$b');
-          }
+void _startRtpStatsProbe() {
+  if (!logEverything) return;
+
+  _rtpStatsTimer?.cancel();
+  _rtpStatsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+    final pc = _pc;
+    if (pc == null) return;
+
+    try {
+      final reports = await pc.getStats();
+      for (final r in reports) {
+        if (r.type == 'outbound-rtp' &&
+            (r.values['kind'] == 'video' || r.values['mediaType'] == 'video')) {
+          final p = r.values['packetsSent'];
+          final b = r.values['bytesSent'];
+          _log('[RTP] video packetsSent=$p bytesSent=$b');
         }
-      } catch (e) {
-        _log('[client] stats probe error: $e');
       }
-    });
-    _log('[client] RTP stats probe started (2s)');
-  }
+    } catch (e) {
+      _log('[client] stats probe error: $e');
+    }
+  });
+
+  _log('[client] RTP stats probe started (2s)');
+}
 
   void _startNoResultsGuard() {
     _dcGuardTimer?.cancel();
