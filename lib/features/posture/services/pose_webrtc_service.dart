@@ -7,7 +7,6 @@
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 
@@ -17,6 +16,7 @@ import 'package:http/http.dart' as http;
 
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
 import 'webrtc/rtc_video_encoder.dart'; // ← centralized encoder configuration
+import 'parsers/pose_binary_parser.dart'; // ← NEW: isolated PO/PD parser
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
@@ -94,10 +94,8 @@ class PoseWebRTCService {
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
-  // ─────── Binary PO/PD state ───────
-  List<List<Offset>>? _lastPoses;
-  int? _expectedSeq;
-  int _parseErrors = 0;
+  // ─────── Binary parser (isolated PO/PD) ───────
+  final PoseBinaryParser _parser = PoseBinaryParser();
 
   // Simple logging helper that respects [logEverything]
   void _log(Object? message) {
@@ -509,211 +507,33 @@ class PoseWebRTCService {
   }
 
   // ================================
-  // Binary PO/PD Parsing
+  // Binary PO/PD Parsing (via isolated parser)
   // ================================
 
   void _handlePoseBinary(Uint8List b) {
-    try {
-      if (b.length < 2) return;
+    final res = _parser.parse(b);
 
-      if (b[0] == 0x50 && b[1] == 0x4F) {
-        final parsed = _parsePO(b);
-        _lastPoses = parsed.poses;
-        _expectedSeq = null;
+    if (res is PoseParseOk) {
+      final pkt = res.packet;
+      // Emit to UI
+      _emitBinary(pkt.w, pkt.h, pkt.poses,
+          kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
+          seq: pkt.seq);
 
-        _log(
-          '[client] results: PO ${parsed.poses.length} pose(s) '
-          '${parsed.w}x${parsed.h}',
-        );
-
-        _emitBinary(parsed.w, parsed.h, parsed.poses, kind: 'PO', seq: null);
-        return;
+      // ACK PD
+      if (res.ackSeq != null) {
+        _sendCtrlAck(res.ackSeq!);
       }
-
-      if (b[0] == 0x50 && b[1] == 0x44) {
-        final parsed = _parsePD(b, _lastPoses);
-        _lastPoses = parsed.poses;
-
-        if (_expectedSeq != null && parsed.seq != _expectedSeq) {
-          _log(
-            '[client] PD seq mismatch: got=${parsed.seq} expected=$_expectedSeq -> requesting KF',
-          );
-          _sendCtrlKF();
-          _expectedSeq = null;
-        }
-
-        _expectedSeq = (parsed.seq + 1) & 0xFFFF;
-
-        _log(
-          '[client] results: PD seq=${parsed.seq} '
-          '${parsed.poses.length} pose(s) ${parsed.w}x${parsed.h}',
-        );
-
-        _emitBinary(parsed.w, parsed.h, parsed.poses,
-            kind: 'PD', seq: parsed.seq);
-        _sendCtrlAck(parsed.seq);
-        return;
+      // Ask for KF if parser detected a sequence hole
+      if (res.requestKeyframe) {
+        _log('[client] PD seq mismatch -> requesting KF');
+        _sendCtrlKF();
       }
-
-      _log(
-        '[client] unknown binary packet head: '
-        '${b[0].toRadixString(16)} ${b[1].toRadixString(16)} -> KF',
-      );
-      _sendCtrlKF();
-    } catch (e) {
-      _parseErrors++;
-      _log('[client] binary parse error #$_parseErrors: $e -> KF');
+    } else if (res is PoseParseNeedKF) {
+      _log('[client] parser says KF needed: ${res.reason}');
       _sendCtrlKF();
     }
   }
-
-  ({int w, int h, List<List<Offset>> poses}) _parsePO(Uint8List b) {
-    int i = 2;
-    if (i >= b.length) throw StateError('PO missing ver');
-    i++; // ver
-
-    if (i + 1 + 2 + 2 > b.length) {
-      throw StateError('PO header short');
-    }
-
-    final nposes = b[i];
-    i += 1;
-
-    final w = b[i] | (b[i + 1] << 8);
-    i += 2;
-
-    final h = b[i] | (b[i + 1] << 8);
-    i += 2;
-
-    final poses = <List<Offset>>[];
-
-    for (int p = 0; p < nposes; p++) {
-      if (i >= b.length) throw StateError('PO npts short');
-      final npts = b[i];
-      i += 1;
-
-      final need = npts * 4;
-      if (i + need > b.length) throw StateError('PO pts short');
-
-      final pts = <Offset>[];
-      for (int k = 0; k < npts; k++) {
-        final x = b[i] | (b[i + 1] << 8);
-        i += 2;
-        final y = b[i] | (b[i + 1] << 8);
-        i += 2;
-        pts.add(Offset(x.toDouble(), y.toDouble()));
-      }
-
-      poses.add(pts);
-    }
-
-    return (w: w, h: h, poses: poses);
-  }
-
-  ({int w, int h, int seq, List<List<Offset>> poses}) _parsePD(
-    Uint8List b,
-    List<List<Offset>>? prev,
-  ) {
-    int i = 2;
-    if (i + 1 + 1 + 2 + 1 + 2 + 2 > b.length) {
-      throw StateError('PD header short');
-    }
-
-    i++; // ver
-    final flags = b[i];
-    i += 1;
-
-    final seq = b[i] | (b[i + 1] << 8);
-    i += 2;
-
-    final nposes = b[i];
-    i += 1;
-
-    final w = b[i] | (b[i + 1] << 8);
-    i += 2;
-
-    final h = b[i] | (b[i + 1] << 8);
-    i += 2;
-
-    final isKey = (flags & 1) != 0;
-
-    if (isKey || prev == null) {
-      final poses = <List<Offset>>[];
-      for (int p = 0; p < nposes; p++) {
-        if (i >= b.length) throw StateError('PD KF npts short');
-        final npts = b[i];
-        i += 1;
-
-        final need = npts * 4;
-        if (i + need > b.length) throw StateError('PD KF pts short');
-
-        final pts = <Offset>[];
-        for (int k = 0; k < npts; k++) {
-          final x = b[i] | (b[i + 1] << 8);
-          i += 2;
-          final y = b[i] | (b[i + 1] << 8);
-          i += 2;
-          pts.add(Offset(x.toDouble(), y.toDouble()));
-        }
-        poses.add(pts);
-      }
-      return (w: w, h: h, seq: seq, poses: poses);
-    } else {
-      if (prev.length != nposes) {
-        throw StateError('PD Δ nposes mismatch');
-      }
-
-      final poses = <List<Offset>>[];
-      for (int p = 0; p < nposes; p++) {
-        if (i >= b.length) throw StateError('PD Δ npts short');
-        final npts = b[i];
-        i += 1;
-
-        final maskBytes = ((npts + 7) >> 3);
-        if (i + maskBytes > b.length) {
-          throw StateError('PD Δ mask short');
-        }
-
-        int mask = 0;
-        for (int mb = 0; mb < maskBytes; mb++) {
-          mask |= (b[i + mb] << (8 * mb));
-        }
-        i += maskBytes;
-
-        final prevPts = prev[p];
-        if (prevPts.length != npts) {
-          throw StateError('PD Δ npts mismatch');
-        }
-
-        final out = <Offset>[];
-        for (int j = 0; j < npts; j++) {
-          int x = prevPts[j].dx.toInt();
-          int y = prevPts[j].dy.toInt();
-
-          if (((mask >> j) & 1) == 1) {
-            if (i + 2 > b.length) {
-              throw StateError('PD Δ dxdy short');
-            }
-            int dx = _asInt8(b[i]);
-            i += 1;
-            int dy = _asInt8(b[i]);
-            i += 1;
-            x += dx;
-            y += dy;
-          }
-
-          x = math.max(0, math.min(w - 1, x));
-          y = math.max(0, math.min(h - 1, y));
-          out.add(Offset(x.toDouble(), y.toDouble()));
-        }
-
-        poses.add(out);
-      }
-      return (w: w, h: h, seq: seq, poses: poses);
-    }
-  }
-
-  int _asInt8(int u) => (u & 0x80) != 0 ? (u - 256) : u;
 
   void _emitBinary(
     int w,
