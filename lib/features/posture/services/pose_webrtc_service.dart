@@ -104,6 +104,13 @@ class PoseWebRTCService {
     print(message);
   }
 
+  // Prefer TURN over UDP to avoid TCP head-of-line blocking.
+  // add this tiny helper inside the class (private):
+  String _forceTurnUdp(String url) {
+    // only append if not already present
+    return url.contains('?') ? url : '$url?transport=udp';
+  }
+
   // ================================
   // Lifecycle
   // ================================
@@ -149,7 +156,7 @@ class PoseWebRTCService {
       'preferHevc=$preferHevc',
     );
 
-    // ── UPDATED: added iceCandidatePoolSize: 4 ──────────────────────────────
+    // ── UPDATED: added iceCandidatePoolSize: 4 and TURN over UDP ────────────
     final config = <String, dynamic>{
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
@@ -158,7 +165,7 @@ class PoseWebRTCService {
         if (_stunUrl != null && _stunUrl!.isNotEmpty) {'urls': _stunUrl},
         if (_turnUrl != null && _turnUrl!.isNotEmpty)
           {
-            'urls': _turnUrl,
+            'urls': _forceTurnUdp(_turnUrl!), // ← prefer UDP over TCP
             if ((_turnUsername ?? '').isNotEmpty) 'username': _turnUsername,
             if ((_turnPassword ?? '').isNotEmpty) 'credential': _turnPassword,
           },
