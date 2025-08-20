@@ -43,6 +43,8 @@ class PoseWebRTCService {
     this.negotiatedFallbackAfterSeconds = 5,
     // NEW: master logging switch — when false, this class prints nothing
     this.logEverything = false,
+    // NEW: strip FEC payloads from video m-section to reduce latency
+    this.stripFecFromSdp = true,
     RtcVideoEncoder? encoder, // (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
@@ -68,6 +70,10 @@ class PoseWebRTCService {
   /// When true, log detailed diagnostics; when false, suppress ALL prints
   /// from this class (third-party/native logs may still appear).
   final bool logEverything;
+
+  /// When true, strip FEC codecs (RED/ULPFEC/FlexFEC) from the video m-line
+  /// in the local SDP offer to minimize buffering/overhead.
+  final bool stripFecFromSdp;
 
   final String? _stunUrl;
   final String? _turnUrl;
@@ -272,7 +278,13 @@ class PoseWebRTCService {
       offer.sdp!,
       kbps: maxBitrateKbps,
     );
-    offer = RTCSessionDescription(munged, offer.type);
+
+    // ↓↓↓ NEW: Strip FEC codecs from the m=video section if requested
+    var sdp = munged;
+    if (stripFecFromSdp) {
+      sdp = _stripVideoFec(sdp);
+    }
+    offer = RTCSessionDescription(sdp, offer.type);
 
     final hasApp = (offer.sdp?.contains('m=application') ?? false);
     _log('[client] offer created (has m=application: $hasApp )');
@@ -605,54 +617,54 @@ class PoseWebRTCService {
   // ================================
 
   void _dumpSdp(String tag, String? sdp) {
-  if (!logEverything || sdp == null) return;
+    if (!logEverything || sdp == null) return;
 
-  // Split SDP into lines safely (CRLF or LF)
-  final lines = sdp.split(RegExp(r'\r?\n'));
+    // Split SDP into lines safely (CRLF or LF)
+    final lines = sdp.split(RegExp(r'\r?\n'));
 
-  final take = <String>[];
-  var inVideo = false;
+    final take = <String>[];
+    var inVideo = false;
 
-  for (final l in lines) {
-    if (l.startsWith('m=')) {
-      inVideo = l.startsWith('m=video');
+    for (final l in lines) {
+      if (l.startsWith('m=')) {
+        inVideo = l.startsWith('m=video');
+      }
+      if (inVideo &&
+          (l.startsWith('m=video') ||
+              l.startsWith('a=rtpmap:') ||
+              l.startsWith('a=fmtp:'))) {
+        take.add(l);
+      }
     }
-    if (inVideo &&
-        (l.startsWith('m=video') ||
-         l.startsWith('a=rtpmap:') ||
-         l.startsWith('a=fmtp:'))) {
-      take.add(l);
-    }
+
+    _log('--- [$tag] SDP video ---\n${take.join('\n')}\n------------------------');
   }
 
-  _log('--- [$tag] SDP video ---\n${take.join('\n')}\n------------------------');
-}
+  void _startRtpStatsProbe() {
+    if (!logEverything) return;
 
-void _startRtpStatsProbe() {
-  if (!logEverything) return;
+    _rtpStatsTimer?.cancel();
+    _rtpStatsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
+      final pc = _pc;
+      if (pc == null) return;
 
-  _rtpStatsTimer?.cancel();
-  _rtpStatsTimer = Timer.periodic(const Duration(seconds: 2), (_) async {
-    final pc = _pc;
-    if (pc == null) return;
-
-    try {
-      final reports = await pc.getStats();
-      for (final r in reports) {
-        if (r.type == 'outbound-rtp' &&
-            (r.values['kind'] == 'video' || r.values['mediaType'] == 'video')) {
-          final p = r.values['packetsSent'];
-          final b = r.values['bytesSent'];
-          _log('[RTP] video packetsSent=$p bytesSent=$b');
+      try {
+        final reports = await pc.getStats();
+        for (final r in reports) {
+          if (r.type == 'outbound-rtp' &&
+              (r.values['kind'] == 'video' || r.values['mediaType'] == 'video')) {
+            final p = r.values['packetsSent'];
+            final b = r.values['bytesSent'];
+            _log('[RTP] video packetsSent=$p bytesSent=$b');
+          }
         }
+      } catch (e) {
+        _log('[client] stats probe error: $e');
       }
-    } catch (e) {
-      _log('[client] stats probe error: $e');
-    }
-  });
+    });
 
-  _log('[client] RTP stats probe started (2s)');
-}
+    _log('[client] RTP stats probe started (2s)');
+  }
 
   void _startNoResultsGuard() {
     _dcGuardTimer?.cancel();
@@ -683,6 +695,52 @@ void _startRtpStatsProbe() {
         await _recreateNegotiatedChannels();
       },
     );
+  }
+
+  // ================================
+  // SDP munging helpers (FEC strip)
+  // ================================
+
+  String _stripVideoFec(String sdp) {
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    final fecNames = {'red', 'ulpfec', 'flexfec-03'};
+    final fecPts = <String>{};
+
+    // Pass 1: collect payload types for FEC codecs
+    for (final l in lines) {
+      final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+      if (m != null) {
+        final pt = m.group(1)!;
+        final codec = (m.group(2) ?? '').toLowerCase();
+        if (fecNames.contains(codec)) fecPts.add(pt);
+      }
+    }
+
+    if (fecPts.isEmpty) return sdp; // nothing to do
+
+    // Pass 2: rebuild lines skipping FEC payloads and their attributes
+    final out = <String>[];
+    for (final l in lines) {
+      if (l.startsWith('m=video')) {
+        final parts = l.split(' ');
+        final head = parts.take(3);
+        final payloads = parts.skip(3).where((pt) => !fecPts.contains(pt));
+        out.add([...head, ...payloads].join(' '));
+        continue;
+      }
+
+      bool isFecSpecific = false;
+      for (final prefix in ['a=rtpmap:', 'a=fmtp:', 'a=rtcp-fb:']) {
+        final m = RegExp('^' + RegExp.escape(prefix) + r'(\d+)').firstMatch(l);
+        if (m != null && fecPts.contains(m.group(1)!)) {
+          isFecSpecific = true;
+          break;
+        }
+      }
+      if (!isFecSpecific) out.add(l);
+    }
+
+    return out.join('\r\n');
   }
 
   // ================================
