@@ -61,9 +61,6 @@ class _PoseAppState extends State<PoseApp> {
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
       home: Scaffold(
-        appBar: AppBar(
-          title: const Text('Pose WebRTC Demo'),
-        ),
         body: Stack(
           children: [
             // 1) FULL-SCREEN LOCAL CAMERA (always visible)
