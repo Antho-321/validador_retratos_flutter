@@ -45,6 +45,9 @@ class PoseWebRTCService {
     this.logEverything = true,
     // NEW: strip FEC payloads from video m-section to reduce latency
     this.stripFecFromSdp = true,
+    // NEW: also strip RTX/NACK/REMB, keep only transport-cc for BWE
+    this.stripRtxAndNackFromSdp = true,
+    this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'], // primary='pose', extra='face'
     RtcVideoEncoder? encoder, // (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
@@ -75,6 +78,12 @@ class PoseWebRTCService {
   /// When true, strip FEC codecs (RED/ULPFEC/FlexFEC) from the video m-line
   /// in the local SDP offer to minimize buffering/overhead.
   final bool stripFecFromSdp;
+
+  /// When true, strip RTX payloads and generic NACK/PLI/FIR/REMB; keep only transport-cc.
+  final bool stripRtxAndNackFromSdp;
+
+  /// If [stripRtxAndNackFromSdp] is true, keep only a=rtcp-fb:* transport-cc.
+  final bool keepTransportCcOnly;
 
   /// Tasks to request from the server's adapters (e.g., ['pose'], or ['pose','face'])
   final List<String> requestedTasks;
@@ -342,6 +351,15 @@ class PoseWebRTCService {
     var sdp = munged;
     if (stripFecFromSdp) {
       sdp = _stripVideoFec(sdp);
+    }
+    // ↓↓↓ NEW: Also strip RTX/NACK/REMB (keep transport-cc)
+    if (stripRtxAndNackFromSdp) {
+      sdp = _stripVideoRtxNackAndRemb(
+        sdp,
+        dropNack: true,
+        dropRtx: true,
+        keepTransportCcOnly: keepTransportCcOnly,
+      );
     }
     offer = RTCSessionDescription(sdp, offer.type);
 
@@ -829,6 +847,60 @@ class PoseWebRTCService {
       if (!isFecSpecific) out.add(l);
     }
 
+    return out.join('\r\n');
+  }
+
+  // ================================
+  // SDP munging helpers (RTX/NACK/REMB strip)
+  // ================================
+
+  String _stripVideoRtxNackAndRemb(String sdp,
+      {bool dropNack = true, bool dropRtx = true, bool keepTransportCcOnly = true}) {
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    final rtxPts = <String>{};
+
+    // 1) collect RTX payload types
+    for (final l in lines) {
+      final m = RegExp(r'^a=rtpmap:(\d+)\s+rtx/').firstMatch(l);
+      if (m != null) rtxPts.add(m.group(1)!);
+    }
+
+    bool inVideo = false;
+    final out = <String>[];
+    for (final l in lines) {
+      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
+
+      if (inVideo) {
+        // Remove RTX payload IDs from m=video line
+        if (dropRtx && l.startsWith('m=video')) {
+          final parts = l.split(' ');
+          final head = parts.take(3);
+          final payloads = parts.skip(3).where((pt) => !rtxPts.contains(pt));
+          out.add([...head, ...payloads].join(' '));
+          continue;
+        }
+
+        // Drop any attributes tied to RTX PTs
+        if (dropRtx && RegExp(r'^a=(rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
+          final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
+          if (m != null && rtxPts.contains(m.group(1)!)) continue;
+        }
+
+        // Drop generic NACK / PLI / FIR feedback if requested
+        if (dropNack && l.startsWith('a=rtcp-fb:')) {
+          // Keep transport-cc only (and optionally drop goog-remb)
+          if (keepTransportCcOnly) {
+            if (l.contains('transport-cc')) { out.add(l); continue; }
+            // drop everything else (incl. goog-remb, nack, ccm fir, nack pli)
+            continue;
+          } else {
+            // drop nack/fir/pli, keep others
+            if (l.contains('nack') || l.contains('ccm fir') || l.contains('pli')) continue;
+          }
+        }
+      }
+      out.add(l);
+    }
     return out.join('\r\n');
   }
 
