@@ -42,9 +42,10 @@ class PoseWebRTCService {
     // channels are not open
     this.negotiatedFallbackAfterSeconds = 3,
     // NEW: master logging switch — when false, this class prints nothing
-    this.logEverything = false,
+    this.logEverything = true,
     // NEW: strip FEC payloads from video m-section to reduce latency
     this.stripFecFromSdp = true,
+    this.requestedTasks = const ['pose'], // ← NEW (default only pose)
     RtcVideoEncoder? encoder, // (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
@@ -75,6 +76,9 @@ class PoseWebRTCService {
   /// in the local SDP offer to minimize buffering/overhead.
   final bool stripFecFromSdp;
 
+  /// Tasks to request from the server's adapters (e.g., ['pose'], or ['pose','face'])
+  final List<String> requestedTasks;
+
   final String? _stunUrl;
   final String? _turnUrl;
   final String? _turnUsername;
@@ -84,8 +88,12 @@ class PoseWebRTCService {
   final RtcVideoEncoder encoder;
 
   RTCPeerConnection? _pc;
-  RTCDataChannel? _dc; // 'results' (unordered, lossy)
-  RTCDataChannel? _ctrl; // 'ctrl' (reliable)
+
+  // Primary 'results' (alias) + per-task maps
+  RTCDataChannel? _dc;       // 'results' for primary task (requestedTasks[0])
+  RTCDataChannel? _ctrl;     // 'ctrl'
+  final Map<String, RTCDataChannel> _resultsPerTask = {}; // task -> DC
+
   MediaStream? _localStream;
   RTCRtpTransceiver? _videoTransceiver;
 
@@ -115,6 +123,15 @@ class PoseWebRTCService {
   String _forceTurnUdp(String url) {
     // only append if not already present
     return url.contains('?') ? url : '$url?transport=udp';
+  }
+
+  // Map a task to a negotiated datachannel id
+  int _dcIdForTask(String task, int indexInList) {
+    // Server defaults: results=0, ctrl=1, face=2, others auto-increment from 3
+    final t = task.toLowerCase();
+    if (indexInList == 0) return 0; // primary 'results'
+    if (t == 'face') return 2;      // must match server's DC_FACE_ID (default 2)
+    return 3 + (indexInList - 1);   // conservative auto IDs for extra tasks
   }
 
   // ================================
@@ -209,17 +226,40 @@ class PoseWebRTCService {
 
     // Data channels: optionally pre-create so the OFFER carries m=application.
     if (preCreateDataChannels) {
-      // results: unordered + lossy, negotiated id=0
-      final lossy = RTCDataChannelInit()
-        ..negotiated = true
-        ..id = 0
-        ..ordered = false
-        ..maxRetransmits = 0;
-      _dc = await _pc!.createDataChannel('results', lossy);
-      _log("[client] created negotiated DC 'results' id=0");
-      _wireResults(_dc!);
+      // Ensure we have at least one task
+      final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
 
-      // ctrl: reliable, negotiated id=1
+      // 1) Primary 'results' for tasks[0] (unordered lossy, negotiated id=0)
+      {
+        final lossy = RTCDataChannelInit()
+          ..negotiated = true
+          ..id = _dcIdForTask(tasks[0], 0)
+          ..ordered = false
+          ..maxRetransmits = 0;
+        final ch = await _pc!.createDataChannel('results', lossy);
+        _dc = ch;
+        _resultsPerTask[tasks[0].toLowerCase()] = ch;
+        _log("[client] created negotiated DC 'results' id=${ch.id} (task=${tasks[0]})");
+        _wireResults(ch);
+      }
+
+      // 2) Extra 'results:<task>' channels (unordered lossy, negotiated)
+      for (var i = 1; i < tasks.length; i++) {
+        final task = tasks[i].toLowerCase().trim();
+        if (task.isEmpty) continue;
+        final lossy = RTCDataChannelInit()
+          ..negotiated = true
+          ..id = _dcIdForTask(task, i)
+          ..ordered = false
+          ..maxRetransmits = 0;
+        final label = 'results:$task';
+        final ch = await _pc!.createDataChannel(label, lossy);
+        _resultsPerTask[task] = ch;
+        _log("[client] created negotiated DC '$label' id=${ch.id}");
+        _wireResults(ch);
+      }
+
+      // 3) Reliable 'ctrl' (negotiated id=1)
       final reliable = RTCDataChannelInit()
         ..negotiated = true
         ..id = 1
@@ -233,15 +273,30 @@ class PoseWebRTCService {
 
     // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
-      _log("[client] datachannel announced by peer: ${ch.label} id=${ch.id}");
-      if (ch.label == 'results') {
-        _dc = ch;
-        _wireResults(ch);
-      } else if (ch.label == 'ctrl') {
-        _ctrl = ch;
-        _wireCtrl(ch);
+    // label is nullable in flutter_webrtc → normalize to empty string
+    final label = ch.label ?? '';
+    _log("[client] datachannel announced by peer: $label id=${ch.id}");
+
+    if (label == 'results') {
+      _dc = ch;
+      // safe because requestedTasks has a default ['pose']
+      _resultsPerTask[requestedTasks.first.toLowerCase()] = ch;
+      _wireResults(ch);
+
+    } else if (label.startsWith('results:')) {
+      // No JS-style split limit in Dart. Just strip the prefix.
+      const prefix = 'results:';
+      final task = label.substring(prefix.length).toLowerCase().trim();
+      if (task.isNotEmpty) {
+        _resultsPerTask[task] = ch;
       }
-    };
+      _wireResults(ch);
+
+    } else if (label == 'ctrl') {
+      _ctrl = ch;
+      _wireCtrl(ch);
+    }
+  };
 
     // Add video as sendonly.
     final videoTrack = _localStream!.getVideoTracks().first;
@@ -298,10 +353,16 @@ class PoseWebRTCService {
     final local = await _pc!.getLocalDescription();
 
     _log('[client] posting offer to server…');
+    final body = {
+      'type': local!.type,
+      'sdp': local.sdp,
+      // NEW ↓ tell server which adapters you want
+      'tasks': requestedTasks.isEmpty ? ['pose'] : requestedTasks,
+    };
     final res = await http.post(
       offerUri,
       headers: const {'content-type': 'application/json'},
-      body: jsonEncode({'type': local!.type, 'sdp': local.sdp}),
+      body: jsonEncode(body),
     );
 
     if (res.statusCode < 200 || res.statusCode >= 300) {
