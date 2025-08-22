@@ -2,17 +2,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import 'features/posture/services/pose_webrtc_service.dart';
-import 'features/posture/presentation/widgets/overlays.dart' show PoseFrame; // typing only
-import 'features/posture/presentation/widgets/rtc_pose_overlay.dart'
-    show PoseOverlayFast; // use the low-latency overlay
+import 'features/posture/presentation/pages/pose_capture_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  // Optional: immersive full-screen
+
+  // Optional: immersive full-screen (keep if you liked it)
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  // Optional: lock portrait for portrait capture flows
+  // await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
 
   final offerUrl = const String.fromEnvironment(
     'POSE_WEBRTC_URL',
@@ -21,12 +21,11 @@ Future<void> main() async {
 
   final poseService = PoseWebRTCService(
     offerUri: Uri.parse(offerUrl),
-    facingMode: 'user', // fixed to front camera
+    facingMode: 'user',
     idealWidth: 640,
     idealHeight: 480,
     idealFps: 15,
-    // Optional: silence service logs too
-    logEverything: false,
+    logEverything: false, // keep logs quiet
   );
 
   await poseService.init();
@@ -44,65 +43,20 @@ class PoseApp extends StatefulWidget {
 }
 
 class _PoseAppState extends State<PoseApp> {
-  // Assume front camera first (mirrored UI)
-  bool _mirror = true;
-
   @override
   void dispose() {
+    // ensure we tear everything down
     widget.poseService.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final svc = widget.poseService;
-
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      home: Scaffold(
-        body: Stack(
-          children: [
-            // 1) FULL-SCREEN LOCAL CAMERA (always visible)
-            Positioned.fill(
-              child: RTCVideoView(
-                svc.localRenderer,
-                mirror: _mirror, // front cam => true
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover, // fill screen
-              ),
-            ),
-
-            // 2) Landmarks overlay — SAME BOX & FIT as the full-screen preview
-            Positioned.fill(
-              child: IgnorePointer(
-                child: RepaintBoundary(
-                  child: PoseOverlayFast(
-                    latest: svc.latestFrame, // ValueNotifier<PoseFrame?>
-                    mirror: _mirror,         // must match the preview
-                    fit: BoxFit.cover,       // must match objectFit above
-                  ),
-                ),
-              ),
-            ),
-
-            // 3) Remote stream as PiP (may appear once server adds a video track)
-            Positioned(
-              left: 12,
-              top: 12,
-              width: 144,
-              height: 192,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(12),
-                child: RTCVideoView(
-                  svc.remoteRenderer,
-                  mirror: _mirror,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+      // Hand off UI to the new page that includes camera, overlay, and HUD
+      home: PoseCapturePage(poseService: widget.poseService),
     );
   }
 }
