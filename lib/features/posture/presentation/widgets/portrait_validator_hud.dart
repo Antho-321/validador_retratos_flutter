@@ -118,6 +118,8 @@ class PortraitValidatorHUD extends StatelessWidget {
                   strokeWidth: 2.0,
                   showGhost: showGhost,
                   showSafeBox: showSafeBox,
+                  shadeOutsideOval: true, // NEW
+                  shadeOpacity: 0.30,     // NEW (30%)
                 ),
               ),
             ),
@@ -204,6 +206,8 @@ class _GhostPainter extends CustomPainter {
     required this.strokeWidth,
     required this.showGhost,
     this.showSafeBox = true,
+    this.shadeOutsideOval = true, // NEW
+    this.shadeOpacity = 0.30,     // NEW
   });
 
   final Color color;
@@ -212,9 +216,31 @@ class _GhostPainter extends CustomPainter {
   final bool showGhost;
   final bool showSafeBox;
 
+  // NEW
+  final bool shadeOutsideOval;
+  final double shadeOpacity;
+
   @override
   void paint(Canvas canvas, Size size) {
     if (!showGhost) return;
+
+    // Face oval target — centered slightly above mid-line
+    final ovalW = size.width * 0.56;
+    final ovalH = size.height * 0.42;
+    final ovalCx = size.width * 0.5;
+    final ovalCy = size.height * 0.41;
+    final ovalRect = Rect.fromCenter(center: Offset(ovalCx, ovalCy), width: ovalW, height: ovalH);
+
+    // ── NEW: dim everything outside the oval (30% black) ───────────────
+    if (shadeOutsideOval) {
+      final mask = Path()
+        ..fillType = PathFillType.evenOdd
+        ..addRect(Offset.zero & size) // full screen
+        ..addOval(ovalRect);          // “hole”
+      final maskPaint = Paint()..color = Colors.black.withOpacity(shadeOpacity);
+      canvas.drawPath(mask, maskPaint);
+    }
+    // ───────────────────────────────────────────────────────────────────
 
     final paint = Paint()
       ..color = color.withOpacity(opacity)
@@ -222,12 +248,7 @@ class _GhostPainter extends CustomPainter {
       ..strokeWidth = strokeWidth
       ..isAntiAlias = true;
 
-    // Face oval target — centered slightly above mid-line
-    final ovalW = size.width * 0.56;  // width of oval
-    final ovalH = size.height * 0.42; // height of oval (head)
-    final ovalCx = size.width * 0.5;
-    final ovalCy = size.height * 0.41;
-    final ovalRect = Rect.fromCenter(center: Offset(ovalCx, ovalCy), width: ovalW, height: ovalH);
+    // Oval stroke (drawn after mask so it’s visible)
     canvas.drawOval(ovalRect, paint);
 
     // Safe area rounded box — draw only if enabled
@@ -241,10 +262,7 @@ class _GhostPainter extends CustomPainter {
       final r = Radius.circular(16);
       final rr = RRect.fromRectAndCorners(
         safeRect,
-        topLeft: r,
-        topRight: r,
-        bottomLeft: r,
-        bottomRight: r,
+        topLeft: r, topRight: r, bottomLeft: r, bottomRight: r,
       );
       canvas.drawRRect(rr, paint..strokeWidth = strokeWidth);
     }
@@ -256,7 +274,9 @@ class _GhostPainter extends CustomPainter {
            old.strokeWidth != strokeWidth ||
            old.color != color ||
            old.showGhost != showGhost ||
-           old.showSafeBox != showSafeBox;
+           old.showSafeBox != showSafeBox ||
+           old.shadeOutsideOval != shadeOutsideOval ||     // NEW
+           old.shadeOpacity != shadeOpacity;               // NEW
   }
 }
 
