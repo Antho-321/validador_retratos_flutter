@@ -16,7 +16,7 @@ import 'package:http/http.dart' as http;
 
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
 import 'webrtc/rtc_video_encoder.dart'; // ← centralized encoder configuration
-import 'parsers/pose_binary_parser.dart'; // ← NEW: isolated PO/PD parser
+import 'parsers/pose_binary_parser.dart'; // ← isolated PO/PD parser
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
@@ -45,7 +45,7 @@ class PoseWebRTCService {
     this.logEverything = true,
     // NEW: strip FEC payloads from video m-section to reduce latency
     this.stripFecFromSdp = true,
-    this.requestedTasks = const ['pose'], // ← NEW (default only pose)
+    this.requestedTasks = const ['pose', 'face'], // primary='pose', extra='face'
     RtcVideoEncoder? encoder, // (DI optional)
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
@@ -79,6 +79,9 @@ class PoseWebRTCService {
   /// Tasks to request from the server's adapters (e.g., ['pose'], or ['pose','face'])
   final List<String> requestedTasks;
 
+  String get _primaryTask =>
+      (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
+
   final String? _stunUrl;
   final String? _turnUrl;
   final String? _turnUsername;
@@ -90,8 +93,8 @@ class PoseWebRTCService {
   RTCPeerConnection? _pc;
 
   // Primary 'results' (alias) + per-task maps
-  RTCDataChannel? _dc;       // 'results' for primary task (requestedTasks[0])
-  RTCDataChannel? _ctrl;     // 'ctrl'
+  RTCDataChannel? _dc; // 'results' for primary task
+  RTCDataChannel? _ctrl; // 'ctrl'
   final Map<String, RTCDataChannel> _resultsPerTask = {}; // task -> DC
 
   MediaStream? _localStream;
@@ -108,8 +111,11 @@ class PoseWebRTCService {
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
-  // ─────── Binary parser (isolated PO/PD) ───────
-  final PoseBinaryParser _parser = PoseBinaryParser();
+  // ─────── Parsers & state PER TASK ───────
+  final Map<String, PoseBinaryParser> _parsers = {}; // task -> parser
+  final Map<String, List<List<Offset>>> _lastPosesPerTask = {}; // task -> poses
+  int? _lastW;
+  int? _lastH;
 
   // Simple logging helper that respects [logEverything]
   void _log(Object? message) {
@@ -119,7 +125,6 @@ class PoseWebRTCService {
   }
 
   // Prefer TURN over UDP to avoid TCP head-of-line blocking.
-  // add this tiny helper inside the class (private):
   String _forceTurnUdp(String url) {
     // only append if not already present
     return url.contains('?') ? url : '$url?transport=udp';
@@ -130,8 +135,8 @@ class PoseWebRTCService {
     // Server defaults: results=0, ctrl=1, face=2, others auto-increment from 3
     final t = task.toLowerCase();
     if (indexInList == 0) return 0; // primary 'results'
-    if (t == 'face') return 2;      // must match server's DC_FACE_ID (default 2)
-    return 3 + (indexInList - 1);   // conservative auto IDs for extra tasks
+    if (t == 'face') return 2; // must match server's DC_FACE_ID (default 2)
+    return 3 + (indexInList - 1); // conservative auto IDs for extra tasks
   }
 
   // ================================
@@ -226,21 +231,22 @@ class PoseWebRTCService {
 
     // Data channels: optionally pre-create so the OFFER carries m=application.
     if (preCreateDataChannels) {
-      // Ensure we have at least one task
       final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
 
       // 1) Primary 'results' for tasks[0] (unordered lossy, negotiated id=0)
       {
+        final String task0 = tasks[0].toLowerCase();
         final lossy = RTCDataChannelInit()
           ..negotiated = true
-          ..id = _dcIdForTask(tasks[0], 0)
+          ..id = _dcIdForTask(task0, 0)
           ..ordered = false
           ..maxRetransmits = 0;
         final ch = await _pc!.createDataChannel('results', lossy);
         _dc = ch;
-        _resultsPerTask[tasks[0].toLowerCase()] = ch;
-        _log("[client] created negotiated DC 'results' id=${ch.id} (task=${tasks[0]})");
-        _wireResults(ch);
+        _resultsPerTask[task0] = ch;
+        _log(
+            "[client] created negotiated DC 'results' id=${ch.id} (task=$task0)");
+        _wireResults(ch, task: task0);
       }
 
       // 2) Extra 'results:<task>' channels (unordered lossy, negotiated)
@@ -256,7 +262,7 @@ class PoseWebRTCService {
         final ch = await _pc!.createDataChannel(label, lossy);
         _resultsPerTask[task] = ch;
         _log("[client] created negotiated DC '$label' id=${ch.id}");
-        _wireResults(ch);
+        _wireResults(ch, task: task);
       }
 
       // 3) Reliable 'ctrl' (negotiated id=1)
@@ -268,35 +274,33 @@ class PoseWebRTCService {
       _log("[client] created negotiated DC 'ctrl' id=1");
       _wireCtrl(_ctrl!);
     } else {
-      _log("[client] preCreateDataChannels=false → waiting for peer-announced channels");
+      _log(
+          "[client] preCreateDataChannels=false → waiting for peer-announced channels");
     }
 
     // Always adopt peer-announced channels if they arrive.
     _pc!.onDataChannel = (RTCDataChannel ch) {
-    // label is nullable in flutter_webrtc → normalize to empty string
-    final label = ch.label ?? '';
-    _log("[client] datachannel announced by peer: $label id=${ch.id}");
+      // label is nullable in flutter_webrtc → normalize to empty string
+      final label = ch.label ?? '';
+      _log("[client] datachannel announced by peer: $label id=${ch.id}");
 
-    if (label == 'results') {
-      _dc = ch;
-      // safe because requestedTasks has a default ['pose']
-      _resultsPerTask[requestedTasks.first.toLowerCase()] = ch;
-      _wireResults(ch);
-
-    } else if (label.startsWith('results:')) {
-      // No JS-style split limit in Dart. Just strip the prefix.
-      const prefix = 'results:';
-      final task = label.substring(prefix.length).toLowerCase().trim();
-      if (task.isNotEmpty) {
-        _resultsPerTask[task] = ch;
+      if (label == 'results') {
+        _dc = ch;
+        final task0 = _primaryTask;
+        _resultsPerTask[task0] = ch;
+        _wireResults(ch, task: task0);
+      } else if (label.startsWith('results:')) {
+        const prefix = 'results:';
+        final task = label.substring(prefix.length).toLowerCase().trim();
+        if (task.isNotEmpty) {
+          _resultsPerTask[task] = ch;
+        }
+        _wireResults(ch, task: task.isNotEmpty ? task : _primaryTask);
+      } else if (label == 'ctrl') {
+        _ctrl = ch;
+        _wireCtrl(ch);
       }
-      _wireResults(ch);
-
-    } else if (label == 'ctrl') {
-      _ctrl = ch;
-      _wireCtrl(ch);
-    }
-  };
+    };
 
     // Add video as sendonly.
     final videoTrack = _localStream!.getVideoTracks().first;
@@ -429,12 +433,13 @@ class PoseWebRTCService {
   // Data channels
   // ================================
 
-  void _wireResults(RTCDataChannel ch) {
+  void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {
+      final label = ch.label ?? 'results';
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
-        _log("[client] 'results' open (id=${ch.id})");
+        _log("[client] '$label' open (id=${ch.id}, task=$task)");
       } else if (s == RTCDataChannelState.RTCDataChannelClosed) {
-        _log("[client] 'results' closed (id=${ch.id})");
+        _log("[client] '$label' closed (id=${ch.id}, task=$task)");
       }
     };
 
@@ -445,12 +450,12 @@ class PoseWebRTCService {
         final head = bin.length >= 2
             ? '${bin[0].toRadixString(16)} ${bin[1].toRadixString(16)}'
             : '<short>';
-        _log("[client] results RECV bin len=${bin.length} head=$head");
+        _log("[client] results(task=$task) RECV bin len=${bin.length} head=$head");
       } else {
         final t = m.text ?? '';
         final preview = t.length <= 48 ? t : t.substring(0, 48);
         _log(
-          "[client] results RECV txt len=${t.length} "
+          "[client] results(task=$task) RECV txt len=${t.length} "
           "preview='${preview.replaceAll('\n', ' ')}'",
         );
       }
@@ -458,9 +463,9 @@ class PoseWebRTCService {
       // Actual handling
       if (m.isBinary) {
         try {
-          _handlePoseBinary(m.binary);
+          _handleTaskBinary(task, m.binary);
         } catch (e) {
-          _log('[client] error parsing results packet: $e');
+          _log('[client] error parsing results packet (task=$task): $e');
           _sendCtrlKF();
         }
       } else {
@@ -468,10 +473,10 @@ class PoseWebRTCService {
         final txt = txtRaw.trim();
         if (txt.toUpperCase() == 'KF') {
           _log(
-            "[client] 'results' got KF request (string) — ignoring on client",
+            "[client] '$task' got KF request (string) — ignoring on client",
           );
         } else {
-          _handlePoseText(txtRaw);
+          _handlePoseText(txtRaw); // JSON fallback (kept simple)
         }
       }
     };
@@ -569,7 +574,7 @@ class PoseWebRTCService {
     }
 
     _dc = newResults;
-    _wireResults(_dc!);
+    _wireResults(_dc!, task: _primaryTask);
 
     _ctrl = newCtrl;
     _wireCtrl(_ctrl!);
@@ -597,30 +602,47 @@ class PoseWebRTCService {
   }
 
   // ================================
-  // Binary PO/PD Parsing (via isolated parser)
+  // Binary PO/PD Parsing (per task)
   // ================================
 
-  void _handlePoseBinary(Uint8List b) {
-    final res = _parser.parse(b);
+  void _handleTaskBinary(String task, Uint8List b) {
+    final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
+    final res = parser.parse(b);
 
     if (res is PoseParseOk) {
       final pkt = res.packet;
-      // Emit to UI
-      _emitBinary(pkt.w, pkt.h, pkt.poses,
-          kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
-          seq: pkt.seq);
 
-      // ACK PD
-      if (res.ackSeq != null) {
+      // Save per-task state
+      _lastW = pkt.w;
+      _lastH = pkt.h;
+      _lastPosesPerTask[task] = pkt.poses;
+
+      // Fuse all tasks' poses into one list for the existing overlay
+      final fused = _lastPosesPerTask.values
+          .expand((l) => l)
+          .toList(growable: false);
+
+      _emitBinary(
+        pkt.w,
+        pkt.h,
+        fused,
+        kind: pkt.kind == PacketKind.po
+            ? 'PO'
+            : (pkt.keyframe ? 'PD(KF)' : 'PD'),
+        seq: pkt.seq,
+      );
+
+      // ACK PD only for the PRIMARY stream (e.g., 'pose')
+      if (task == _primaryTask && res.ackSeq != null) {
         _sendCtrlAck(res.ackSeq!);
       }
       // Ask for KF if parser detected a sequence hole
       if (res.requestKeyframe) {
-        _log('[client] PD seq mismatch -> requesting KF');
+        _log('[client] PD seq mismatch (task=$task) -> requesting KF');
         _sendCtrlKF();
       }
     } else if (res is PoseParseNeedKF) {
-      _log('[client] parser says KF needed: ${res.reason}');
+      _log('[client] parser says KF needed (task=$task): ${res.reason}');
       _sendCtrlKF();
     }
   }
@@ -713,7 +735,8 @@ class PoseWebRTCService {
         final reports = await pc.getStats();
         for (final r in reports) {
           if (r.type == 'outbound-rtp' &&
-              (r.values['kind'] == 'video' || r.values['mediaType'] == 'video')) {
+              (r.values['kind'] == 'video' ||
+                  r.values['mediaType'] == 'video')) {
             final p = r.values['packetsSent'];
             final b = r.values['bytesSent'];
             _log('[RTP] video packetsSent=$p bytesSent=$b');
@@ -737,8 +760,10 @@ class PoseWebRTCService {
         if (_disposed) return;
         if (latestFrame.value != null) return;
 
-        final dcOpen = _dc?.state == RTCDataChannelState.RTCDataChannelOpen;
-        final ctrlOpen = _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen;
+        final dcOpen =
+            _dc?.state == RTCDataChannelState.RTCDataChannelOpen;
+        final ctrlOpen =
+            _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen;
 
         // If channels are open, don't try creating negotiated ones — just nudge.
         if (dcOpen || ctrlOpen) {
@@ -769,7 +794,8 @@ class PoseWebRTCService {
 
     // Pass 1: collect payload types for FEC codecs
     for (final l in lines) {
-      final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+      final m =
+          RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
       if (m != null) {
         final pt = m.group(1)!;
         final codec = (m.group(2) ?? '').toLowerCase();
@@ -785,14 +811,16 @@ class PoseWebRTCService {
       if (l.startsWith('m=video')) {
         final parts = l.split(' ');
         final head = parts.take(3);
-        final payloads = parts.skip(3).where((pt) => !fecPts.contains(pt));
+        final payloads =
+            parts.skip(3).where((pt) => !fecPts.contains(pt));
         out.add([...head, ...payloads].join(' '));
         continue;
       }
 
       bool isFecSpecific = false;
       for (final prefix in ['a=rtpmap:', 'a=fmtp:', 'a=rtcp-fb:']) {
-        final m = RegExp('^' + RegExp.escape(prefix) + r'(\d+)').firstMatch(l);
+        final m =
+            RegExp('^' + RegExp.escape(prefix) + r'(\d+)').firstMatch(l);
         if (m != null && fecPts.contains(m.group(1)!)) {
           isFecSpecific = true;
           break;
