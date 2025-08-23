@@ -69,7 +69,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       PortraitUiModel(
         statusLabel: 'Adjusting',
         privacyLabel: 'On-device',
-        primaryMessage: 'Centra tu rostro en el óvalo',
+        primaryMessage: 'Ubica tu rostro dentro del óvalo',
         secondaryMessage: _nullIfBlank(''),
       ),
     );
@@ -133,9 +133,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       _setHud(_hud.value.copyWith(
         statusLabel: allChecksOk ? 'Ready' : 'Adjusting',
         primaryMessage:
-            allChecksOk ? 'Perfect! Hold still' : 'Center face in the oval',
+            allChecksOk ? '¡Perfecto! ¡Permanece así!' : 'Ubica tu rostro dentro del óvalo',
         secondaryMessage:
-            allChecksOk ? _nullIfBlank(null) : _nullIfBlank('Lower chin slightly'),
+            allChecksOk ? _nullIfBlank(null) : _nullIfBlank(''),
         checkFraming: allChecksOk ? Tri.ok : Tri.almost,
         checkHead: allChecksOk ? Tri.ok : Tri.almost,
         checkEyes: Tri.almost,
