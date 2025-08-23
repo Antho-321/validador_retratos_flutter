@@ -35,6 +35,33 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   double _countdownProgress = 1.0; // 1 → 0
   int _countdownSeconds = 3;
 
+  // Throttle HUD updates to ~15 Hz
+  DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
+  static const _hudMinInterval = Duration(milliseconds: 66);
+
+  void _setHud(PortraitUiModel next) {
+    final now = DateTime.now();
+    if (now.difference(_lastHudPush) < _hudMinInterval) return;
+
+    final cur = _hud.value;
+    final same =
+        cur.statusLabel == next.statusLabel &&
+        cur.primaryMessage == next.primaryMessage &&
+        cur.secondaryMessage == next.secondaryMessage &&
+        cur.countdownSeconds == next.countdownSeconds &&
+        cur.countdownProgress == next.countdownProgress &&
+        cur.checkFraming == next.checkFraming &&
+        cur.checkHead == next.checkHead &&
+        cur.checkEyes == next.checkEyes &&
+        cur.checkLighting == next.checkLighting &&
+        cur.checkBackground == next.checkBackground;
+
+    if (!same) {
+      _hud.value = next;
+      _lastHudPush = now;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -67,7 +94,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     if (frame == null) {
       // Lost face → abort countdown and reset.
       _stopCountdown();
-      _hud.value = _hud.value.copyWith(
+      _setHud(_hud.value.copyWith(
         statusLabel: 'Searching',
         primaryMessage: 'Show your face in the oval',
         secondaryMessage: _nullIfBlank(null), // stays null
@@ -78,7 +105,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         checkBackground: Tri.pending,
         countdownSeconds: null,
         countdownProgress: null,
-      );
+      ));
       return;
     }
 
@@ -94,7 +121,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         canvasSize: canvas,             // from LayoutBuilder
         mirror: _mirror,                // must match your preview overlay
         fit: BoxFit.cover,              // must match your preview overlay
-        minFractionInside: 1,        // tweak tolerance if needed
+        minFractionInside: 1,           // tweak tolerance if needed
       );
     }
 
@@ -103,7 +130,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
     if (!_isCountingDown) {
       // Adjusting UI while we wait for readiness gate.
-      _hud.value = _hud.value.copyWith(
+      _setHud(_hud.value.copyWith(
         statusLabel: allChecksOk ? 'Ready' : 'Adjusting',
         primaryMessage:
             allChecksOk ? 'Perfect! Hold still' : 'Center face in the oval',
@@ -114,7 +141,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         checkEyes: Tri.almost,
         checkLighting: Tri.almost,
         checkBackground: Tri.almost,
-      );
+      ));
     }
 
     if (allChecksOk && !_isCountingDown) {
@@ -130,10 +157,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _countdownSeconds = 3;
 
     // Update HUD immediately
-    _hud.value = _hud.value.copyWith(
+    _setHud(_hud.value.copyWith(
       countdownSeconds: _countdownSeconds,
       countdownProgress: _countdownProgress,
-    );
+    ));
 
     // Tick ~30 fps for smooth ring, for 3 seconds total.
     const totalMs = 3000;
@@ -151,10 +178,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         _countdownSeconds = nextSeconds;
       }
 
-      _hud.value = _hud.value.copyWith(
+      _setHud(_hud.value.copyWith(
         countdownSeconds: _countdownSeconds == 0 ? 1 : _countdownSeconds,
         countdownProgress: _countdownProgress,
-      );
+      ));
 
       // Abort if face lost (your real code should also abort if any rule fails)
       if (widget.poseService.latestFrame.value == null) {
@@ -174,8 +201,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void _stopCountdown() {
     _countdownTicker?.cancel();
     _countdownTicker = null;
-    _hud.value =
-        _hud.value.copyWith(countdownSeconds: null, countdownProgress: null);
+    _setHud(_hud.value.copyWith(
+      countdownSeconds: null,
+      countdownProgress: null,
+    ));
   }
 
   @override
