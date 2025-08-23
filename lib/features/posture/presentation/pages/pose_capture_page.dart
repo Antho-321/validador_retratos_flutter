@@ -1,22 +1,16 @@
 // lib/features/posture/presentation/pages/pose_capture_page.dart
 import 'dart:async';
-import 'dart:ui' show Offset, Size; // ← for _faceOvalPts & LayoutBuilder size
+import 'dart:ui' show Size; // for LayoutBuilder size
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../services/pose_webrtc_service.dart';
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart'
-    show
-        PortraitValidatorHUD,
-        PortraitUiController,
-        PortraitUiModel,
-        Tri,
-        faceOvalPointsFor,
-        faceOvalRectFor; // ← add these
+    show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 
-// If your polygon check lives elsewhere, import it here:
-import '../../utils/geometry.dart' show areLandmarksWithinFaceOval, mapImagePointsToCanvas;
+// Fast analytic ellipse check (image-space) from geometry.dart
+import '../../utils/geometry.dart' show areLandmarksWithinFaceOval;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -33,14 +27,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
-  // Cache the oval polygon (screen/canvas coordinates)
-  List<Offset>? _faceOvalPts; // ← added
-
-  // Keep current canvas size to map image→canvas like the painter.
-  Size? _canvasSize; // ← added
+  // Keep current canvas size to map image↔canvas consistently.
+  Size? _canvasSize;
 
   // Countdown state
-  DateTime? _faceSince; // kept (cleared on face loss)
   Timer? _countdownTicker;
   double _countdownProgress = 1.0; // 1 → 0
   int _countdownSeconds = 3;
@@ -53,7 +43,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         statusLabel: 'Adjusting',
         privacyLabel: 'On-device',
         primaryMessage: 'Centra tu rostro en el óvalo',
-        // If this comes as '' or ' ', normalize to null so the pill shrinks.
         secondaryMessage: _nullIfBlank(''),
       ),
     );
@@ -70,27 +59,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     super.dispose();
   }
 
- 
-
-  /// Convenience: latest face landmarks already mapped to canvas coordinates.
-  /// Returns null if any prerequisite is missing.
-  List<Offset>? _latestFacePointsOnCanvas() {
-    final frame = widget.poseService.latestFrame.value;
-    final faces = widget.poseService.latestFaceLandmarks;
-    final canvas = _canvasSize;
-    if (frame == null || faces == null || faces.isEmpty || canvas == null) {
-      return null;
-    }
-    // IMPORTANT: use the SAME fit & mirror that your overlay/HUD uses.
-    return mapImagePointsToCanvas(
-      faces.first, // one face (list of Offsets in image px)
-      frame.imageSize, // source image size
-      canvas, // current canvas size from LayoutBuilder
-      mirror: _mirror,
-      fit: BoxFit.cover,
-    );
-  }
-
   // ─────────────────────────────────────────────────────────────────────
 
   void _onFrame() {
@@ -98,7 +66,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
     if (frame == null) {
       // Lost face → abort countdown and reset.
-      _faceSince = null;
       _stopCountdown();
       _hud.value = _hud.value.copyWith(
         statusLabel: 'Searching',
@@ -115,14 +82,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       return;
     }
 
-    // Compute polygon containment in the SAME canvas space.
+    // Compute readiness using fast IMAGE-space ellipse check (no polygon/mapping).
     bool landmarksWithinFaceOval = false;
-    if (_faceOvalPts != null) {
-      final faceCanvasPts = _latestFacePointsOnCanvas();
-      if (faceCanvasPts != null && faceCanvasPts.isNotEmpty) {
-        landmarksWithinFaceOval =
-            areLandmarksWithinFaceOval(_faceOvalPts!, faceCanvasPts);
-      }
+    final faces = widget.poseService.latestFaceLandmarks;
+    final canvas = _canvasSize;
+
+    if (faces != null && faces.isNotEmpty && canvas != null) {
+      landmarksWithinFaceOval = areLandmarksWithinFaceOval(
+        landmarksImg: faces.first,      // image-space points (px)
+        imageSize: frame.imageSize,     // from latestFrame
+        canvasSize: canvas,             // from LayoutBuilder
+        mirror: _mirror,                // must match your preview overlay
+        fit: BoxFit.cover,              // must match your preview overlay
+        minFractionInside: 1,        // tweak tolerance if needed
+      );
     }
 
     // 🔒 Lock readiness to the containment result.
@@ -134,7 +107,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         statusLabel: allChecksOk ? 'Ready' : 'Adjusting',
         primaryMessage:
             allChecksOk ? 'Perfect! Hold still' : 'Center face in the oval',
-        // If you ever pass ' ' (a space), this turns into null and hides the line.
         secondaryMessage:
             allChecksOk ? _nullIfBlank(null) : _nullIfBlank('Lower chin slightly'),
         checkFraming: allChecksOk ? Tri.ok : Tri.almost,
@@ -163,7 +135,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       countdownProgress: _countdownProgress,
     );
 
-    // Tick 30 times per second for smooth ring, for 3 seconds total.
+    // Tick ~30 fps for smooth ring, for 3 seconds total.
     const totalMs = 3000;
     const tickMs = 33;
     int elapsed = 0;
@@ -210,13 +182,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   Widget build(BuildContext context) {
     final svc = widget.poseService;
 
-    return LayoutBuilder( // ← wrap to get the actual canvas size
+    return LayoutBuilder( // get the actual canvas size
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        _canvasSize = size; // ← keep current canvas size for mapping
-
-        // Polygon matching the on-screen oval (in screen/canvas coordinates)
-        _faceOvalPts = faceOvalPointsFor(size, samples: 180);
+        _canvasSize = size; // keep current canvas size for mapping
 
         return Scaffold(
           backgroundColor: Colors.black,
