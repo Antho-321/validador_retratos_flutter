@@ -1,12 +1,22 @@
 // lib/features/posture/presentation/pages/pose_capture_page.dart
 import 'dart:async';
+import 'dart:ui' show Offset, Size; // ← for _faceOvalPts & LayoutBuilder size
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../services/pose_webrtc_service.dart';
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart'
-    show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
+    show
+        PortraitValidatorHUD,
+        PortraitUiController,
+        PortraitUiModel,
+        Tri,
+        faceOvalPointsFor,
+        faceOvalRectFor; // ← add these
+
+// If your polygon check lives elsewhere, import it here:
+import '../../utils/geometry.dart' show areLandmarksWithinFaceOval, mapImagePointsToCanvas;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -23,8 +33,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
-  // Simple demo logic: when any PoseFrame is present for ≥2s, start a 3s countdown.
-  DateTime? _faceSince;
+  // Cache the oval polygon (screen/canvas coordinates)
+  List<Offset>? _faceOvalPts; // ← added
+
+  // Keep current canvas size to map image→canvas like the painter.
+  Size? _canvasSize; // ← added
+
+  // Countdown state
+  DateTime? _faceSince; // kept (cleared on face loss)
   Timer? _countdownTicker;
   double _countdownProgress = 1.0; // 1 → 0
   int _countdownSeconds = 3;
@@ -32,13 +48,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   void initState() {
     super.initState();
-    _hud = PortraitUiController(PortraitUiModel(
-      statusLabel: 'Adjusting',
-      privacyLabel: 'On-device',
-      primaryMessage: 'Centra tu rostro en el óvalo',
-      // If this comes as '' or ' ', normalize to null so the pill shrinks.
-      secondaryMessage: _nullIfBlank(''),
-    ));
+    _hud = PortraitUiController(
+      PortraitUiModel(
+        statusLabel: 'Adjusting',
+        privacyLabel: 'On-device',
+        primaryMessage: 'Centra tu rostro en el óvalo',
+        // If this comes as '' or ' ', normalize to null so the pill shrinks.
+        secondaryMessage: _nullIfBlank(''),
+      ),
+    );
 
     // Listen to frames and drive a minimal readiness model.
     widget.poseService.latestFrame.addListener(_onFrame);
@@ -51,6 +69,29 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _hud.dispose();
     super.dispose();
   }
+
+ 
+
+  /// Convenience: latest face landmarks already mapped to canvas coordinates.
+  /// Returns null if any prerequisite is missing.
+  List<Offset>? _latestFacePointsOnCanvas() {
+    final frame = widget.poseService.latestFrame.value;
+    final faces = widget.poseService.latestFaceLandmarks;
+    final canvas = _canvasSize;
+    if (frame == null || faces == null || faces.isEmpty || canvas == null) {
+      return null;
+    }
+    // IMPORTANT: use the SAME fit & mirror that your overlay/HUD uses.
+    return mapImagePointsToCanvas(
+      faces.first, // one face (list of Offsets in image px)
+      frame.imageSize, // source image size
+      canvas, // current canvas size from LayoutBuilder
+      mirror: _mirror,
+      fit: BoxFit.cover,
+    );
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
 
   void _onFrame() {
     final frame = widget.poseService.latestFrame.value;
@@ -74,13 +115,18 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       return;
     }
 
-    // Face present
-    _faceSince ??= DateTime.now();
+    // Compute polygon containment in the SAME canvas space.
+    bool landmarksWithinFaceOval = false;
+    if (_faceOvalPts != null) {
+      final faceCanvasPts = _latestFacePointsOnCanvas();
+      if (faceCanvasPts != null && faceCanvasPts.isNotEmpty) {
+        landmarksWithinFaceOval =
+            areLandmarksWithinFaceOval(_faceOvalPts!, faceCanvasPts);
+      }
+    }
 
-    final stableForMs = DateTime.now().difference(_faceSince!).inMilliseconds;
-
-    // You should replace this with your actual rule aggregator:
-    final allChecksOk = stableForMs >= 2000; // placeholder “ready” gate at 2s
+    // 🔒 Lock readiness to the containment result.
+    final allChecksOk = landmarksWithinFaceOval;
 
     if (!_isCountingDown) {
       // Adjusting UI while we wait for readiness gate.
@@ -89,9 +135,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         primaryMessage:
             allChecksOk ? 'Perfect! Hold still' : 'Center face in the oval',
         // If you ever pass ' ' (a space), this turns into null and hides the line.
-        secondaryMessage: allChecksOk
-            ? _nullIfBlank(null)
-            : _nullIfBlank('Lower chin slightly'),
+        secondaryMessage:
+            allChecksOk ? _nullIfBlank(null) : _nullIfBlank('Lower chin slightly'),
         checkFraming: allChecksOk ? Tri.ok : Tri.almost,
         checkHead: allChecksOk ? Tri.ok : Tri.almost,
         checkEyes: Tri.almost,
@@ -165,59 +210,69 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   Widget build(BuildContext context) {
     final svc = widget.poseService;
 
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        children: [
-          // 1) Full-screen local preview
-          Positioned.fill(
-            child: RTCVideoView(
-              svc.localRenderer,
-              mirror: _mirror,
-              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-            ),
-          ),
+    return LayoutBuilder( // ← wrap to get the actual canvas size
+      builder: (context, constraints) {
+        final size = Size(constraints.maxWidth, constraints.maxHeight);
+        _canvasSize = size; // ← keep current canvas size for mapping
 
-          // 2) Low-latency landmarks overlay (your existing widget)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: PoseOverlayFast(
-                latest: svc.latestFrame,
-                mirror: _mirror,
-                fit: BoxFit.cover,
-              ),
-            ),
-          ),
+        // Polygon matching the on-screen oval (in screen/canvas coordinates)
+        _faceOvalPts = faceOvalPointsFor(size, samples: 180);
 
-          // 3) Portrait HUD (face oval, checklist, guidance, countdown)
-          Positioned.fill(
-            child: IgnorePointer(
-              child: PortraitValidatorHUD(
-                modelListenable: _hud,
-                mirror: _mirror,
-                fit: BoxFit.cover,
-                showSafeBox: false, // hides the square around the oval
+        return Scaffold(
+          backgroundColor: Colors.black,
+          body: Stack(
+            children: [
+              // 1) Full-screen local preview
+              Positioned.fill(
+                child: RTCVideoView(
+                  svc.localRenderer,
+                  mirror: _mirror,
+                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                ),
               ),
-            ),
-          ),
 
-          // 4) Optional remote PiP
-          Positioned(
-            left: 12,
-            top: 12,
-            width: 144,
-            height: 192,
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(12),
-              child: RTCVideoView(
-                svc.remoteRenderer,
-                mirror: _mirror, // consider false if remote is not mirrored
-                objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+              // 2) Low-latency landmarks overlay (your existing widget)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: PoseOverlayFast(
+                    latest: svc.latestFrame,
+                    mirror: _mirror,
+                    fit: BoxFit.cover,
+                  ),
+                ),
               ),
-            ),
+
+              // 3) Portrait HUD (face oval, checklist, guidance, countdown)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: PortraitValidatorHUD(
+                    modelListenable: _hud,
+                    mirror: _mirror,
+                    fit: BoxFit.cover,
+                    showSafeBox: false, // hides the square around the oval
+                  ),
+                ),
+              ),
+
+              // 4) Optional remote PiP
+              Positioned(
+                left: 12,
+                top: 12,
+                width: 144,
+                height: 192,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(12),
+                  child: RTCVideoView(
+                    svc.remoteRenderer,
+                    mirror: _mirror, // consider false if remote is not mirrored
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

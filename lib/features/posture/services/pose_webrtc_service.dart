@@ -120,6 +120,10 @@ class PoseWebRTCService {
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
+  /// NEW: latest face landmarks cache (requires 'face' in [requestedTasks]).
+  /// Each entry is one face = List<Offset> (e.g., 468 points).
+  List<List<Offset>>? get latestFaceLandmarks => _lastPosesPerTask['face'];
+
   // ─────── Parsers & state PER TASK ───────
   final Map<String, PoseBinaryParser> _parsers = {}; // task -> parser
   final Map<String, List<List<Offset>>> _lastPosesPerTask = {}; // task -> poses
@@ -906,69 +910,70 @@ class PoseWebRTCService {
     }
     return out.join('\r\n');
   }
+
   // ================================
   // SDP munging helpers (keep only selected codecs)
   // ================================
 
   String _keepOnlyVideoCodecs(String sdp, List<String> codecNamesLower) {
-  // Split SDP into lines safely (CRLF or LF)
-  final lines = sdp.split(RegExp(r'\r?\n'));
-  final keepPts = <String>{};
+    // Split SDP into lines safely (CRLF or LF)
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    final keepPts = <String>{};
 
-  // Pass 1: collect payload types (PTs) of the codecs we want to keep
-  for (final l in lines) {
-    final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
-    if (m != null) {
-      final pt = m.group(1)!;
-      final codec = (m.group(2) ?? '').toLowerCase();
-      if (codecNamesLower.contains(codec)) keepPts.add(pt);
+    // Pass 1: collect payload types (PTs) of the codecs we want to keep
+    for (final l in lines) {
+      final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
+      if (m != null) {
+        final pt = m.group(1)!;
+        final codec = (m.group(2) ?? '').toLowerCase();
+        if (codecNamesLower.contains(codec)) keepPts.add(pt);
+      }
+    }
+    if (keepPts.isEmpty) return sdp;
+
+    // Pass 2: rebuild the video section, dropping everything tied to other PTs
+    final out = <String>[];
+    var inVideo = false;
+
+    for (final l in lines) {
+      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
+
+      if (inVideo && l.startsWith('m=video')) {
+        final parts = l.split(' ');
+        final head = parts.take(3);
+        final pay = parts.skip(3).where((pt) => keepPts.contains(pt));
+        out.add([...head, ...pay].join(' '));
+        continue;
+      }
+
+      if (inVideo && RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
+        final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
+        if (m != null && !keepPts.contains(m.group(1)!)) continue;
+      }
+
+      out.add(l);
+    }
+
+    // Use CRLF per SDP spec (LF also works in practice)
+    return out.join('\r\n');
+  }
+
+  // ================================
+
+  Future<void> switchCamera() async {
+    final tracks = _localStream?.getVideoTracks();
+    if (tracks == null || tracks.isEmpty) return;
+
+    try {
+      await Helper.switchCamera(tracks.first);
+      _log('[client] camera switched');
+      if (_videoTransceiver != null) {
+        await encoder.applyTo(_videoTransceiver!); // keep limits after switch
+      }
+    } catch (e) {
+      _log('[client] switchCamera failed: $e');
     }
   }
-  if (keepPts.isEmpty) return sdp;
-
-  // Pass 2: rebuild the video section, dropping everything tied to other PTs
-  final out = <String>[];
-  var inVideo = false;
-
-  for (final l in lines) {
-    if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
-
-    if (inVideo && l.startsWith('m=video')) {
-      final parts = l.split(' ');
-      final head = parts.take(3);
-      final pay = parts.skip(3).where((pt) => keepPts.contains(pt));
-      out.add([...head, ...pay].join(' '));
-      continue;
-    }
-
-    if (inVideo && RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
-      final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
-      if (m != null && !keepPts.contains(m.group(1)!)) continue;
-    }
-
-    out.add(l);
-  }
-
-  // Use CRLF per SDP spec (LF also works in practice)
-  return out.join('\r\n');
-}
-
-// ================================
-
-Future<void> switchCamera() async {
-  final tracks = _localStream?.getVideoTracks();
-  if (tracks == null || tracks.isEmpty) return;
-
-  try {
-    await Helper.switchCamera(tracks.first);
-    _log('[client] camera switched');
-    if (_videoTransceiver != null) {
-      await encoder.applyTo(_videoTransceiver!); // keep limits after switch
-    }
-  } catch (e) {
-    _log('[client] switchCamera failed: $e');
-  }
-}
 
   Future<void> close() => dispose();
 

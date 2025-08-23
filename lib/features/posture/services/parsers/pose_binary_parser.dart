@@ -115,8 +115,6 @@ class PoseBinaryParser {
         if (pts.isNotEmpty) {
           final a = pts.first, m = pts[pts.length ~/ 2];
           // ignore: avoid_print
-          print('[pose:PO] first=${a.dx.toInt()},${a.dy.toInt()} '
-              'mid=${m.dx.toInt()},${m.dy.toInt()} of ${pts.length}');
         }
 
         return PoseParseOk(packet: pkt);
@@ -132,8 +130,6 @@ class PoseBinaryParser {
         if (pts.isNotEmpty) {
           final a = pts.first, m = pts[pts.length ~/ 2];
           // ignore: avoid_print
-          print('[pose:PD${pkt.keyframe ? "(KF)" : ""}] first=${a.dx.toInt()},${a.dy.toInt()} '
-              'mid=${m.dx.toInt()},${m.dy.toInt()} of ${pts.length} seq=${pkt.seq}');
         }
 
         // Mirror Python client: do not auto-request KF on seq gaps here.

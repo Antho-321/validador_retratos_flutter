@@ -1,9 +1,49 @@
 // lib/features/posture/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
+import 'dart:math' as math; // ← for oval sampling
 
 /// Treat empty/whitespace strings as null so the HUD won't render extra space.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
+
+/// ─────────────────────────────────────────────────────────────────────────
+/// Face-oval geometry used by _GhostPainter and other widgets.
+/// Keeping constants here avoids copy/paste drift.
+/// ─────────────────────────────────────────────────────────────────────────
+
+// Same fractions used in _GhostPainter.paint(...)
+const double _kOvalWFrac = 0.56;
+const double _kOvalHFrac = 0.42;
+const double _kOvalCxFrac = 0.50;
+const double _kOvalCyFrac = 0.41;
+
+/// The Rect of the face oval for a given canvas [size].
+Rect faceOvalRectFor(Size size) {
+  final ovalW = size.width * _kOvalWFrac;
+  final ovalH = size.height * _kOvalHFrac;
+  final ovalCx = size.width * _kOvalCxFrac;
+  final ovalCy = size.height * _kOvalCyFrac;
+  return Rect.fromCenter(center: Offset(ovalCx, ovalCy), width: ovalW, height: ovalH);
+}
+
+/// The oval boundary as a polygon with [samples] vertices (default 120).
+List<Offset> faceOvalPointsFor(Size size, {int samples = 120}) {
+  final r = faceOvalRectFor(size);
+  final rx = r.width / 2.0;
+  final ry = r.height / 2.0;
+  final cx = r.center.dx;
+  final cy = r.center.dy;
+
+  final out = <Offset>[];
+  for (var i = 0; i < samples; i++) {
+    final t = (i * 2 * math.pi) / samples;
+    out.add(Offset(cx + rx * math.cos(t), cy + ry * math.sin(t)));
+  }
+  return out;
+}
+
+/// Optional: a ready-to-draw Path of the oval.
+Path faceOvalPathFor(Size size) => Path()..addOval(faceOvalRectFor(size));
 
 /// ─────────────────────────────────────────────────────────────────────────
 /// Centralized: edit this set to hide chip labels (case/spacing-insensitive)
@@ -23,7 +63,7 @@ class PortraitUiModel {
   const PortraitUiModel({
     this.statusLabel = 'Adjusting',
     this.privacyLabel = 'On-device',
-    this.primaryMessage = 'Center your face in the oval',
+    this.primaryMessage = 'Centra tu rostro en el óvalo',
     this.secondaryMessage,
     this.countdownSeconds, // null => hidden; e.g., 3, 2, 1, 0
     this.countdownProgress, // 0..1 (1 = just started, 0 = fire). If null => hidden
@@ -224,12 +264,8 @@ class _GhostPainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (!showGhost) return;
 
-    // Face oval target — centered slightly above mid-line
-    final ovalW = size.width * 0.56;
-    final ovalH = size.height * 0.42;
-    final ovalCx = size.width * 0.5;
-    final ovalCy = size.height * 0.41;
-    final ovalRect = Rect.fromCenter(center: Offset(ovalCx, ovalCy), width: ovalW, height: ovalH);
+    // Use shared geometry so painter and helpers stay in sync
+    final ovalRect = faceOvalRectFor(size);
 
     // ── NEW: dim everything outside the oval (30% black) ───────────────
     if (shadeOutsideOval) {
