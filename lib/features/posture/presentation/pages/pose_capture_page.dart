@@ -54,7 +54,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         cur.checkHead == next.checkHead &&
         cur.checkEyes == next.checkEyes &&
         cur.checkLighting == next.checkLighting &&
-        cur.checkBackground == next.checkBackground;
+        cur.checkBackground == next.checkBackground &&
+        cur.ovalProgress == next.ovalProgress; // ← include progress equality
 
     if (!same) {
       _hud.value = next;
@@ -71,6 +72,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         privacyLabel: 'On-device',
         primaryMessage: 'Ubica tu rostro dentro del óvalo',
         secondaryMessage: _nullIfBlank(''),
+        ovalProgress: 0.0, // ← start at 0%
       ),
     );
 
@@ -87,6 +89,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
+
+  double _progressFromChecks(List<bool> checks) {
+    if (checks.isEmpty) return 0.0;
+    final ok = checks.where((b) => b).length;
+    return ok / checks.length;
+    // Example: [true,true,true,false,false] -> 3/5 = 0.6
+  }
 
   void _onFrame() {
     final frame = widget.poseService.latestFrame.value;
@@ -105,6 +114,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         checkBackground: Tri.pending,
         countdownSeconds: null,
         countdownProgress: null,
+        ovalProgress: 0.0, // ← reset green arc
       ));
       return;
     }
@@ -128,6 +138,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     // 🔒 Lock readiness to the containment result.
     final allChecksOk = landmarksWithinFaceOval;
 
+    // Build a checks list to derive the oval green-fraction.
+    // Here we map the five right-rail items to booleans (true = OK).
+    // Example target list: [true, true, true, false, false] -> 60%
+    final checks = <bool>[
+      landmarksWithinFaceOval,
+    ];
+    final ovalProgress = _progressFromChecks(checks);
+
     if (!_isCountingDown) {
       // Adjusting UI while we wait for readiness gate.
       _setHud(_hud.value.copyWith(
@@ -138,9 +156,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             allChecksOk ? _nullIfBlank(null) : _nullIfBlank(''),
         checkFraming: allChecksOk ? Tri.ok : Tri.almost,
         checkHead: allChecksOk ? Tri.ok : Tri.almost,
-        checkEyes: Tri.almost,
+        checkEyes: allChecksOk ? Tri.ok : Tri.almost,
         checkLighting: Tri.almost,
         checkBackground: Tri.almost,
+        ovalProgress: ovalProgress, // ← send 0..1 to painter
       ));
     }
 
@@ -156,7 +175,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _countdownProgress = 1.0;
     _countdownSeconds = 3;
 
-    // Update HUD immediately
+    // Update HUD immediately (keep current ovalProgress)
     _setHud(_hud.value.copyWith(
       countdownSeconds: _countdownSeconds,
       countdownProgress: _countdownProgress,
@@ -181,6 +200,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       _setHud(_hud.value.copyWith(
         countdownSeconds: _countdownSeconds == 0 ? 1 : _countdownSeconds,
         countdownProgress: _countdownProgress,
+        // ovalProgress unchanged here
       ));
 
       // Abort if face lost (your real code should also abort if any rule fails)
@@ -204,6 +224,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _setHud(_hud.value.copyWith(
       countdownSeconds: null,
       countdownProgress: null,
+      // keep ovalProgress as-is so the arc remains visible after cancel
     ));
   }
 

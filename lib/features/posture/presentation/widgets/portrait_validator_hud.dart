@@ -1,7 +1,7 @@
 // lib/features/posture/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
-import 'dart:math' as math; // ← for oval sampling
+import 'dart:math' as math; // ← for oval sampling & arc sweep
 
 /// Treat empty/whitespace strings as null so the HUD won't render extra space.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -72,6 +72,7 @@ class PortraitUiModel {
     this.checkEyes = Tri.pending,
     this.checkLighting = Tri.pending,
     this.checkBackground = Tri.pending,
+    this.ovalProgress, // ← NEW: 0..1 fraction of the oval perimeter to draw in green
   });
 
   final String statusLabel;   // e.g., Adjusting / Ready
@@ -89,6 +90,9 @@ class PortraitUiModel {
   final Tri checkLighting;
   final Tri checkBackground;
 
+  /// 0..1 proportion of the oval to paint in green (e.g., 0.6 for 60%).
+  final double? ovalProgress; // ← NEW
+
   PortraitUiModel copyWith({
     String? statusLabel,
     String? privacyLabel,
@@ -101,6 +105,7 @@ class PortraitUiModel {
     Tri? checkEyes,
     Tri? checkLighting,
     Tri? checkBackground,
+    double? ovalProgress, // ← NEW
   }) {
     return PortraitUiModel(
       statusLabel: statusLabel ?? this.statusLabel,
@@ -114,6 +119,7 @@ class PortraitUiModel {
       checkEyes: checkEyes ?? this.checkEyes,
       checkLighting: checkLighting ?? this.checkLighting,
       checkBackground: checkBackground ?? this.checkBackground,
+      ovalProgress: ovalProgress ?? this.ovalProgress, // ← NEW
     );
   }
 }
@@ -160,6 +166,7 @@ class PortraitValidatorHUD extends StatelessWidget {
                   showSafeBox: showSafeBox,
                   shadeOutsideOval: true, // NEW
                   shadeOpacity: 0.30,     // NEW (30%)
+                  progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(), // ← NEW
                 ),
               ),
             ),
@@ -248,6 +255,7 @@ class _GhostPainter extends CustomPainter {
     this.showSafeBox = true,
     this.shadeOutsideOval = true, // NEW
     this.shadeOpacity = 0.30,     // NEW
+    this.progress = 0.0,          // NEW: 0..1 fraction of arc to draw in green
   });
 
   final Color color;
@@ -259,6 +267,9 @@ class _GhostPainter extends CustomPainter {
   // NEW
   final bool shadeOutsideOval;
   final double shadeOpacity;
+
+  /// NEW: 0..1 of the oval perimeter to be highlighted in green.
+  final double progress;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -278,14 +289,30 @@ class _GhostPainter extends CustomPainter {
     }
     // ───────────────────────────────────────────────────────────────────
 
-    final paint = Paint()
+    // Base oval
+    final base = Paint()
       ..color = color.withOpacity(opacity)
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth
       ..isAntiAlias = true;
+    canvas.drawOval(ovalRect, base);
 
-    // Oval stroke (drawn after mask so it’s visible)
-    canvas.drawOval(ovalRect, paint);
+    // NEW: draw the green fraction as an arc along the oval
+    final p = progress.clamp(0.0, 1.0);
+    if (p > 0) {
+      final arcPaint = Paint()
+        ..color = Colors.greenAccent
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth + 2
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      // Start at 12 o’clock (-π/2) and sweep clockwise by p * 2π
+      const startAngle = -math.pi / 2;
+      final sweepAngle = p * 2 * math.pi;
+
+      canvas.drawArc(ovalRect, startAngle, sweepAngle, false, arcPaint);
+    }
 
     // Safe area rounded box — draw only if enabled
     if (showSafeBox) {
@@ -295,12 +322,12 @@ class _GhostPainter extends CustomPainter {
         size.width * 0.84,
         size.height * 0.64,
       );
-      final r = Radius.circular(16);
+      final r = const Radius.circular(16);
       final rr = RRect.fromRectAndCorners(
         safeRect,
         topLeft: r, topRight: r, bottomLeft: r, bottomRight: r,
       );
-      canvas.drawRRect(rr, paint..strokeWidth = strokeWidth);
+      canvas.drawRRect(rr, base..strokeWidth = strokeWidth);
     }
   }
 
@@ -311,8 +338,9 @@ class _GhostPainter extends CustomPainter {
            old.color != color ||
            old.showGhost != showGhost ||
            old.showSafeBox != showSafeBox ||
-           old.shadeOutsideOval != shadeOutsideOval ||     // NEW
-           old.shadeOpacity != shadeOpacity;               // NEW
+           old.shadeOutsideOval != shadeOutsideOval || // NEW
+           old.shadeOpacity != shadeOpacity ||         // NEW
+           old.progress != progress;                   // NEW
   }
 }
 
