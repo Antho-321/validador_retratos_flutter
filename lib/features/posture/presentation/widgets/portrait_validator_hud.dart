@@ -6,6 +6,9 @@ import 'dart:math' as math; // ← for oval sampling & arc sweep
 /// Treat empty/whitespace strings as null so the HUD won't render extra space.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
 
+/// App-specific success green (replaces Colors.greenAccent*)
+const Color kProgressGreen = Color(0xFF4DC274);
+
 /// ─────────────────────────────────────────────────────────────────────────
 /// Face-oval geometry used by _GhostPainter and other widgets.
 /// Keeping constants here avoids copy/paste drift.
@@ -72,7 +75,7 @@ class PortraitUiModel {
     this.checkEyes = Tri.pending,
     this.checkLighting = Tri.pending,
     this.checkBackground = Tri.pending,
-    this.ovalProgress, // ← NEW: 0..1 fraction of the oval perimeter to draw in green
+    this.ovalProgress, // 0..1 fraction of the oval perimeter to draw in green
   });
 
   final String statusLabel;   // e.g., Adjusting / Ready
@@ -91,7 +94,7 @@ class PortraitUiModel {
   final Tri checkBackground;
 
   /// 0..1 proportion of the oval to paint in green (e.g., 0.6 for 60%).
-  final double? ovalProgress; // ← NEW
+  final double? ovalProgress;
 
   PortraitUiModel copyWith({
     String? statusLabel,
@@ -105,7 +108,7 @@ class PortraitUiModel {
     Tri? checkEyes,
     Tri? checkLighting,
     Tri? checkBackground,
-    double? ovalProgress, // ← NEW
+    double? ovalProgress,
   }) {
     return PortraitUiModel(
       statusLabel: statusLabel ?? this.statusLabel,
@@ -119,7 +122,7 @@ class PortraitUiModel {
       checkEyes: checkEyes ?? this.checkEyes,
       checkLighting: checkLighting ?? this.checkLighting,
       checkBackground: checkBackground ?? this.checkBackground,
-      ovalProgress: ovalProgress ?? this.ovalProgress, // ← NEW
+      ovalProgress: ovalProgress ?? this.ovalProgress,
     );
   }
 }
@@ -153,6 +156,13 @@ class PortraitValidatorHUD extends StatelessWidget {
     return ValueListenableBuilder<PortraitUiModel>(
       valueListenable: modelListenable,
       builder: (context, model, _) {
+        // NEW: compute spacing so countdown ring and pill do not overlap
+        const ringSize = 92.0;
+        const ringBottom = 16.0;
+        const gap = 12.0;
+        final safeBottom = MediaQuery.of(context).padding.bottom;
+        final pillBottom = ringBottom + ringSize + gap + safeBottom;
+
         return Stack(
           children: [
             // 1) Ghost target (face oval + optional safe area)
@@ -164,9 +174,9 @@ class PortraitValidatorHUD extends StatelessWidget {
                   strokeWidth: 2.0,
                   showGhost: showGhost,
                   showSafeBox: showSafeBox,
-                  shadeOutsideOval: true, // NEW
-                  shadeOpacity: 0.30,     // NEW (30%)
-                  progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(), // ← NEW
+                  shadeOutsideOval: true,
+                  shadeOpacity: 0.30,
+                  progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
                 ),
               ),
             ),
@@ -214,11 +224,11 @@ class PortraitValidatorHUD extends StatelessWidget {
                 ),
               ),
 
-            // 4) Bottom guidance pill
+            // 4) Bottom guidance pill — moved up above the ring
             Positioned(
               left: 12,
               right: 12,
-              bottom: 88 + MediaQuery.of(context).padding.bottom,
+              bottom: pillBottom, // was: 88 + safeBottom
               child: _GuidancePill(
                 primary: model.primaryMessage,
                 secondary: model.secondaryMessage,
@@ -228,7 +238,7 @@ class PortraitValidatorHUD extends StatelessWidget {
             // 5) Countdown ring (auto-capture)
             if (model.countdownSeconds != null && model.countdownProgress != null)
               Positioned(
-                bottom: 16 + MediaQuery.of(context).padding.bottom,
+                bottom: ringBottom + safeBottom,
                 left: 0,
                 right: 0,
                 child: Center(
@@ -253,9 +263,9 @@ class _GhostPainter extends CustomPainter {
     required this.strokeWidth,
     required this.showGhost,
     this.showSafeBox = true,
-    this.shadeOutsideOval = true, // NEW
-    this.shadeOpacity = 0.30,     // NEW
-    this.progress = 0.0,          // NEW: 0..1 fraction of arc to draw in green
+    this.shadeOutsideOval = true,
+    this.shadeOpacity = 0.30,
+    this.progress = 0.0, // 0..1 fraction of arc to draw in green
   });
 
   final Color color;
@@ -264,11 +274,10 @@ class _GhostPainter extends CustomPainter {
   final bool showGhost;
   final bool showSafeBox;
 
-  // NEW
   final bool shadeOutsideOval;
   final double shadeOpacity;
 
-  /// NEW: 0..1 of the oval perimeter to be highlighted in green.
+  /// 0..1 of the oval perimeter to be highlighted in green.
   final double progress;
 
   @override
@@ -278,16 +287,15 @@ class _GhostPainter extends CustomPainter {
     // Use shared geometry so painter and helpers stay in sync
     final ovalRect = faceOvalRectFor(size);
 
-    // ── NEW: dim everything outside the oval (30% black) ───────────────
+    // Dim everything outside the oval (30% black)
     if (shadeOutsideOval) {
       final mask = Path()
         ..fillType = PathFillType.evenOdd
-        ..addRect(Offset.zero & size) // full screen
-        ..addOval(ovalRect);          // “hole”
+        ..addRect(Offset.zero & size)
+        ..addOval(ovalRect);
       final maskPaint = Paint()..color = Colors.black.withOpacity(shadeOpacity);
       canvas.drawPath(mask, maskPaint);
     }
-    // ───────────────────────────────────────────────────────────────────
 
     // Base oval
     final base = Paint()
@@ -297,13 +305,13 @@ class _GhostPainter extends CustomPainter {
       ..isAntiAlias = true;
     canvas.drawOval(ovalRect, base);
 
-    // NEW: draw the green fraction as an arc along the oval
+    // Draw the green fraction as an arc along the oval
     final p = progress.clamp(0.0, 1.0);
     if (p > 0) {
       final arcPaint = Paint()
-        ..color = Colors.greenAccent
+        ..color = kProgressGreen // ← #4DC274
         ..style = PaintingStyle.stroke
-        ..strokeWidth = strokeWidth + 2
+        ..strokeWidth = strokeWidth + 3
         ..strokeCap = StrokeCap.round
         ..isAntiAlias = true;
 
@@ -338,9 +346,9 @@ class _GhostPainter extends CustomPainter {
            old.color != color ||
            old.showGhost != showGhost ||
            old.showSafeBox != showSafeBox ||
-           old.shadeOutsideOval != shadeOutsideOval || // NEW
-           old.shadeOpacity != shadeOpacity ||         // NEW
-           old.progress != progress;                   // NEW
+           old.shadeOutsideOval != shadeOutsideOval ||
+           old.shadeOpacity != shadeOpacity ||
+           old.progress != progress;
   }
 }
 
@@ -388,7 +396,7 @@ class _ChecklistRail extends StatelessWidget {
   Color _color(Tri t) {
     switch (t) {
       case Tri.ok:
-        return Colors.greenAccent.shade400;
+        return kProgressGreen; // ← #4DC274
       case Tri.almost:
         return Colors.amber.shade400;
       case Tri.pending:
@@ -522,11 +530,7 @@ class _CountdownRing extends StatelessWidget {
             child: CircularProgressIndicator(
               value: progress,
               strokeWidth: 6,
-              valueColor: AlwaysStoppedAnimation<Color>(
-                progress > 0.34
-                    ? Colors.greenAccent
-                    : (progress > 0.12 ? Colors.amber : Colors.redAccent),
-              ),
+              valueColor: const AlwaysStoppedAnimation<Color>(kProgressGreen), // ← #4DC274
               backgroundColor: Colors.transparent,
             ),
           ),
