@@ -11,6 +11,8 @@ import '../widgets/portrait_validator_hud.dart'
 
 import '../../domain/validators/portrait_validations.dart'
   show PortraitValidator;
+import '../../domain/validators/yaw_pitch_roll.dart'
+  show yawPitchRollFromFaceMesh;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -139,30 +141,91 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       ovalProgress = report.ovalProgress; // smooth 0..1 for the HUD arc
     }
 
-    // 🔒 Lock readiness to the containment result.
-    final allChecksOk = landmarksWithinFaceOval;
+    // If face not found we already returned above.
 
-    // In _onFrame(), after computing `allChecksOk`:
-    _lastAllChecksOk = allChecksOk;
+    // 1) First rule: face inside oval (you already computed these)
+    final faceOk = landmarksWithinFaceOval;
+    double arcProgress = ovalProgress; // default to rule 1 progress
 
-    if (!_isCountingDown) {
-      // Adjusting UI while we wait for readiness gate.
-      _setHud(_hud.value.copyWith(
-        statusLabel: allChecksOk ? 'Ready' : 'Adjusting',
-        primaryMessage:
-            allChecksOk ? '¡Perfecto! ¡Permanece así!' : 'Ubica tu rostro dentro del óvalo',
-        secondaryMessage: allChecksOk ? _nullIfBlank(null) : _nullIfBlank(''),
-        checkFraming: allChecksOk ? Tri.ok : Tri.almost,
-        checkHead: allChecksOk ? Tri.ok : Tri.almost,
-        checkEyes: allChecksOk ? Tri.ok : Tri.almost,
-        checkLighting: Tri.almost,
-        checkBackground: Tri.almost,
-        ovalProgress: ovalProgress, // ← send 0..1 to painter
-      ));
+    // 2) Second rule: yaw in [-1.9°, +1.9°] — only evaluated if faceOk
+    bool yawOk = false;
+    double yawProgress = 0.0;
+    String? yawMsg;
+
+    if (faceOk) {
+      // Compute yaw (degrees) from face landmarks (image-space)
+      final imgW = frame.imageSize.width.toInt();
+      final imgH = frame.imageSize.height.toInt();
+
+      final ypr = yawPitchRollFromFaceMesh(faces!.first, imgH, imgW);
+      double yawDeg = ypr.yaw;
+
+      // If your preview is mirrored (front camera UX), flip sign for intuitive guidance
+      if (_mirror) yawDeg = -yawDeg;
+
+      // Pass condition: -1.9 <= yaw <= +1.9
+      const double deadband = 1.9;  // “OK” cone
+      const double maxOff   = 20.0; // where progress bottoms out
+
+      if (yawDeg > deadband) {
+        yawMsg = 'Gira la cabeza a la derecha';
+      } else if (yawDeg < -deadband) {
+        yawMsg = 'Gira la cabeza a la izquierda';
+      } else {
+        yawOk = true;
+      }
+
+      // Progress toward centered yaw: |yaw| ∈ [deadband, maxOff] → progress ∈ [1..0]
+      final off = (yawDeg.abs() - deadband).clamp(0.0, maxOff);
+      yawProgress = (1.0 - (off / maxOff)).clamp(0.0, 1.0);
+
+      // While we’re in rule 2, drive the green arc with yawProgress (same visual as rule 1)
+      arcProgress = yawProgress;
     }
 
+    // Gate “all checks” by both rules
+    final allChecksOk = faceOk && yawOk;
+    _lastAllChecksOk = allChecksOk;
+
+    // Update HUD (no countdown UI changes here)
+    if (!_isCountingDown) {
+      if (allChecksOk) {
+        // ⚠️ Force-clear the secondary line by creating a new model
+        final cur = _hud.value;
+        _setHud(PortraitUiModel(
+          statusLabel: 'Ready',
+          privacyLabel: cur.privacyLabel,
+          primaryMessage: '¡Perfecto! ¡Permanece así!',
+          secondaryMessage: null, // ← cleared for real
+          checkFraming: Tri.ok,
+          checkHead: Tri.ok,
+          checkEyes: cur.checkEyes ?? Tri.almost,
+          checkLighting: cur.checkLighting ?? Tri.almost,
+          checkBackground: cur.checkBackground ?? Tri.almost,
+          countdownSeconds: cur.countdownSeconds,
+          countdownProgress: cur.countdownProgress,
+          ovalProgress: arcProgress,
+        ));
+      } else {
+        // Normal path keeps using copyWith
+        _setHud(_hud.value.copyWith(
+          statusLabel: 'Adjusting',
+          primaryMessage:
+              faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
+          secondaryMessage: _nullIfBlank(faceOk ? yawMsg : ''),
+          checkFraming: faceOk ? Tri.ok : Tri.almost,
+          checkHead: faceOk ? (yawOk ? Tri.ok : Tri.almost) : Tri.pending,
+          checkEyes: Tri.almost,
+          checkLighting: Tri.almost,
+          checkBackground: Tri.almost,
+          ovalProgress: arcProgress,
+        ));
+      }
+    }
+
+    // Start countdown only when both rules pass
     if (allChecksOk && !_isCountingDown) {
-      _startCountdown(); // auto-capture feel
+      _startCountdown();
     }
   }
 
