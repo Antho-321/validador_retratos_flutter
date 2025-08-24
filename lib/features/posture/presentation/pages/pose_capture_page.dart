@@ -9,8 +9,8 @@ import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 
-// Fast analytic ellipse check (image-space) from geometry.dart
-import '../../utils/geometry.dart' show areLandmarksWithinFaceOval;
+import '../../domain/validators/portrait_validations.dart'
+  show PortraitValidator;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -27,6 +27,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
+  // Centralized validator for all portrait rules (starts with face-in-oval).
+  final PortraitValidator _validator = const PortraitValidator();
+
   // Keep current canvas size to map image↔canvas consistently.
   Size? _canvasSize;
 
@@ -34,6 +37,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   Timer? _countdownTicker;
   double _countdownProgress = 1.0; // 1 → 0
   int _countdownSeconds = 3;
+
+  // Add this field:
+  bool _lastAllChecksOk = false;
 
   // Throttle HUD updates to ~15 Hz
   DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
@@ -90,13 +96,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
   // ─────────────────────────────────────────────────────────────────────
 
-  double _progressFromChecks(List<bool> checks) {
-    if (checks.isEmpty) return 0.0;
-    final ok = checks.where((b) => b).length;
-    return ok / checks.length;
-    // Example: [true,true,true,false,false] -> 3/5 = 0.6
-  }
-
   void _onFrame() {
     final frame = widget.poseService.latestFrame.value;
 
@@ -116,35 +115,35 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         countdownProgress: null,
         ovalProgress: 0.0, // ← reset green arc
       ));
+      _lastAllChecksOk = false;
       return;
     }
 
-    // Compute readiness using fast IMAGE-space ellipse check (no polygon/mapping).
+    // Evaluate face-in-oval using the centralized validator.
     bool landmarksWithinFaceOval = false;
+    double ovalProgress = 0.0;
+
     final faces = widget.poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
 
     if (faces != null && faces.isNotEmpty && canvas != null) {
-      landmarksWithinFaceOval = areLandmarksWithinFaceOval(
-        landmarksImg: faces.first,      // image-space points (px)
-        imageSize: frame.imageSize,     // from latestFrame
-        canvasSize: canvas,             // from LayoutBuilder
-        mirror: _mirror,                // must match your preview overlay
-        fit: BoxFit.cover,              // must match your preview overlay
-        minFractionInside: 1,           // tweak tolerance if needed
+      final report = _validator.evaluate(
+        landmarksImg: faces.first,     // image-space points (px)
+        imageSize: frame.imageSize,    // from latestFrame
+        canvasSize: canvas,            // from LayoutBuilder
+        mirror: _mirror,               // must match your preview overlay
+        fit: BoxFit.cover,             // must match your preview overlay
+        minFractionInside: 1.0,        // require ALL landmarks inside
       );
+      landmarksWithinFaceOval = report.faceInOval;
+      ovalProgress = report.ovalProgress; // smooth 0..1 for the HUD arc
     }
 
     // 🔒 Lock readiness to the containment result.
     final allChecksOk = landmarksWithinFaceOval;
 
-    // Build a checks list to derive the oval green-fraction.
-    // Here we map the five right-rail items to booleans (true = OK).
-    // Example target list: [true, true, true, false, false] -> 60%
-    final checks = <bool>[
-      landmarksWithinFaceOval,
-    ];
-    final ovalProgress = _progressFromChecks(checks);
+    // In _onFrame(), after computing `allChecksOk`:
+    _lastAllChecksOk = allChecksOk;
 
     if (!_isCountingDown) {
       // Adjusting UI while we wait for readiness gate.
@@ -152,8 +151,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         statusLabel: allChecksOk ? 'Ready' : 'Adjusting',
         primaryMessage:
             allChecksOk ? '¡Perfecto! ¡Permanece así!' : 'Ubica tu rostro dentro del óvalo',
-        secondaryMessage:
-            allChecksOk ? _nullIfBlank(null) : _nullIfBlank(''),
+        secondaryMessage: allChecksOk ? _nullIfBlank(null) : _nullIfBlank(''),
         checkFraming: allChecksOk ? Tri.ok : Tri.almost,
         checkHead: allChecksOk ? Tri.ok : Tri.almost,
         checkEyes: allChecksOk ? Tri.ok : Tri.almost,
@@ -203,8 +201,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         // ovalProgress unchanged here
       ));
 
-      // Abort if face lost (your real code should also abort if any rule fails)
-      if (widget.poseService.latestFrame.value == null) {
+      // Abort if face lost OR any validation fails while counting down
+      if (widget.poseService.latestFrame.value == null || !_lastAllChecksOk) {
         _stopCountdown();
         return;
       }

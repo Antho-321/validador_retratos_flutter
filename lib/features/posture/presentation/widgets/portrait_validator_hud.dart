@@ -1,52 +1,16 @@
 // lib/features/posture/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
-import 'dart:math' as math; // ← for oval sampling & arc sweep
+import 'dart:math' as math; // ← for arc sweep
+
+import '../../core/face_oval_geometry.dart'
+  show faceOvalRectFor, faceOvalPointsFor, faceOvalPathFor;
 
 /// Treat empty/whitespace strings as null so the HUD won't render extra space.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
 
 /// App-specific success green (replaces Colors.greenAccent*)
 const Color kProgressGreen = Color(0xFF4DC274);
-
-/// ─────────────────────────────────────────────────────────────────────────
-/// Face-oval geometry used by _GhostPainter and other widgets.
-/// Keeping constants here avoids copy/paste drift.
-/// ─────────────────────────────────────────────────────────────────────────
-
-// Same fractions used in _GhostPainter.paint(...)
-const double _kOvalWFrac = 0.56;
-const double _kOvalHFrac = 0.42;
-const double _kOvalCxFrac = 0.50;
-const double _kOvalCyFrac = 0.41;
-
-/// The Rect of the face oval for a given canvas [size].
-Rect faceOvalRectFor(Size size) {
-  final ovalW = size.width * _kOvalWFrac;
-  final ovalH = size.height * _kOvalHFrac;
-  final ovalCx = size.width * _kOvalCxFrac;
-  final ovalCy = size.height * _kOvalCyFrac;
-  return Rect.fromCenter(center: Offset(ovalCx, ovalCy), width: ovalW, height: ovalH);
-}
-
-/// The oval boundary as a polygon with [samples] vertices (default 120).
-List<Offset> faceOvalPointsFor(Size size, {int samples = 120}) {
-  final r = faceOvalRectFor(size);
-  final rx = r.width / 2.0;
-  final ry = r.height / 2.0;
-  final cx = r.center.dx;
-  final cy = r.center.dy;
-
-  final out = <Offset>[];
-  for (var i = 0; i < samples; i++) {
-    final t = (i * 2 * math.pi) / samples;
-    out.add(Offset(cx + rx * math.cos(t), cy + ry * math.sin(t)));
-  }
-  return out;
-}
-
-/// Optional: a ready-to-draw Path of the oval.
-Path faceOvalPathFor(Size size) => Path()..addOval(faceOvalRectFor(size));
 
 /// ─────────────────────────────────────────────────────────────────────────
 /// Centralized: edit this set to hide chip labels (case/spacing-insensitive)
@@ -156,7 +120,7 @@ class PortraitValidatorHUD extends StatelessWidget {
     return ValueListenableBuilder<PortraitUiModel>(
       valueListenable: modelListenable,
       builder: (context, model, _) {
-        // NEW: compute spacing so countdown ring and pill do not overlap
+        // compute spacing so countdown ring and pill do not overlap
         const ringSize = 92.0;
         const ringBottom = 16.0;
         const gap = 12.0;
