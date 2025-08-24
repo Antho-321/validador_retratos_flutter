@@ -10,9 +10,9 @@ import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 
 import '../../domain/validators/portrait_validations.dart'
-  show PortraitValidator;
+    show PortraitValidator;
 import '../../domain/validators/yaw_pitch_roll.dart'
-  show yawPitchRollFromFaceMesh;
+    show yawPitchRollFromFaceMesh;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -40,16 +40,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   double _countdownProgress = 1.0; // 1 → 0
   int _countdownSeconds = 3;
 
-  // Add this field:
+  // Validation state
   bool _lastAllChecksOk = false;
+
+  // Require stability before starting countdown (debounce)
+  DateTime? _readySince;
+  static const _readyHold = Duration(milliseconds: 250);
 
   // Throttle HUD updates to ~15 Hz
   DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
   static const _hudMinInterval = Duration(milliseconds: 66);
 
-  void _setHud(PortraitUiModel next) {
+  void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
-    if (now.difference(_lastHudPush) < _hudMinInterval) return;
+    if (!force && now.difference(_lastHudPush) < _hudMinInterval) return;
 
     final cur = _hud.value;
     final same =
@@ -63,7 +67,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         cur.checkEyes == next.checkEyes &&
         cur.checkLighting == next.checkLighting &&
         cur.checkBackground == next.checkBackground &&
-        cur.ovalProgress == next.ovalProgress; // ← include progress equality
+        cur.ovalProgress == next.ovalProgress;
 
     if (!same) {
       _hud.value = next;
@@ -80,7 +84,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         privacyLabel: 'On-device',
         primaryMessage: 'Ubica tu rostro dentro del óvalo',
         secondaryMessage: _nullIfBlank(''),
-        ovalProgress: 0.0, // ← start at 0%
+        ovalProgress: 0.0, // start at 0%
       ),
     );
 
@@ -104,19 +108,24 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     if (frame == null) {
       // Lost face → abort countdown and reset.
       _stopCountdown();
-      _setHud(_hud.value.copyWith(
-        statusLabel: 'Searching',
-        primaryMessage: 'Show your face in the oval',
-        secondaryMessage: _nullIfBlank(null), // stays null
-        checkFraming: Tri.pending,
-        checkHead: Tri.pending,
-        checkEyes: Tri.pending,
-        checkLighting: Tri.pending,
-        checkBackground: Tri.pending,
-        countdownSeconds: null,
-        countdownProgress: null,
-        ovalProgress: 0.0, // ← reset green arc
-      ));
+      final cur = _hud.value;
+      _setHud(
+        PortraitUiModel(
+          statusLabel: 'Searching',
+          privacyLabel: cur.privacyLabel,
+          primaryMessage: 'Show your face in the oval',
+          secondaryMessage: null,
+          checkFraming: Tri.pending,
+          checkHead: Tri.pending,
+          checkEyes: Tri.pending,
+          checkLighting: Tri.pending,
+          checkBackground: Tri.pending,
+          countdownSeconds: null,
+          countdownProgress: null,
+          ovalProgress: 0.0,
+        ),
+      );
+      _readySince = null;
       _lastAllChecksOk = false;
       return;
     }
@@ -141,90 +150,106 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       ovalProgress = report.ovalProgress; // smooth 0..1 for the HUD arc
     }
 
-    // If face not found we already returned above.
-
-    // 1) First rule: face inside oval (you already computed these)
+    // 1) First rule: face inside oval
     final faceOk = landmarksWithinFaceOval;
     double arcProgress = ovalProgress; // default to rule 1 progress
 
-    // 2) Second rule: yaw in [-1.9°, +1.9°] — only evaluated if faceOk
+    // 2) Second rule: yaw in [-2°, +2°] — only evaluated if faceOk
     bool yawOk = false;
     double yawProgress = 0.0;
     String? yawMsg;
 
     if (faceOk) {
-      // Compute yaw (degrees) from face landmarks (image-space)
       final imgW = frame.imageSize.width.toInt();
       final imgH = frame.imageSize.height.toInt();
 
       final ypr = yawPitchRollFromFaceMesh(faces!.first, imgH, imgW);
       double yawDeg = ypr.yaw;
 
-      // If your preview is mirrored (front camera UX), flip sign for intuitive guidance
       if (_mirror) yawDeg = -yawDeg;
 
-      // Pass condition: -1.9 <= yaw <= +1.9
-      const double deadband = 1.9;  // “OK” cone
+      const double deadband = 2;  // OK cone
       const double maxOff   = 20.0; // where progress bottoms out
 
       if (yawDeg > deadband) {
-        yawMsg = 'Gira la cabeza a la derecha';
+        yawMsg = 'Gira ligeramente la cabeza a la derecha';
       } else if (yawDeg < -deadband) {
-        yawMsg = 'Gira la cabeza a la izquierda';
+        yawMsg = 'Gira ligeramente la cabeza a la izquierda';
       } else {
         yawOk = true;
       }
 
-      // Progress toward centered yaw: |yaw| ∈ [deadband, maxOff] → progress ∈ [1..0]
       final off = (yawDeg.abs() - deadband).clamp(0.0, maxOff);
       yawProgress = (1.0 - (off / maxOff)).clamp(0.0, 1.0);
-
-      // While we’re in rule 2, drive the green arc with yawProgress (same visual as rule 1)
       arcProgress = yawProgress;
     }
 
     // Gate “all checks” by both rules
     final allChecksOk = faceOk && yawOk;
+
+    // Track stability window
+    final now = DateTime.now();
+    if (allChecksOk) {
+      _readySince ??= now;
+    } else {
+      _readySince = null;
+    }
+
+    // If we were counting down and any validation failed, stop now
+    if (_isCountingDown && !allChecksOk) {
+      _stopCountdown();
+    }
+
     _lastAllChecksOk = allChecksOk;
 
     // Update HUD (no countdown UI changes here)
     if (!_isCountingDown) {
+      final cur = _hud.value;
       if (allChecksOk) {
-        // ⚠️ Force-clear the secondary line by creating a new model
-        final cur = _hud.value;
-        _setHud(PortraitUiModel(
-          statusLabel: 'Ready',
-          privacyLabel: cur.privacyLabel,
-          primaryMessage: '¡Perfecto! ¡Permanece así!',
-          secondaryMessage: null, // ← cleared for real
-          checkFraming: Tri.ok,
-          checkHead: Tri.ok,
-          checkEyes: cur.checkEyes ?? Tri.almost,
-          checkLighting: cur.checkLighting ?? Tri.almost,
-          checkBackground: cur.checkBackground ?? Tri.almost,
-          countdownSeconds: cur.countdownSeconds,
-          countdownProgress: cur.countdownProgress,
-          ovalProgress: arcProgress,
-        ));
+        // Clear secondary & countdown while "Ready"; _startCountdown() will set them.
+        _setHud(
+          PortraitUiModel(
+            statusLabel: 'Ready',
+            privacyLabel: cur.privacyLabel,
+            primaryMessage: '¡Perfecto! ¡Permanece así!',
+            secondaryMessage: null,
+            checkFraming: Tri.ok,
+            checkHead: Tri.ok,
+            checkEyes: cur.checkEyes ?? Tri.almost,
+            checkLighting: cur.checkLighting ?? Tri.almost,
+            checkBackground: cur.checkBackground ?? Tri.almost,
+            countdownSeconds: null,      // ensure no stale ring shows
+            countdownProgress: null,     // ensure no stale ring shows
+            ovalProgress: arcProgress,
+          ),
+        );
       } else {
-        // Normal path keeps using copyWith
-        _setHud(_hud.value.copyWith(
-          statusLabel: 'Adjusting',
-          primaryMessage:
-              faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
-          secondaryMessage: _nullIfBlank(faceOk ? yawMsg : ''),
-          checkFraming: faceOk ? Tri.ok : Tri.almost,
-          checkHead: faceOk ? (yawOk ? Tri.ok : Tri.almost) : Tri.pending,
-          checkEyes: Tri.almost,
-          checkLighting: Tri.almost,
-          checkBackground: Tri.almost,
-          ovalProgress: arcProgress,
-        ));
+        // Build a fresh model so countdown fields are truly null and hints update.
+        _setHud(
+          PortraitUiModel(
+            statusLabel: 'Adjusting',
+            privacyLabel: cur.privacyLabel,
+            primaryMessage:
+                faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
+            secondaryMessage: _nullIfBlank(faceOk ? yawMsg : ''),
+            checkFraming: faceOk ? Tri.ok : Tri.almost,
+            checkHead: faceOk ? (yawOk ? Tri.ok : Tri.almost) : Tri.pending,
+            checkEyes: Tri.almost,
+            checkLighting: Tri.almost,
+            checkBackground: Tri.almost,
+            countdownSeconds: null,    // hard-clear to avoid race with throttle
+            countdownProgress: null,   // hard-clear to avoid race with throttle
+            ovalProgress: arcProgress,
+          ),
+        );
       }
     }
 
-    // Start countdown only when both rules pass
-    if (allChecksOk && !_isCountingDown) {
+    // Start countdown only when both rules pass *and* state has been stable
+    if (!_isCountingDown &&
+        allChecksOk &&
+        _readySince != null &&
+        now.difference(_readySince!) >= _readyHold) {
       _startCountdown();
     }
   }
@@ -237,18 +262,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _countdownSeconds = 3;
 
     // Update HUD immediately (keep current ovalProgress)
-    _setHud(_hud.value.copyWith(
-      countdownSeconds: _countdownSeconds,
-      countdownProgress: _countdownProgress,
-    ));
+    _setHud(
+      _hud.value.copyWith(
+        countdownSeconds: _countdownSeconds,
+        countdownProgress: _countdownProgress,
+      ),
+      force: true, // push immediately
+    );
 
     // Tick ~30 fps for smooth ring, for 3 seconds total.
     const totalMs = 3000;
     const tickMs = 33;
     int elapsed = 0;
 
-    _countdownTicker =
-        Timer.periodic(const Duration(milliseconds: tickMs), (t) {
+    _countdownTicker = Timer.periodic(const Duration(milliseconds: tickMs), (t) {
       elapsed += tickMs;
       final remainingMs = (totalMs - elapsed).clamp(0, totalMs);
       _countdownProgress = remainingMs / totalMs;
@@ -258,11 +285,12 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         _countdownSeconds = nextSeconds;
       }
 
-      _setHud(_hud.value.copyWith(
-        countdownSeconds: _countdownSeconds == 0 ? 1 : _countdownSeconds,
-        countdownProgress: _countdownProgress,
-        // ovalProgress unchanged here
-      ));
+      _setHud(
+        _hud.value.copyWith(
+          countdownSeconds: _countdownSeconds == 0 ? 1 : _countdownSeconds,
+          countdownProgress: _countdownProgress,
+        ),
+      );
 
       // Abort if face lost OR any validation fails while counting down
       if (widget.poseService.latestFrame.value == null || !_lastAllChecksOk) {
@@ -271,10 +299,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
 
       if (elapsed >= totalMs) {
-        // 🔸 Here you would trigger the actual capture.
-        // e.g., await widget.poseService.captureStill();
+        // 🔸 Trigger the actual capture here if needed.
         _stopCountdown();
-        // Keep UI in adjusting state; your review screen can take over here.
       }
     });
   }
@@ -282,11 +308,26 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void _stopCountdown() {
     _countdownTicker?.cancel();
     _countdownTicker = null;
-    _setHud(_hud.value.copyWith(
-      countdownSeconds: null,
-      countdownProgress: null,
-      // keep ovalProgress as-is so the arc remains visible after cancel
-    ));
+
+    final cur = _hud.value;
+    // Build a fresh model so countdown fields become truly null; push immediately.
+    _setHud(
+      PortraitUiModel(
+        statusLabel: cur.statusLabel,
+        privacyLabel: cur.privacyLabel,
+        primaryMessage: cur.primaryMessage,
+        secondaryMessage: cur.secondaryMessage,
+        checkFraming: cur.checkFraming,
+        checkHead: cur.checkHead,
+        checkEyes: cur.checkEyes,
+        checkLighting: cur.checkLighting,
+        checkBackground: cur.checkBackground,
+        countdownSeconds: null,     // cleared for real
+        countdownProgress: null,    // cleared for real
+        ovalProgress: cur.ovalProgress,
+      ),
+      force: true,
+    );
   }
 
   @override
