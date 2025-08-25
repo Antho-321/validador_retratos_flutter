@@ -107,6 +107,7 @@ class PoseWebRTCService {
   final Map<String, RTCDataChannel> _resultsPerTask = {}; // task -> DC
 
   MediaStream? _localStream;
+  MediaStream? get localStream => _localStream; // ← added getter
   RTCRtpTransceiver? _videoTransceiver;
 
   Timer? _rtpStatsTimer;
@@ -454,9 +455,9 @@ class PoseWebRTCService {
     return c.future;
   }
 
-  // ================================
+  // ===============================
   // Data channels
-  // ================================
+  // ===============================
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {
@@ -990,6 +991,16 @@ class PoseWebRTCService {
     try {
       await _pc?.close();
     } catch (_) {}
+
+    // Stop local tracks explicitly before disposing the stream/renderer
+    try {
+      _localStream?.getTracks().forEach((t) {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+    } catch (_) {}
+
     try {
       await localRenderer.dispose();
     } catch (_) {}
@@ -999,6 +1010,8 @@ class PoseWebRTCService {
     try {
       await _localStream?.dispose();
     } catch (_) {}
+
+    _localStream = null; // ← ensure getter returns null after dispose
 
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();

@@ -1,7 +1,11 @@
 // lib/features/posture/presentation/pages/pose_capture_page.dart
 import 'dart:async';
+import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData;
 import 'dart:ui' show Size; // for LayoutBuilder size
+import 'dart:ui' as ui show Image, ImageByteFormat;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../services/pose_webrtc_service.dart';
@@ -66,6 +70,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
   static const _hudMinInterval = Duration(milliseconds: 66);
 
+  // Snapshot state
+  final GlobalKey _previewKey = GlobalKey(); // wraps only the camera preview
+  Uint8List? _capturedPng; // captured bytes (from WebRTC track or boundary fallback)
+
+  // Capture-mode flag to hide preview/HUD instantly at T=0
+  bool _isCapturing = false;
+
   void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
     if (!force && now.difference(_lastHudPush) < _hudMinInterval) return;
@@ -103,7 +114,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       ),
     );
 
-    // Listen to frames and drive a minimal readiness model.
+    // Start receiving pose frames.
     widget.poseService.latestFrame.addListener(_onFrame);
   }
 
@@ -116,8 +127,62 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   }
 
   // ─────────────────────────────────────────────────────────────────────
+  /// Preferred still capture: grab a frame directly from the local WebRTC video track.
+  /// Falls back to boundary snapshot if `captureFrame` isn't available.
+  Future<void> _captureFromWebRtcTrack() async {
+    try {
+      MediaStream? stream =
+          widget.poseService.localRenderer.srcObject ?? widget.poseService.localStream;
+      if (stream == null || stream.getVideoTracks().isEmpty) {
+        throw StateError('No local WebRTC video track available');
+      }
+
+      final track = stream.getVideoTracks().first;
+      final dynamic dynTrack = track;
+
+      final Object data = await dynTrack.captureFrame(); // may be Uint8List / ByteBuffer / ByteData
+      late final Uint8List bytes;
+
+      if (data is Uint8List) {
+        bytes = data;
+      } else if (data is ByteBuffer) {
+        bytes = data.asUint8List();
+      } else if (data is ByteData) {
+        bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      } else {
+        throw StateError('Unsupported captureFrame type: ${data.runtimeType}');
+      }
+
+      if (!mounted) return;
+      if (bytes.isNotEmpty) {
+        setState(() {
+          _capturedPng = bytes;   // if your plugin returns encoded PNG/JPEG
+          _isCapturing = false;
+          // Clear stability latch so we don't instantly re-arm.
+          _readySince = null;
+          _lastAllChecksOk = false;
+        });
+        return;
+      }
+    } catch (e) {
+      print('captureFrame failed, falling back to boundary: $e');
+    }
+
+    await _captureSnapshot();
+    if (mounted) {
+      setState(() {
+        _isCapturing = false;
+        // Also clear stability on fallback path.
+        _readySince = null;
+        _lastAllChecksOk = false;
+      });
+    }
+  }
 
   void _onFrame() {
+    // While capturing OR while a photo is displayed, ignore frame/HUD updates.
+    if (_isCapturing || _capturedPng != null) return;
+
     final frame = widget.poseService.latestFrame.value;
 
     if (frame == null) {
@@ -148,40 +213,40 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     // Defaults when we can't evaluate.
     bool faceOk = false;
     bool yawOk = false;
-    bool pitchOk = false;        // NEW
+    bool pitchOk = false;
     bool allChecksOk = false;
     double arcProgress = 0.0;
     String? yawMsg;
-    String? pitchMsg;            // NEW
+    String? pitchMsg;
 
     final faces = widget.poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
 
     if (faces != null && faces.isNotEmpty && canvas != null) {
       final report = _validator.evaluate(
-        landmarksImg: faces.first,     // image-space points (px)
-        imageSize: frame.imageSize,    // from latestFrame
-        canvasSize: canvas,            // from LayoutBuilder
-        mirror: _mirror,               // must match your preview overlay
-        fit: BoxFit.cover,             // must match your preview overlay
-        minFractionInside: 1.0,        // require ALL landmarks inside
+        landmarksImg: faces.first, // image-space points (px)
+        imageSize: frame.imageSize, // from latestFrame
+        canvasSize: canvas, // from LayoutBuilder
+        mirror: _mirror, // must match your preview overlay
+        fit: BoxFit.cover, // must match your preview overlay
+        minFractionInside: 1.0, // require ALL landmarks inside
 
         // Yaw thresholds
         enableYaw: true,
         yawDeadbandDeg: 2.2,
         yawMaxOffDeg: 20.0,
 
-        // Pitch thresholds (NEW)
+        // Pitch thresholds
         enablePitch: true,
         pitchDeadbandDeg: 2.2,
         pitchMaxOffDeg: 20.0,
       );
 
-      faceOk      = report.faceInOval;
-      yawOk       = report.yawOk;
-      pitchOk     = report.pitchOk;          // NEW
+      faceOk = report.faceInOval;
+      yawOk = report.yawOk;
+      pitchOk = report.pitchOk;
       allChecksOk = report.allChecksOk;
-      arcProgress = report.ovalProgress;     // switches to head progress when faceOk
+      arcProgress = report.ovalProgress; // switches to head progress when faceOk
 
       // Build a single hint preferring the worse offender (yaw vs. pitch)
       if (faceOk && (!yawOk || !pitchOk)) {
@@ -192,8 +257,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
         // Pitch hint
         final pHint = report.pitchDeg > 0
-            ? 'Sube ligeramente la cabeza'   // pitch > 0 → sube
-            : 'Baja ligeramente la cabeza';  // pitch < 0 → baja
+            ? 'Sube ligeramente la cabeza' // pitch > 0 → sube
+            : 'Baja ligeramente la cabeza'; // pitch < 0 → baja
 
         // Choose the lower progress (i.e., the worse offender)
         final useYaw =
@@ -237,8 +302,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             checkEyes: cur.checkEyes ?? Tri.almost,
             checkLighting: cur.checkLighting ?? Tri.almost,
             checkBackground: cur.checkBackground ?? Tri.almost,
-            countdownSeconds: null,      // ensure no stale ring shows
-            countdownProgress: null,     // ensure no stale ring shows
+            countdownSeconds: null, // ensure no stale ring shows
+            countdownProgress: null, // ensure no stale ring shows
             ovalProgress: arcProgress,
           ),
         );
@@ -256,8 +321,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             checkEyes: Tri.almost,
             checkLighting: Tri.almost,
             checkBackground: Tri.almost,
-            countdownSeconds: null,    // hard-clear to avoid race with throttle
-            countdownProgress: null,   // hard-clear to avoid race with throttle
+            countdownSeconds: null, // hard-clear to avoid race with throttle
+            countdownProgress: null, // hard-clear to avoid race with throttle
             ovalProgress: arcProgress,
           ),
         );
@@ -280,45 +345,66 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _countdownProgress = 1.0;
 
     final int totalLogicalMs = widget.countdownDuration.inMilliseconds;
-    int totalScaledMs =
+    final int totalScaledMs =
         (totalLogicalMs / widget.countdownSpeed).round().clamp(1, 24 * 60 * 60 * 1000);
 
-    // Start digits from the logical (unscaled) duration → 3
+    // Start digits from the logical (unscaled) duration → e.g., 3
     _countdownSeconds = (totalLogicalMs / 1000.0).ceil();
 
-    _setHud(_hud.value.copyWith(
-      countdownSeconds: _countdownSeconds,
-      countdownProgress: _countdownProgress,
-    ), force: true);
+    _setHud(
+      _hud.value.copyWith(
+        countdownSeconds: _countdownSeconds,
+        countdownProgress: _countdownProgress,
+      ),
+      force: true,
+    );
 
-    int tickMs = (1000 / widget.countdownFps).round().clamp(10, 1000);
+    final int tickMs = (1000 / widget.countdownFps).round().clamp(10, 1000);
     int elapsedScaled = 0;
 
     _countdownTicker = Timer.periodic(Duration(milliseconds: tickMs), (_) {
       elapsedScaled += tickMs;
 
-      final remainingScaledMs = (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
+      final int remainingScaledMs =
+          (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
       _countdownProgress = remainingScaledMs / totalScaledMs;
 
       // Map scaled time → logical seconds (keeps 3→2→1 regardless of speed)
-      final remainingLogicalMs =
+      final int remainingLogicalMs =
           (remainingScaledMs / totalScaledMs * totalLogicalMs).round();
-      final nextSeconds = (remainingLogicalMs / 1000.0).ceil().clamp(1, _countdownSeconds);
+      final int nextSeconds =
+          (remainingLogicalMs / 1000.0).ceil().clamp(1, _countdownSeconds);
 
       if (nextSeconds != _countdownSeconds) {
         _countdownSeconds = nextSeconds;
       }
 
-      _setHud(_hud.value.copyWith(
-        countdownSeconds: _countdownSeconds,
-        countdownProgress: _countdownProgress,
-      ));
+      _setHud(
+        _hud.value.copyWith(
+          countdownSeconds: _countdownSeconds,
+          countdownProgress: _countdownProgress,
+        ),
+      );
 
+      // Abort if stream died or validations failed mid-countdown.
       if (widget.poseService.latestFrame.value == null || !_lastAllChecksOk) {
         _stopCountdown();
         return;
       }
+
+      // Countdown finished → capture, then stop.
       if (elapsedScaled >= totalScaledMs) {
+        final bool okToShoot =
+            widget.poseService.latestFrame.value != null && _lastAllChecksOk;
+
+        if (okToShoot) {
+          // Hide preview/HUD immediately at T=0
+          if (mounted) setState(() => _isCapturing = true);
+
+          // Call WebRTC-track capture immediately (skip extra frame delay).
+          unawaited(_captureFromWebRtcTrack());
+        }
+
         _stopCountdown();
       }
     });
@@ -327,6 +413,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void _stopCountdown() {
     _countdownTicker?.cancel();
     _countdownTicker = null;
+
+    // Clear stability so we don't re-arm immediately after a stop.
+    _readySince = null;
+    _lastAllChecksOk = false;
 
     final cur = _hud.value;
     // Build a fresh model so countdown fields become truly null; push immediately.
@@ -341,12 +431,43 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         checkEyes: cur.checkEyes,
         checkLighting: cur.checkLighting,
         checkBackground: cur.checkBackground,
-        countdownSeconds: null,     // cleared for real
-        countdownProgress: null,    // cleared for real
+        countdownSeconds: null, // cleared for real
+        countdownProgress: null, // cleared for real
         ovalProgress: cur.ovalProgress,
       ),
       force: true,
     );
+  }
+
+  Future<void> _captureSnapshot() async {
+    try {
+      final ctx = _previewKey.currentContext;
+      if (ctx == null) return;
+
+      final boundary = ctx.findRenderObject() as RenderRepaintBoundary?;
+      if (boundary == null) return;
+
+      // Match on-screen sharpness.
+      final dpr = MediaQuery.of(context).devicePixelRatio;
+      final ui.Image image = await boundary.toImage(pixelRatio: dpr);
+
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
+
+      if (!mounted) return;
+      setState(() {
+        _capturedPng = byteData.buffer.asUint8List();
+        _isCapturing = false;
+        // Clear stability latch after snapshot too.
+        _readySince = null;
+        _lastAllChecksOk = false;
+      });
+    } catch (e) {
+      print('Snapshot failed: $e');
+      if (mounted) {
+        setState(() => _isCapturing = false); // recover UI on failure
+      }
+    }
   }
 
   @override
@@ -362,53 +483,117 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           backgroundColor: Colors.black,
           body: Stack(
             children: [
-              // 1) Full-screen local preview
-              Positioned.fill(
-                child: RTCVideoView(
-                  svc.localRenderer,
-                  mirror: _mirror,
-                  objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
-                ),
-              ),
-
-              // 2) Low-latency landmarks overlay (your existing widget)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: PoseOverlayFast(
-                    latest: svc.latestFrame,
-                    mirror: _mirror,
-                    fit: BoxFit.cover,
+              // Live preview + overlays only when NOT capturing and no photo shown
+              if (!_isCapturing && _capturedPng == null) ...[
+                // 1) Full-screen local preview (wrapped for snapshot)
+                Positioned.fill(
+                  child: RepaintBoundary(
+                    key: _previewKey,
+                    child: RTCVideoView(
+                      svc.localRenderer,
+                      mirror: _mirror,
+                      objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   ),
                 ),
-              ),
 
-              // 3) Portrait HUD (face oval, checklist, guidance, countdown)
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: PortraitValidatorHUD(
-                    modelListenable: _hud,
-                    mirror: _mirror,
-                    fit: BoxFit.cover,
-                    showSafeBox: false, // hides the square around the oval
+                // 2) Low-latency landmarks overlay (your existing widget)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: PoseOverlayFast(
+                      latest: svc.latestFrame,
+                      mirror: _mirror,
+                      fit: BoxFit.cover,
+                    ),
                   ),
                 ),
-              ),
 
-              // 4) Optional remote PiP
-              Positioned(
-                left: 12,
-                top: 12,
-                width: 144,
-                height: 192,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: RTCVideoView(
-                    svc.remoteRenderer,
-                    mirror: _mirror, // consider false if remote is not mirrored
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                // 3) Portrait HUD (face oval, checklist, guidance, countdown)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: PortraitValidatorHUD(
+                      modelListenable: _hud,
+                      mirror: _mirror,
+                      fit: BoxFit.cover,
+                      showSafeBox: false, // hides the square around the oval
+                    ),
                   ),
                 ),
-              ),
+
+                // 4) Optional remote PiP
+                Positioned(
+                  left: 12,
+                  top: 12,
+                  width: 144,
+                  height: 192,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: RTCVideoView(
+                      svc.remoteRenderer,
+                      mirror: _mirror, // consider false if remote is not mirrored
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
+                  ),
+                ),
+              ],
+
+              // Capture in progress (hidden live UI, image not ready yet)
+              if (_isCapturing && _capturedPng == null)
+                const Positioned.fill(
+                  child: ColoredBox(
+                    color: Colors.black,
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
+                ),
+
+              // Captured photo overlay (tap/close → return to live)
+              if (_capturedPng != null)
+                Positioned.fill(
+                  child: Container(
+                    color: Colors.black,
+                    alignment: Alignment.center,
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: GestureDetector(
+                            onTap: () => setState(() {
+                              _capturedPng = null;
+                              _isCapturing = false; // restore live UI
+                              // Ensure a fresh readiness window after closing.
+                              _readySince = null;
+                              _lastAllChecksOk = false;
+                            }),
+                            child: Center(
+                              child: Image.memory(
+                                _capturedPng!,
+                                fit: BoxFit.contain,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          top: 16,
+                          right: 16,
+                          child: Material(
+                            color: Colors.black54,
+                            shape: const CircleBorder(),
+                            child: IconButton(
+                              icon: const Icon(Icons.close, color: Colors.white),
+                              onPressed: () => setState(() {
+                                _capturedPng = null;
+                                _isCapturing = false;
+                                _readySince = null;
+                                _lastAllChecksOk = false;
+                              }),
+                              tooltip: 'Cerrar',
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
             ],
           ),
         );
