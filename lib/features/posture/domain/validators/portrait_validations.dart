@@ -5,14 +5,52 @@ import 'package:flutter/widgets.dart' show BoxFit;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 import 'yaw_pitch_roll.dart' show yawPitchRollFromFaceMesh;
 
+/// Result type reused for yaw/pitch checks.
+class AngleCheck {
+  final bool ok;
+  final double progress; // 0..1
+  final double offDeg;   // exceso sobre el deadband
+  const AngleCheck({required this.ok, required this.progress, required this.offDeg});
+}
+
+/// Generic angle validator used for yaw/pitch.
+/// - If [enabled] is false -> ok=true, progress=1.0, off=0.
+/// - If |deg| <= deadband   -> ok=true, progress=1.0, off=0.
+/// - Otherwise              -> ok=false, progress decays linealmente hasta 0 en [maxOffDeg].
+AngleCheck checkAngle({
+  required bool enabled,
+  required double deg,          // ángulo firmado (p.ej., yaw o pitch)
+  required double deadbandDeg,  // tolerancia
+  required double maxOffDeg,    // cuánto exceso consideras “100% mal”
+}) {
+  if (!enabled) return const AngleCheck(ok: true, progress: 1.0, offDeg: 0.0);
+
+  final abs = deg.abs();
+  if (abs <= deadbandDeg) {
+    return const AngleCheck(ok: true, progress: 1.0, offDeg: 0.0);
+  }
+  final off = (abs - deadbandDeg).clamp(0.0, maxOffDeg).toDouble();
+  final progress = (1.0 - (off / maxOffDeg)).clamp(0.0, 1.0).toDouble();
+  return AngleCheck(ok: false, progress: progress, offDeg: off);
+}
+
 /// Report of all portrait checks (expand as you add rules).
 class PortraitValidationReport {
   const PortraitValidationReport({
     required this.faceInOval,
     required this.fractionInsideOval,
+
+    // Yaw
     required this.yawOk,
     required this.yawDeg,
     required this.yawProgress,
+
+    // Pitch
+    required this.pitchOk,
+    required this.pitchDeg,
+    required this.pitchProgress,
+
+    // UI ring & overall
     required this.ovalProgress,
     required this.allChecksOk,
   });
@@ -23,12 +61,17 @@ class PortraitValidationReport {
 
   /// Yaw rule
   final bool yawOk;
-  final double yawDeg;             // signed degrees (after mirror correction)
-  final double yawProgress;        // 0..1 (1 = perfect, 0 = worst)
+  final double yawDeg;        // signed degrees (after mirror correction)
+  final double yawProgress;   // 0..1 (1 = perfect, 0 = worst)
+
+  /// Pitch rule
+  final bool pitchOk;
+  final double pitchDeg;      // signed degrees (mirror does NOT flip pitch)
+  final double pitchProgress; // 0..1 (1 = perfect, 0 = worst)
 
   /// UI ring progress:
   /// - while face isn't inside oval -> equals fractionInsideOval
-  /// - once face is inside oval     -> equals yawProgress
+  /// - once face is inside oval     -> equals combined head progress (yaw/pitch)
   final double ovalProgress;
 
   /// Overall gate for capture/countdown
@@ -56,6 +99,11 @@ class PortraitValidator {
     bool enableYaw = true,
     double yawDeadbandDeg = 2.0,        // OK cone: [-2°, +2°]
     double yawMaxOffDeg = 20.0,         // where progress bottoms out
+
+    // Pitch rule parameters (degrees)
+    bool enablePitch = true,
+    double pitchDeadbandDeg = 2.0,      // OK cone: [-2°, +2°]
+    double pitchMaxOffDeg = 20.0,       // where progress bottoms out
   }) {
     if (landmarksImg.isEmpty ||
         imageSize.width <= 0 ||
@@ -68,6 +116,9 @@ class PortraitValidator {
         yawOk: false,
         yawDeg: 0.0,
         yawProgress: 0.0,
+        pitchOk: false,
+        pitchDeg: 0.0,
+        pitchProgress: 0.0,
         ovalProgress: 0.0,
         allChecksOk: false,
       );
@@ -100,33 +151,63 @@ class PortraitValidator {
     final fracInside = inside / mapped.length;
     final faceOk = fracInside >= (minFractionInside.clamp(0.0, 1.0));
 
-    // ── Yaw (computed in image space; mirror flip affects sign) ─────────────
+    // ── Head orientation (yaw & pitch in image space) ───────────────────────
     double yawDeg = 0.0;
     bool yawOk = false;
-    double yawProgress = 0.0;
+    double yawProgress = enableYaw ? 0.0 : 1.0; // if disabled, don't penalize
 
-    if (enableYaw && faceOk) {
-      // Use your existing estimator; it expects H/W ints (as in your page).
+    double pitchDeg = 0.0;
+    bool pitchOk = false;
+    double pitchProgress = enablePitch ? 0.0 : 1.0; // if disabled, don't penalize
+
+    if (faceOk && (enableYaw || enablePitch)) {
+      // Use your estimator once; it expects H/W ints (as in your page).
       final imgW = imageSize.width.toInt();
       final imgH = imageSize.height.toInt();
       final ypr = yawPitchRollFromFaceMesh(landmarksImg, imgH, imgW);
-      yawDeg = ypr.yaw;
-      if (mirror) yawDeg = -yawDeg; // front camera UX
 
-      // Pass/fail + progress
-      if (yawDeg.abs() <= yawDeadbandDeg) {
-        yawOk = true;
-        yawProgress = 1.0;
-      } else {
-        final off = (yawDeg.abs() - yawDeadbandDeg).clamp(0.0, yawMaxOffDeg);
-        yawProgress = (1.0 - (off / yawMaxOffDeg)).clamp(0.0, 1.0);
+      // Yaw (mirror flips sign for front camera UX)
+      if (enableYaw) {
+        yawDeg = ypr.yaw;
+        final res = checkAngle(
+          enabled: true,
+          deg: yawDeg,
+          deadbandDeg: yawDeadbandDeg,
+          maxOffDeg: yawMaxOffDeg,
+        );
+        yawOk = res.ok;
+        yawProgress = res.progress;
+      }
+
+      // Pitch (do not flip sign on mirror)
+      if (enablePitch) {
+        pitchDeg = ypr.pitch;
+        final res = checkAngle(
+          enabled: true,
+          deg: pitchDeg,
+          deadbandDeg: pitchDeadbandDeg,
+          maxOffDeg: pitchMaxOffDeg,
+        );
+        pitchOk = res.ok;
+        pitchProgress = res.progress;
       }
     }
 
-    // UI ring: first rule’s progress until face passes; then yaw progress.
-    final ringProgress = faceOk ? yawProgress : fracInside;
+    // UI ring: face progress until it passes; then combine yaw/pitch progress.
+    double headProgress = 1.0;
+    if (enableYaw && enablePitch) {
+      headProgress = _min(yawProgress, pitchProgress);
+    } else if (enableYaw) {
+      headProgress = yawProgress;
+    } else if (enablePitch) {
+      headProgress = pitchProgress;
+    }
 
-    final allOk = faceOk && (!enableYaw || yawOk);
+    final ringProgress = faceOk ? headProgress : fracInside;
+
+    final allOk = faceOk &&
+        (!enableYaw || yawOk) &&
+        (!enablePitch || pitchOk);
 
     return PortraitValidationReport(
       faceInOval: faceOk,
@@ -134,6 +215,9 @@ class PortraitValidator {
       yawOk: yawOk,
       yawDeg: yawDeg,
       yawProgress: yawProgress,
+      pitchOk: pitchOk,
+      pitchDeg: pitchDeg,
+      pitchProgress: pitchProgress,
       ovalProgress: ringProgress,
       allChecksOk: allOk,
     );

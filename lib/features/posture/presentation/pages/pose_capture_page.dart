@@ -44,7 +44,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
-  // Centralized validator for all portrait rules (oval + yaw etc.).
+  // Centralized validator for all portrait rules (oval + yaw/pitch etc.).
   final PortraitValidator _validator = const PortraitValidator();
 
   // Keep current canvas size to map image↔canvas consistently.
@@ -148,9 +148,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     // Defaults when we can't evaluate.
     bool faceOk = false;
     bool yawOk = false;
+    bool pitchOk = false;        // NEW
     bool allChecksOk = false;
     double arcProgress = 0.0;
     String? yawMsg;
+    String? pitchMsg;            // NEW
 
     final faces = widget.poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
@@ -163,21 +165,44 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         mirror: _mirror,               // must match your preview overlay
         fit: BoxFit.cover,             // must match your preview overlay
         minFractionInside: 1.0,        // require ALL landmarks inside
-        // (optional) tweak yaw thresholds here:
+
+        // Yaw thresholds
+        enableYaw: true,
         yawDeadbandDeg: 2.2,
         yawMaxOffDeg: 20.0,
+
+        // Pitch thresholds (NEW)
+        enablePitch: true,
+        pitchDeadbandDeg: 2.2,
+        pitchMaxOffDeg: 20.0,
       );
 
-      faceOk = report.faceInOval;
-      yawOk = report.yawOk;
+      faceOk      = report.faceInOval;
+      yawOk       = report.yawOk;
+      pitchOk     = report.pitchOk;          // NEW
       allChecksOk = report.allChecksOk;
-      arcProgress = report.ovalProgress; // already switches to yawProgress when faceOk
+      arcProgress = report.ovalProgress;     // switches to head progress when faceOk
 
-      // Build the hint only in UI layer using the sign of yawDeg
-      if (faceOk && !yawOk) {
-        yawMsg = report.yawDeg > 0
-            ? 'Gira ligeramente la cabeza a la derecha'
-            : 'Gira ligeramente la cabeza a la izquierda';
+      // Build a single hint preferring the worse offender (yaw vs. pitch)
+      if (faceOk && (!yawOk || !pitchOk)) {
+        // Yaw hint
+        final yHint = report.yawDeg > 0
+            ? 'Gira ligeramente la cabeza a la izquierda'
+            : 'Gira ligeramente la cabeza a la derecha';
+
+        // Pitch hint
+        final pHint = report.pitchDeg > 0
+            ? 'Sube ligeramente la cabeza'   // pitch > 0 → sube
+            : 'Baja ligeramente la cabeza';  // pitch < 0 → baja
+
+        // Choose the lower progress (i.e., the worse offender)
+        final useYaw =
+            (!yawOk && (report.yawProgress <= report.pitchProgress || pitchOk));
+        final hint = useYaw ? yHint : pHint;
+
+        // Reuse the existing secondary mechanism
+        yawMsg = hint;
+        pitchMsg = hint; // (kept if you later want to show it separately)
       }
     }
 
@@ -227,7 +252,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                 faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
             secondaryMessage: _nullIfBlank(faceOk ? yawMsg : ''),
             checkFraming: faceOk ? Tri.ok : Tri.almost,
-            checkHead: faceOk ? (yawOk ? Tri.ok : Tri.almost) : Tri.pending,
+            checkHead: faceOk ? ((yawOk && pitchOk) ? Tri.ok : Tri.almost) : Tri.pending,
             checkEyes: Tri.almost,
             checkLighting: Tri.almost,
             checkBackground: Tri.almost,
