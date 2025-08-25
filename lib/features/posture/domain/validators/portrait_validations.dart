@@ -3,24 +3,36 @@ import 'dart:ui' show Offset, Size;
 import 'package:flutter/widgets.dart' show BoxFit;
 
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
+import 'yaw_pitch_roll.dart' show yawPitchRollFromFaceMesh;
 
-/// Report of all portrait checks (add more fields as you add rules).
+/// Report of all portrait checks (expand as you add rules).
 class PortraitValidationReport {
   const PortraitValidationReport({
     required this.faceInOval,
     required this.fractionInsideOval,
+    required this.yawOk,
+    required this.yawDeg,
+    required this.yawProgress,
     required this.ovalProgress,
+    required this.allChecksOk,
   });
 
-  /// Final pass/fail for the face-in-oval rule (gated by [minFractionInside]).
+  /// Face-in-oval rule
   final bool faceInOval;
+  final double fractionInsideOval; // 0..1 smooth fraction
 
-  /// 0..1 fraction of landmarks that lie inside the oval (smooth signal).
-  final double fractionInsideOval;
+  /// Yaw rule
+  final bool yawOk;
+  final double yawDeg;             // signed degrees (after mirror correction)
+  final double yawProgress;        // 0..1 (1 = perfect, 0 = worst)
 
-  /// 0..1 progress value for the UI ring. For now equals [fractionInsideOval],
-  /// but you can change it to be a weighted mix of multiple rules later.
+  /// UI ring progress:
+  /// - while face isn't inside oval -> equals fractionInsideOval
+  /// - once face is inside oval     -> equals yawProgress
   final double ovalProgress;
+
+  /// Overall gate for capture/countdown
+  final bool allChecksOk;
 }
 
 /// Stateless validator you can keep as a field (e.g., `const PortraitValidator()`).
@@ -35,8 +47,15 @@ class PortraitValidator {
     required Size canvasSize,           // from LayoutBuilder
     bool mirror = true,                 // must match RTCVideoView.mirror
     BoxFit fit = BoxFit.cover,          // must match RTCVideoView.objectFit
+
+    // Face-in-oval rule
     double minFractionInside = 1.0,     // 1.0 = all points inside to pass
     double eps = 1e-6,                  // numeric tolerance
+
+    // Yaw rule parameters (degrees)
+    bool enableYaw = true,
+    double yawDeadbandDeg = 2.0,        // OK cone: [-2°, +2°]
+    double yawMaxOffDeg = 20.0,         // where progress bottoms out
   }) {
     if (landmarksImg.isEmpty ||
         imageSize.width <= 0 ||
@@ -46,10 +65,15 @@ class PortraitValidator {
       return const PortraitValidationReport(
         faceInOval: false,
         fractionInsideOval: 0.0,
+        yawOk: false,
+        yawDeg: 0.0,
+        yawProgress: 0.0,
         ovalProgress: 0.0,
+        allChecksOk: false,
       );
     }
 
+    // ── Face-in-oval (in canvas space, respecting fit/mirror) ────────────────
     final mapped = _mapImagePointsToCanvas(
       points: landmarksImg,
       imageSize: imageSize,
@@ -70,20 +94,48 @@ class PortraitValidator {
     for (final p in mapped) {
       final dx = p.dx - cx;
       final dy = p.dy - cy;
-      // Ellipse implicit equation: (x^2 / rx^2) + (y^2 / ry^2) <= 1
       final v = (dx * dx) / (rx2 + eps) + (dy * dy) / (ry2 + eps);
       if (v <= 1.0 + eps) inside++;
     }
-
     final fracInside = inside / mapped.length;
-    final pass = fracInside >= (minFractionInside.clamp(0.0, 1.0));
-    // UI progress — smooth fraction today; later you can blend multiple rules.
-    final progress = fracInside.clamp(0.0, 1.0);
+    final faceOk = fracInside >= (minFractionInside.clamp(0.0, 1.0));
+
+    // ── Yaw (computed in image space; mirror flip affects sign) ─────────────
+    double yawDeg = 0.0;
+    bool yawOk = false;
+    double yawProgress = 0.0;
+
+    if (enableYaw && faceOk) {
+      // Use your existing estimator; it expects H/W ints (as in your page).
+      final imgW = imageSize.width.toInt();
+      final imgH = imageSize.height.toInt();
+      final ypr = yawPitchRollFromFaceMesh(landmarksImg, imgH, imgW);
+      yawDeg = ypr.yaw;
+      if (mirror) yawDeg = -yawDeg; // front camera UX
+
+      // Pass/fail + progress
+      if (yawDeg.abs() <= yawDeadbandDeg) {
+        yawOk = true;
+        yawProgress = 1.0;
+      } else {
+        final off = (yawDeg.abs() - yawDeadbandDeg).clamp(0.0, yawMaxOffDeg);
+        yawProgress = (1.0 - (off / yawMaxOffDeg)).clamp(0.0, 1.0);
+      }
+    }
+
+    // UI ring: first rule’s progress until face passes; then yaw progress.
+    final ringProgress = faceOk ? yawProgress : fracInside;
+
+    final allOk = faceOk && (!enableYaw || yawOk);
 
     return PortraitValidationReport(
-      faceInOval: pass,
+      faceInOval: faceOk,
       fractionInsideOval: fracInside,
-      ovalProgress: progress,
+      yawOk: yawOk,
+      yawDeg: yawDeg,
+      yawProgress: yawProgress,
+      ovalProgress: ringProgress,
+      allChecksOk: allOk,
     );
   }
 
@@ -118,7 +170,6 @@ class PortraitValidator {
         dy = (ch - sh) / 2.0;
         break;
       case BoxFit.fill:
-        // Non-uniform scaling (aspect ratio changed).
         final sx = cw / iw;
         final sy = ch / ih;
         return points.map((p) {
@@ -127,8 +178,6 @@ class PortraitValidator {
           final yPos = p.dy * sy;
           return Offset(xPos, yPos);
         }).toList();
-
-      // For simplicity, treat other modes as "contain".
       default:
         scale = _min(cw / iw, ch / ih);
         sw = iw * scale;

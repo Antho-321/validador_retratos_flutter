@@ -11,8 +11,6 @@ import '../widgets/portrait_validator_hud.dart'
 
 import '../../domain/validators/portrait_validations.dart'
     show PortraitValidator;
-import '../../domain/validators/yaw_pitch_roll.dart'
-    show yawPitchRollFromFaceMesh;
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
@@ -29,7 +27,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
-  // Centralized validator for all portrait rules (starts with face-in-oval).
+  // Centralized validator for all portrait rules (oval + yaw etc.).
   final PortraitValidator _validator = const PortraitValidator();
 
   // Keep current canvas size to map image↔canvas consistently.
@@ -130,9 +128,12 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       return;
     }
 
-    // Evaluate face-in-oval using the centralized validator.
-    bool landmarksWithinFaceOval = false;
-    double ovalProgress = 0.0;
+    // Defaults when we can't evaluate.
+    bool faceOk = false;
+    bool yawOk = false;
+    bool allChecksOk = false;
+    double arcProgress = 0.0;
+    String? yawMsg;
 
     final faces = widget.poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
@@ -145,47 +146,23 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         mirror: _mirror,               // must match your preview overlay
         fit: BoxFit.cover,             // must match your preview overlay
         minFractionInside: 1.0,        // require ALL landmarks inside
+        // (optional) tweak yaw thresholds here:
+        yawDeadbandDeg: 2.1,
+        yawMaxOffDeg: 20.0,
       );
-      landmarksWithinFaceOval = report.faceInOval;
-      ovalProgress = report.ovalProgress; // smooth 0..1 for the HUD arc
-    }
 
-    // 1) First rule: face inside oval
-    final faceOk = landmarksWithinFaceOval;
-    double arcProgress = ovalProgress; // default to rule 1 progress
+      faceOk = report.faceInOval;
+      yawOk = report.yawOk;
+      allChecksOk = report.allChecksOk;
+      arcProgress = report.ovalProgress; // already switches to yawProgress when faceOk
 
-    // 2) Second rule: yaw in [-2°, +2°] — only evaluated if faceOk
-    bool yawOk = false;
-    double yawProgress = 0.0;
-    String? yawMsg;
-
-    if (faceOk) {
-      final imgW = frame.imageSize.width.toInt();
-      final imgH = frame.imageSize.height.toInt();
-
-      final ypr = yawPitchRollFromFaceMesh(faces!.first, imgH, imgW);
-      double yawDeg = ypr.yaw;
-
-      if (_mirror) yawDeg = -yawDeg;
-
-      const double deadband = 2;  // OK cone
-      const double maxOff   = 20.0; // where progress bottoms out
-
-      if (yawDeg > deadband) {
-        yawMsg = 'Gira ligeramente la cabeza a la derecha';
-      } else if (yawDeg < -deadband) {
-        yawMsg = 'Gira ligeramente la cabeza a la izquierda';
-      } else {
-        yawOk = true;
+      // Build the hint only in UI layer using the sign of yawDeg
+      if (faceOk && !yawOk) {
+        yawMsg = report.yawDeg > 0
+            ? 'Gira ligeramente la cabeza a la derecha'
+            : 'Gira ligeramente la cabeza a la izquierda';
       }
-
-      final off = (yawDeg.abs() - deadband).clamp(0.0, maxOff);
-      yawProgress = (1.0 - (off / maxOff)).clamp(0.0, 1.0);
-      arcProgress = yawProgress;
     }
-
-    // Gate “all checks” by both rules
-    final allChecksOk = faceOk && yawOk;
 
     // Track stability window
     final now = DateTime.now();
@@ -245,7 +222,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
     }
 
-    // Start countdown only when both rules pass *and* state has been stable
+    // Start countdown only when rules pass *and* state has been stable
     if (!_isCountingDown &&
         allChecksOk &&
         _readySince != null &&
