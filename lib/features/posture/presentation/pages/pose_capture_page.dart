@@ -16,8 +16,25 @@ import '../../domain/validators/portrait_validations.dart'
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
 
 class PoseCapturePage extends StatefulWidget {
-  const PoseCapturePage({super.key, required this.poseService});
+  const PoseCapturePage({
+    super.key,
+    required this.poseService,
+
+    /// Total logical duration of the countdown when [countdownSpeed] == 1.0.
+    this.countdownDuration = const Duration(seconds: 3),
+
+    /// Visual smoothness of the ring updates (frames per second).
+    this.countdownFps = 30,
+
+    /// Speed multiplier: 1.0 = normal; 2.0 = twice as fast (finishes in half the time).
+    this.countdownSpeed = 1.6,
+  })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
+        assert(countdownSpeed > 0, 'countdownSpeed must be > 0');
+
   final PoseWebRTCService poseService;
+  final Duration countdownDuration;
+  final int countdownFps;
+  final double countdownSpeed;
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
@@ -77,11 +94,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void initState() {
     super.initState();
     _hud = PortraitUiController(
-      PortraitUiModel(
+      const PortraitUiModel(
         statusLabel: 'Adjusting',
         privacyLabel: 'On-device',
         primaryMessage: 'Ubica tu rostro dentro del óvalo',
-        secondaryMessage: _nullIfBlank(''),
+        // secondaryMessage intentionally omitted (null)
         ovalProgress: 0.0, // start at 0%
       ),
     );
@@ -147,7 +164,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         fit: BoxFit.cover,             // must match your preview overlay
         minFractionInside: 1.0,        // require ALL landmarks inside
         // (optional) tweak yaw thresholds here:
-        yawDeadbandDeg: 2.1,
+        yawDeadbandDeg: 2.2,
         yawMaxOffDeg: 20.0,
       );
 
@@ -236,47 +253,47 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void _startCountdown() {
     _stopCountdown();
     _countdownProgress = 1.0;
-    _countdownSeconds = 3;
 
-    // Update HUD immediately (keep current ovalProgress)
-    _setHud(
-      _hud.value.copyWith(
-        countdownSeconds: _countdownSeconds,
-        countdownProgress: _countdownProgress,
-      ),
-      force: true, // push immediately
-    );
+    final int totalLogicalMs = widget.countdownDuration.inMilliseconds;
+    int totalScaledMs =
+        (totalLogicalMs / widget.countdownSpeed).round().clamp(1, 24 * 60 * 60 * 1000);
 
-    // Tick ~30 fps for smooth ring, for 3 seconds total.
-    const totalMs = 3000;
-    const tickMs = 33;
-    int elapsed = 0;
+    // Start digits from the logical (unscaled) duration → 3
+    _countdownSeconds = (totalLogicalMs / 1000.0).ceil();
 
-    _countdownTicker = Timer.periodic(const Duration(milliseconds: tickMs), (t) {
-      elapsed += tickMs;
-      final remainingMs = (totalMs - elapsed).clamp(0, totalMs);
-      _countdownProgress = remainingMs / totalMs;
+    _setHud(_hud.value.copyWith(
+      countdownSeconds: _countdownSeconds,
+      countdownProgress: _countdownProgress,
+    ), force: true);
 
-      final nextSeconds = (remainingMs / 1000.0).ceil();
+    int tickMs = (1000 / widget.countdownFps).round().clamp(10, 1000);
+    int elapsedScaled = 0;
+
+    _countdownTicker = Timer.periodic(Duration(milliseconds: tickMs), (_) {
+      elapsedScaled += tickMs;
+
+      final remainingScaledMs = (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
+      _countdownProgress = remainingScaledMs / totalScaledMs;
+
+      // Map scaled time → logical seconds (keeps 3→2→1 regardless of speed)
+      final remainingLogicalMs =
+          (remainingScaledMs / totalScaledMs * totalLogicalMs).round();
+      final nextSeconds = (remainingLogicalMs / 1000.0).ceil().clamp(1, _countdownSeconds);
+
       if (nextSeconds != _countdownSeconds) {
         _countdownSeconds = nextSeconds;
       }
 
-      _setHud(
-        _hud.value.copyWith(
-          countdownSeconds: _countdownSeconds == 0 ? 1 : _countdownSeconds,
-          countdownProgress: _countdownProgress,
-        ),
-      );
+      _setHud(_hud.value.copyWith(
+        countdownSeconds: _countdownSeconds,
+        countdownProgress: _countdownProgress,
+      ));
 
-      // Abort if face lost OR any validation fails while counting down
       if (widget.poseService.latestFrame.value == null || !_lastAllChecksOk) {
         _stopCountdown();
         return;
       }
-
-      if (elapsed >= totalMs) {
-        // 🔸 Trigger the actual capture here if needed.
+      if (elapsedScaled >= totalScaledMs) {
         _stopCountdown();
       }
     });
