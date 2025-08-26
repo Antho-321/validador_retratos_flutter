@@ -83,6 +83,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   // Capture-mode flag to hide preview/HUD instantly at T=0
   bool _isCapturing = false;
 
+  // Early-fire latch so we shoot as soon as digits hit '1'
+  bool _firedAtOne = false;
+
   void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
     if (!force && now.difference(_lastHudPush) < _hudMinInterval) return;
@@ -292,7 +295,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             }
           }
         }
-      
       }
 
       // Choose the worst (lowest progress) offender for the single secondary hint
@@ -395,6 +397,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _stopCountdown();
     _countdownProgress = 1.0;
 
+    // reset early-fire latch
+    _firedAtOne = false;
+
     final int totalLogicalMs = widget.countdownDuration.inMilliseconds;
     final int totalScaledMs =
         (totalLogicalMs / widget.countdownSpeed).round().clamp(1, 24 * 60 * 60 * 1000);
@@ -443,8 +448,21 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         return;
       }
 
-      // Countdown finished → capture, then stop.
-      if (elapsedScaled >= totalScaledMs) {
+      // ── Early fire: as soon as digits read "1", shoot immediately.
+      if (!_firedAtOne && nextSeconds == 1) {
+        final bool okToShoot =
+            widget.poseService.latestFrame.value != null && _lastAllChecksOk;
+        if (okToShoot) {
+          if (mounted) setState(() => _isCapturing = true);
+          _firedAtOne = true;
+          unawaited(_captureFromWebRtcTrack());
+          _stopCountdown(); // stop ring now; we've taken the shot
+          return; // prevent falling through to "finished" path this tick
+        }
+      }
+
+      // Countdown finished → capture, then stop. (Fallback if not fired at "1")
+      if (!_firedAtOne && elapsedScaled >= totalScaledMs) {
         final bool okToShoot =
             widget.poseService.latestFrame.value != null && _lastAllChecksOk;
 
