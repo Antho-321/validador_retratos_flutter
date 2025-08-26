@@ -48,8 +48,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
 
-  // Centralized validator for all portrait rules (oval + yaw/pitch etc.).
+  // Centralized validator for all portrait rules (oval + yaw/pitch/roll).
   final PortraitValidator _validator = const PortraitValidator();
+
+  // Angle thresholds (deg)
+  static const double _yawDeadbandDeg = 2.2;
+  static const double _pitchDeadbandDeg = 2.2;
+  static const double _rollDeadbandDeg = 179; // small tilt tolerance
+  static const double _maxOffDeg = 20.0;
 
   // Keep current canvas size to map image↔canvas consistently.
   Size? _canvasSize;
@@ -165,6 +171,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         return;
       }
     } catch (e) {
+      // ignore: avoid_print
       print('captureFrame failed, falling back to boundary: $e');
     }
 
@@ -214,10 +221,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     bool faceOk = false;
     bool yawOk = false;
     bool pitchOk = false;
+    bool rollOk = false;
     bool allChecksOk = false;
     double arcProgress = 0.0;
+
     String? yawMsg;
     String? pitchMsg;
+    String? rollMsg;
 
     final faces = widget.poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
@@ -233,41 +243,82 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
         // Yaw thresholds
         enableYaw: true,
-        yawDeadbandDeg: 2.2,
-        yawMaxOffDeg: 20.0,
+        yawDeadbandDeg: _yawDeadbandDeg,
+        yawMaxOffDeg: _maxOffDeg,
 
         // Pitch thresholds
         enablePitch: true,
-        pitchDeadbandDeg: 2.2,
-        pitchMaxOffDeg: 20.0,
+        pitchDeadbandDeg: _pitchDeadbandDeg,
+        pitchMaxOffDeg: _maxOffDeg,
+
+        // Roll thresholds (now enabled)
+        enableRoll: true,
+        rollDeadbandDeg: _rollDeadbandDeg,
+        rollMaxOffDeg: _maxOffDeg,
       );
 
       faceOk = report.faceInOval;
       yawOk = report.yawOk;
       pitchOk = report.pitchOk;
+      rollOk = report.rollOk;
       allChecksOk = report.allChecksOk;
       arcProgress = report.ovalProgress; // switches to head progress when faceOk
 
-      // Build a single hint preferring the worse offender (yaw vs. pitch)
-      if (faceOk && (!yawOk || !pitchOk)) {
-        // Yaw hint
-        final yHint = report.yawDeg > 0
-            ? 'Gira ligeramente la cabeza a la izquierda'
-            : 'Gira ligeramente la cabeza a la derecha';
+      // Build per-axis hints
+      if (faceOk && (!yawOk || !pitchOk || !rollOk)) {
+        // Yaw hint (left/right)
+        if (!yawOk) {
+          yawMsg = report.yawDeg > 0
+              ? 'Gira ligeramente la cabeza a la izquierda'
+              : 'Gira ligeramente la cabeza a la derecha';
+        }
 
-        // Pitch hint
-        final pHint = report.pitchDeg > 0
-            ? 'Sube ligeramente la cabeza' // pitch > 0 → sube
-            : 'Baja ligeramente la cabeza'; // pitch < 0 → baja
+        // Pitch hint (up/down)
+        if (!pitchOk) {
+          pitchMsg = report.pitchDeg > 0
+              ? 'Sube ligeramente la cabeza'
+              : 'Baja ligeramente la cabeza';
+        }
 
-        // Choose the lower progress (i.e., the worse offender)
-        final useYaw =
-            (!yawOk && (report.yawProgress <= report.pitchProgress || pitchOk));
-        final hint = useYaw ? yHint : pHint;
+        // Roll hint (clockwise/counterclockwise)
+        if (!rollOk) {
+          final deadband = _rollDeadbandDeg;
+          final absRoll = report.rollDeg.abs();
+          if (absRoll < deadband) {
+            if (report.rollDeg < 0) {
+              rollMsg = 'Gira ligeramente tu cabeza en sentido horario ⟳';
+            } else {
+              rollMsg = 'Gira ligeramente tu cabeza en sentido antihorario ⟲';
+            }
+          }
+        }
+      
+      }
 
-        // Reuse the existing secondary mechanism
-        yawMsg = hint;
-        pitchMsg = hint; // (kept if you later want to show it separately)
+      // Choose the worst (lowest progress) offender for the single secondary hint
+      String? combinedHint;
+      if (faceOk && (!yawOk || !pitchOk || !rollOk)) {
+        final issues = <MapEntry<double, String>>[];
+        if (!yawOk && yawMsg != null) {
+          issues.add(MapEntry(report.yawProgress, yawMsg));
+        }
+        if (!pitchOk && pitchMsg != null) {
+          issues.add(MapEntry(report.pitchProgress, pitchMsg));
+        }
+        if (!rollOk && rollMsg != null) {
+          issues.add(MapEntry(report.rollProgress, rollMsg));
+        }
+        if (issues.isNotEmpty) {
+          issues.sort((a, b) => a.key.compareTo(b.key)); // ascending → worst first
+          combinedHint = issues.first.value;
+        }
+      }
+
+      // Use the combined hint
+      if (combinedHint != null) {
+        yawMsg = combinedHint;
+        pitchMsg = combinedHint;
+        rollMsg = combinedHint;
       }
     }
 
@@ -315,9 +366,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             privacyLabel: cur.privacyLabel,
             primaryMessage:
                 faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
-            secondaryMessage: _nullIfBlank(faceOk ? yawMsg : ''),
+            secondaryMessage: _nullIfBlank(faceOk ? (yawMsg ?? pitchMsg ?? rollMsg ?? '') : ''),
             checkFraming: faceOk ? Tri.ok : Tri.almost,
-            checkHead: faceOk ? ((yawOk && pitchOk) ? Tri.ok : Tri.almost) : Tri.pending,
+            checkHead: faceOk ? ((yawOk && pitchOk && rollOk) ? Tri.ok : Tri.almost) : Tri.pending,
             checkEyes: Tri.almost,
             checkLighting: Tri.almost,
             checkBackground: Tri.almost,
@@ -463,6 +514,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         _lastAllChecksOk = false;
       });
     } catch (e) {
+      // ignore: avoid_print
       print('Snapshot failed: $e');
       if (mounted) {
         setState(() => _isCapturing = false); // recover UI on failure
