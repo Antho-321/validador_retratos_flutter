@@ -1,7 +1,7 @@
 // lib/features/posture/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
-import 'dart:math' as math; // ← for arc sweep
+import 'dart:math' as math; // ← for arc sweep & min()
 
 import '../../core/face_oval_geometry.dart'
   show faceOvalRectFor, faceOvalPointsFor, faceOvalPathFor;
@@ -106,6 +106,9 @@ class PortraitValidatorHUD extends StatelessWidget {
     this.showGhost = true,
     this.showSafeBox = true,
     this.showChecklist = false, // hide by default
+    this.belowMessages, // ⬅️ renders right under the primary/secondary messages
+    this.messageGap = 0.0125, // ⬅️ fraction of screen height (e.g., 1.25%)
+    this.keepAboveCountdownRing = true, // ⬅️ avoid overlapping the ring if possible
   });
 
   final ValueListenable<PortraitUiModel> modelListenable;
@@ -115,17 +118,47 @@ class PortraitValidatorHUD extends StatelessWidget {
   final bool showSafeBox;
   final bool showChecklist;
 
+  /// Anything you pass here will appear just below the primary/secondary
+  /// message block (i.e., under the guidance pill).
+  final Widget? belowMessages;
+
+  /// Fraction (0..1) of the screen height to place between the face oval
+  /// bottom and the message pill. Example: 0.015 = 1.5% of screen height.
+  final double messageGap;
+
+  /// If true, we’ll clamp the message pill upward to avoid overlapping the
+  /// countdown ring area when it’s visible.
+  final bool keepAboveCountdownRing;
+
   @override
   Widget build(BuildContext context) {
+    final screen = MediaQuery.of(context).size;
+    final safe = MediaQuery.of(context).padding;
+
+    // Countdown ring metrics (keep in sync with _CountdownRing)
+    const ringSize = 92.0;
+    const ringBottom = 16.0;
+
     return ValueListenableBuilder<PortraitUiModel>(
       valueListenable: modelListenable,
       builder: (context, model, _) {
-        // compute spacing so countdown ring and pill do not overlap
-        const ringSize = 92.0;
-        const ringBottom = 16.0;
-        const gap = 12.0;
-        final safeBottom = MediaQuery.of(context).padding.bottom;
-        final pillBottom = ringBottom + ringSize + gap + safeBottom;
+        // Compute where the face oval is, so we can anchor messages under it.
+        final ovalRect = faceOvalRectFor(screen);
+
+        // Convert fraction to pixels using screen height.
+        final double gapPx = screen.height * messageGap.clamp(0.0, 1.0).toDouble();
+
+        // Desired top position for the guidance pill: just under the oval.
+        final desiredTop = ovalRect.bottom + gapPx;
+
+        // If we want to keep above the countdown ring, clamp to the top of that area.
+        // Top edge of the ring’s bounding box:
+        final ringTop = screen.height - (ringBottom + safe.bottom + ringSize);
+
+        // Final top for message block:
+        final messagesTop = keepAboveCountdownRing
+            ? math.min(desiredTop, ringTop - 8) // leave a tiny gap above the ring
+            : desiredTop;
 
         return Stack(
           children: [
@@ -149,7 +182,7 @@ class PortraitValidatorHUD extends StatelessWidget {
             Positioned(
               left: 12,
               right: 12,
-              top: 10 + MediaQuery.of(context).padding.top,
+              top: 10 + safe.top,
               child: Row(
                 children: [
                   if (!isHiddenChipLabel(model.statusLabel))
@@ -175,7 +208,7 @@ class PortraitValidatorHUD extends StatelessWidget {
             if (showChecklist)
               Positioned(
                 right: 8,
-                top: (MediaQuery.of(context).size.height * 0.22),
+                top: (screen.height * 0.22),
                 child: _ChecklistRail(
                   items: const ['Framing', 'Head', 'Eyes', 'Light', 'BG'],
                   states: [
@@ -188,21 +221,30 @@ class PortraitValidatorHUD extends StatelessWidget {
                 ),
               ),
 
-            // 4) Bottom guidance pill — moved up above the ring
+            // 4) Guidance pill anchored under the face oval (with gap)
             Positioned(
               left: 12,
               right: 12,
-              bottom: pillBottom, // was: 88 + safeBottom
-              child: _GuidancePill(
-                primary: model.primaryMessage,
-                secondary: model.secondaryMessage,
+              top: messagesTop,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _GuidancePill(
+                    primary: model.primaryMessage,
+                    secondary: model.secondaryMessage,
+                  ),
+                  if (belowMessages != null) ...[
+                    const SizedBox(height: 8),
+                    Center(child: belowMessages!),
+                  ],
+                ],
               ),
             ),
 
             // 5) Countdown ring (auto-capture)
             if (model.countdownSeconds != null && model.countdownProgress != null)
               Positioned(
-                bottom: ringBottom + safeBottom,
+                bottom: ringBottom + safe.bottom,
                 left: 0,
                 right: 0,
                 child: Center(
@@ -279,7 +321,7 @@ class _GhostPainter extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..isAntiAlias = true;
 
-      // Start at 12 o’clock (-π/2) and sweep clockwise by p * 2π
+      // Start at 12 o’clock (-math.pi/2) and sweep clockwise by p * 2π
       const startAngle = -math.pi / 2;
       final sweepAngle = p * 2 * math.pi;
 

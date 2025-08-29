@@ -12,6 +12,8 @@ import '../../services/pose_webrtc_service.dart';
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
+import '../widgets/frame_sequence_overlay.dart'
+    show FrameSequenceOverlay, FrameSequenceController, FramePlayMode;
 
 import '../../domain/validators/portrait_validations.dart'
     show PortraitValidator;
@@ -47,6 +49,9 @@ class PoseCapturePage extends StatefulWidget {
 class _PoseCapturePageState extends State<PoseCapturePage> {
   final bool _mirror = true; // front camera UX
   late final PortraitUiController _hud;
+
+  // ── Frame sequence overlay controller ─────────────────────────────
+  late final FrameSequenceController seq;
 
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll).
   final PortraitValidator _validator = const PortraitValidator();
@@ -86,6 +91,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   // Early-fire latch so we shoot as soon as digits hit '1'
   bool _firedAtOne = false;
 
+  // ── NEW: Hint trigger & visibility for sequence ──────────────────
+  static const _kTurnRightHint = 'Gira ligeramente la cabeza a la derecha';
+  bool _turnRightSeqLoaded = false;
+  bool _showTurnRightSeq = false; // only render while hint is shown
+
   void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
     if (!force && now.difference(_lastHudPush) < _hudMinInterval) return;
@@ -113,6 +123,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   void initState() {
     super.initState();
+
+    // HUD controller
     _hud = PortraitUiController(
       const PortraitUiModel(
         statusLabel: 'Adjusting',
@@ -123,6 +135,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       ),
     );
 
+    // Init sequence controller (do NOT load frames yet; we’ll load on hint)
+    seq = FrameSequenceController(
+      fps: 30,
+      playMode: FramePlayMode.forward,
+      loop: true,
+      autoplay: true,
+    );
+
     // Start receiving pose frames.
     widget.poseService.latestFrame.addListener(_onFrame);
   }
@@ -131,6 +151,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void dispose() {
     widget.poseService.latestFrame.removeListener(_onFrame);
     _stopCountdown();
+    seq.dispose();
     _hud.dispose();
     super.dispose();
   }
@@ -217,6 +238,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       );
       _readySince = null;
       _lastAllChecksOk = false;
+
+      // Also hide/stop the sequence if it was showing
+      if (_showTurnRightSeq) {
+        _showTurnRightSeq = false;
+        // If your controller supports it, pause/stop to save cycles:
+        try { seq.pause(); } catch (_) {}
+      }
       return;
     }
 
@@ -324,6 +352,36 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
     }
 
+    // Decide the final hint that will actually be shown in the HUD:
+    final String? finalHint = faceOk ? (yawMsg ?? pitchMsg ?? rollMsg) : null;
+
+    // ── Animate only while the specific hint is active ──────────────
+    if (finalHint == _kTurnRightHint) {
+      if (!_turnRightSeqLoaded) {
+        _turnRightSeqLoaded = true;
+        // ignore: discarded_futures
+        seq.loadFromAssets(
+          directory: 'assets/frames',
+          pattern: 'frame_%04d.png',
+          startNumber: 14,
+          count: 22,
+          xStart: 0,
+          xEnd: 256,
+        );
+      }
+      if (!_showTurnRightSeq) {
+        setState(() => _showTurnRightSeq = true);
+      }
+      // Keep it running while visible (if API available)
+      try { seq.play(); } catch (_) {}
+    } else {
+      // Hint disappeared → stop/pause and hide overlay
+      if (_showTurnRightSeq) {
+        try { seq.pause(); } catch (_) {}
+        setState(() => _showTurnRightSeq = false);
+      }
+    }
+
     // Track stability window
     final now = DateTime.now();
     if (allChecksOk) {
@@ -368,7 +426,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             privacyLabel: cur.privacyLabel,
             primaryMessage:
                 faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
-            secondaryMessage: _nullIfBlank(faceOk ? (yawMsg ?? pitchMsg ?? rollMsg ?? '') : ''),
+            secondaryMessage: _nullIfBlank(faceOk ? (finalHint ?? '') : ''),
             checkFraming: faceOk ? Tri.ok : Tri.almost,
             checkHead: faceOk ? ((yawOk && pitchOk && rollOk) ? Tri.ok : Tri.almost) : Tri.pending,
             checkEyes: Tri.almost,
@@ -586,11 +644,38 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       mirror: _mirror,
                       fit: BoxFit.cover,
                       showSafeBox: false, // hides the square around the oval
+                      messageGap: 0.045,
                     ),
                   ),
                 ),
 
-                // 4) Optional remote PiP
+                // 4) Frame sequence animation overlay (ONLY while hint is active)
+                if (_showTurnRightSeq)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    // ~65% desde arriba: queda por debajo de los textos del HUD.
+                    top: constraints.maxHeight * 0.75,
+                    child: IgnorePointer(
+                      child: SizedBox(
+                        // Área de la animación (ajusta a gusto)
+                        height: constraints.maxHeight * 0.25,
+                        child: Center(
+                          child: Transform.scale(
+                            scale: 0.60,
+                            child: FrameSequenceOverlay(
+                              controller: seq,
+                              mirror: false,
+                              fit: BoxFit.contain,
+                              opacity: 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+
+                // 5) Optional remote PiP
                 Positioned(
                   left: 12,
                   top: 12,
