@@ -100,8 +100,6 @@ class PoseCaptureController extends ChangeNotifier {
   bool _firedAtOne = false;
 
   // Hint trigger & visibility for sequence
-  static const _kTurnRightHint = 'Gira ligeramente la cabeza a la derecha';
-  static const _kTurnLeftHint  = 'Gira ligeramente la cabeza a la izquierda';
   bool _turnRightSeqLoaded = false;
   bool _turnLeftSeqLoaded = false;
   bool showTurnRightSeq = false; // used as generic overlay visibility
