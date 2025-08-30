@@ -170,6 +170,10 @@ class FrameSequenceController extends ChangeNotifier {
     int? xEnd, // exclusive
     bool reverseOrder = false,
   }) async {
+    // Pause ticker to avoid start-of-animation jumps.
+    final bool wasPlaying = isPlaying;
+    pause();
+
     // Save the recipe so we can reload with a different count later.
     _assetRecipe = _AssetPatternRecipe(
       directory: directory,
@@ -203,21 +207,33 @@ class FrameSequenceController extends ChangeNotifier {
 
     await _decodeAssets(paths, xStart: xStart, xEnd: xEnd, expectGen: gen);
     if (gen != _loadGen) return; // a newer load started; drop this result
+
     _afterLoad();
+
+    // Clean restart: honor prior playing state or autoplay.
+    if (wasPlaying || autoplay) play();
   }
 
   /// Load frames from explicit asset paths (already ordered).
   Future<void> loadAssets(List<String> assetPaths) async {
+    final bool wasPlaying = isPlaying;
+    pause();
+
     _assetRecipe = null; // unknown recipe; cannot expand later automatically
     final int gen = ++_loadGen;
     await _disposeFrames();
     await _decodeAssets(assetPaths, expectGen: gen);
     if (gen != _loadGen) return;
+
     _afterLoad();
+    if (wasPlaying || autoplay) play();
   }
 
   /// Load frames from absolute file paths (e.g., temp dir); ordered list.
   Future<void> loadFiles(List<String> filePaths) async {
+    final bool wasPlaying = isPlaying;
+    pause();
+
     _assetRecipe = null; // unknown recipe; cannot expand later automatically
     final int gen = ++_loadGen;
     await _disposeFrames();
@@ -234,7 +250,9 @@ class FrameSequenceController extends ChangeNotifier {
       _frames.add(img);
     }
     if (gen != _loadGen) return;
+
     _afterLoad();
+    if (wasPlaying || autoplay) play();
   }
 
   // ── Controls ──────────────────────────────────────────────────────────
@@ -281,8 +299,14 @@ class FrameSequenceController extends ChangeNotifier {
     _index = 0;
     _activeCount = null; // default to using all newly loaded frames
     _spanForPingPong = (_len > 1) ? (_len * 2 - 2) : 1;
+
+    // If someone swapped frames without pausing, defensively reset the clock.
+    if (isPlaying) {
+      _restartClockIfPlaying();
+    }
+
     notifyListeners();
-    if (autoplay) play();
+    // Note: start (play) is handled by loaders to respect wasPlaying/autoplay.
   }
 
   Future<void> _decodeAssets(
@@ -385,9 +409,13 @@ class FrameSequenceController extends ChangeNotifier {
     _frames.clear();
   }
 
+  // Phase offset so first computed index is 0 even if clock wasn't reset.
+  int? _phaseRaw; // null => not captured yet
+
   void _startTicker() {
     _clock.reset();
     _clock.start();
+    _phaseRaw = null; // capture on first tick
 
     // Drive at ~120Hz (fast enough to match any fps up to 120).
     _timer = Timer.periodic(const Duration(milliseconds: 8), (_) {
@@ -397,23 +425,28 @@ class FrameSequenceController extends ChangeNotifier {
       if (len <= 0) return;
 
       final elapsed = _clock.elapsedMicroseconds / 1e6; // seconds
-      final raw = (elapsed * _fps).floor(); // logical frame number since start
+      final raw = (elapsed * _fps).floor();             // logical frame count since start
+
+      // Capture phase on first usable tick
+      _phaseRaw ??= raw;
+      final stepped = raw - _phaseRaw!; // starts at 0
+
       int newIndex;
 
       switch (playMode) {
         case FramePlayMode.forward:
           if (loop) {
-            newIndex = raw % len;
+            newIndex = stepped % len;
           } else {
-            newIndex = raw.clamp(0, len - 1).toInt();
+            newIndex = stepped.clamp(0, len - 1).toInt();
             if (newIndex == len - 1) pause();
           }
           break;
         case FramePlayMode.reverse:
           if (loop) {
-            newIndex = len - 1 - (raw % len);
+            newIndex = len - 1 - (stepped % len);
           } else {
-            newIndex = (len - 1 - raw).clamp(0, len - 1).toInt();
+            newIndex = (len - 1 - stepped).clamp(0, len - 1).toInt();
             if (newIndex == 0) pause();
           }
           break;
@@ -422,7 +455,7 @@ class FrameSequenceController extends ChangeNotifier {
             newIndex = 0;
           } else {
             final span = _spanForPingPong; // N*2-2 for current active window
-            final int r = loop ? (raw % span) : raw.clamp(0, span - 1).toInt();
+            final int r = loop ? (stepped % span) : stepped.clamp(0, span - 1).toInt();
             newIndex = (r < len) ? r : (span - r); // bounce back
             if (!loop && r == span - 1) pause();
           }
@@ -438,7 +471,7 @@ class FrameSequenceController extends ChangeNotifier {
 
   void _restartClockIfPlaying() {
     if (!isPlaying) return;
-    // Restart to avoid big jumps when FPS changes.
+    // Restart to avoid big jumps when FPS or sequence changes.
     pause();
     play();
   }
