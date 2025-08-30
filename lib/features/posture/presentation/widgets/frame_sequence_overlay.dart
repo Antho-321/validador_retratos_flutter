@@ -10,6 +10,27 @@ import 'package:flutter/services.dart' show rootBundle;
 /// How the sequence should play.
 enum FramePlayMode { forward, reverse, pingPong }
 
+/// Stores the last asset-loading "recipe" so we can reload with a new count.
+class _AssetPatternRecipe {
+  _AssetPatternRecipe({
+    required this.directory,
+    required this.pattern,
+    required this.startNumber,
+    required this.count,
+    this.xStart,
+    this.xEnd,
+    required this.reverseOrder,
+  });
+
+  String directory;
+  String pattern;
+  int startNumber;
+  int count;
+  int? xStart;
+  int? xEnd;
+  bool reverseOrder;
+}
+
 /// Controller that owns the decoded frames, timing, and play state.
 class FrameSequenceController extends ChangeNotifier {
   FrameSequenceController({
@@ -37,7 +58,7 @@ class FrameSequenceController extends ChangeNotifier {
   // ── State ─────────────────────────────────────────────────────────────
   bool get isLoaded => _frames.isNotEmpty;
   bool get isPlaying => _timer != null;
-  int get frameCount => _frames.length;
+  int get frameCount => _frames.length; // total loaded
   int get currentIndex => _index;
   ui.Image? get currentFrame =>
       (0 <= _index && _index < _frames.length) ? _frames[_index] : null;
@@ -48,6 +69,87 @@ class FrameSequenceController extends ChangeNotifier {
   Timer? _timer;
   int _index = 0;
   int _spanForPingPong = 0; // = N*2-2 when N>1
+  int _loadGen = 0; // generation token to cancel overlapping loads
+
+  // Dynamic playback window (for "count" at runtime)
+  int? _activeCount; // null = use all loaded frames
+  int get _len => _activeCount ?? _frames.length;
+
+  // Last asset recipe (enables reload with larger count)
+  _AssetPatternRecipe? _assetRecipe;
+
+  // Track and control the "reverseOrder" behavior at runtime.
+  bool _reverseOrderFlag = false;
+  bool get reverseOrder => _reverseOrderFlag;
+  set reverseOrder(bool v) {
+    if (v == _reverseOrderFlag) return;
+    _reverseOrderFlag = v;
+    // Keep recipe in sync for future reloads
+    if (_assetRecipe != null) _assetRecipe!.reverseOrder = v;
+
+    // If not loaded yet, nothing to reverse right now.
+    if (_frames.isEmpty) return;
+
+    // Reverse the in-memory frames. Preserve the *visible* frame by mirroring index.
+    final len = _len;
+    _reverseFramesInPlace();
+    _index = (len - 1 - _index).clamp(0, len - 1);
+    // PingPong span depends only on len; unchanged.
+    notifyListeners();
+  }
+
+  /// Public runtime "count" (playback window). Shrinks/grows up to what's loaded.
+  /// To grow beyond what's loaded, call `setCountAndReloadIfNeeded(...)`.
+  int get count => _len;
+  set count(int v) {
+    if (v <= 0 || _frames.isEmpty) return;
+    final max = _frames.length;
+    final nv = v.clamp(1, max).toInt();
+    final prev = _len;
+
+    _activeCount = (nv == max) ? null : nv;
+    _index = _index.clamp(0, _len - 1);
+    _spanForPingPong = (_len > 1) ? (_len * 2 - 2) : 1;
+
+    if (prev != _len) notifyListeners();
+  }
+
+  /// Reset to use all loaded frames.
+  void useAllFrames() {
+    if (_frames.isEmpty) return;
+    _activeCount = null;
+    _index = _index.clamp(0, _frames.length - 1);
+    _spanForPingPong = (_frames.length > 1) ? (_frames.length * 2 - 2) : 1;
+    notifyListeners();
+  }
+
+  /// If you ask for more frames than are currently loaded, this will reload
+  /// using the last asset recipe (if available). Otherwise, it just clamps.
+  Future<void> setCountAndReloadIfNeeded(int newCount) async {
+    if (newCount <= 0) return;
+
+    if (newCount <= _frames.length) {
+      count = newCount;
+      return;
+    }
+
+    final r = _assetRecipe;
+    if (r != null) {
+      await loadFromAssets(
+        directory: r.directory,
+        pattern: r.pattern,
+        startNumber: r.startNumber,
+        count: newCount,
+        xStart: r.xStart,
+        xEnd: r.xEnd,
+        reverseOrder: r.reverseOrder,
+      );
+      return;
+    }
+
+    // Fallback: no recipe to reload from; just use what's available.
+    count = _frames.length;
+  }
 
   // ── Loaders ───────────────────────────────────────────────────────────
   /// Load frames from assets using a printf-like pattern, e.g.:
@@ -68,9 +170,23 @@ class FrameSequenceController extends ChangeNotifier {
     int? xEnd, // exclusive
     bool reverseOrder = false,
   }) async {
-    await _disposeFrames();
-    final paths = <String>[];
+    // Save the recipe so we can reload with a different count later.
+    _assetRecipe = _AssetPatternRecipe(
+      directory: directory,
+      pattern: pattern,
+      startNumber: startNumber,
+      count: count,
+      xStart: xStart,
+      xEnd: xEnd,
+      reverseOrder: reverseOrder,
+    );
+    // Also sync the runtime flag so the setter reflects current load state.
+    _reverseOrderFlag = reverseOrder;
 
+    final int gen = ++_loadGen; // bump generation
+    await _disposeFrames();
+
+    final paths = <String>[];
     if (!reverseOrder) {
       // Normal order: startNumber .. startNumber + count - 1
       for (int i = 0; i < count; i++) {
@@ -85,25 +201,39 @@ class FrameSequenceController extends ChangeNotifier {
       }
     }
 
-    await _decodeAssets(paths, xStart: xStart, xEnd: xEnd);
+    await _decodeAssets(paths, xStart: xStart, xEnd: xEnd, expectGen: gen);
+    if (gen != _loadGen) return; // a newer load started; drop this result
     _afterLoad();
   }
 
   /// Load frames from explicit asset paths (already ordered).
   Future<void> loadAssets(List<String> assetPaths) async {
+    _assetRecipe = null; // unknown recipe; cannot expand later automatically
+    final int gen = ++_loadGen;
     await _disposeFrames();
-    await _decodeAssets(assetPaths);
+    await _decodeAssets(assetPaths, expectGen: gen);
+    if (gen != _loadGen) return;
     _afterLoad();
   }
 
   /// Load frames from absolute file paths (e.g., temp dir); ordered list.
   Future<void> loadFiles(List<String> filePaths) async {
+    _assetRecipe = null; // unknown recipe; cannot expand later automatically
+    final int gen = ++_loadGen;
     await _disposeFrames();
     for (final p in filePaths) {
+      // Abort mid-loop if a newer load started
+      if (gen != _loadGen) return;
+
       final bd = await _readFileBytes(p);
+      if (gen != _loadGen) return;
+
       final img = await _decodeBytes(bd);
+      if (gen != _loadGen) return;
+
       _frames.add(img);
     }
+    if (gen != _loadGen) return;
     _afterLoad();
   }
 
@@ -127,7 +257,7 @@ class FrameSequenceController extends ChangeNotifier {
 
   void seekFrame(int i) {
     if (!isLoaded) return;
-    _index = i.clamp(0, _frames.length - 1).toInt();
+    _index = i.clamp(0, _len - 1).toInt();
     notifyListeners();
   }
 
@@ -149,7 +279,8 @@ class FrameSequenceController extends ChangeNotifier {
   // ── Private helpers ───────────────────────────────────────────────────
   void _afterLoad() {
     _index = 0;
-    _spanForPingPong = (_frames.length > 1) ? (_frames.length * 2 - 2) : 1;
+    _activeCount = null; // default to using all newly loaded frames
+    _spanForPingPong = (_len > 1) ? (_len * 2 - 2) : 1;
     notifyListeners();
     if (autoplay) play();
   }
@@ -158,10 +289,16 @@ class FrameSequenceController extends ChangeNotifier {
     List<String> paths, {
     int? xStart,
     int? xEnd,
+    int? expectGen, // abort if generation changes mid-decode
   }) async {
     for (final p in paths) {
+      if (expectGen != null && expectGen != _loadGen) return;
+
       final bd = await rootBundle.load(p);
+      if (expectGen != null && expectGen != _loadGen) return;
+
       var img = await _decodeBytes(bd.buffer.asUint8List());
+      if (expectGen != null && expectGen != _loadGen) return;
 
       // Crop horizontally to [xStart, xEnd) if provided
       if (xStart != null && xEnd != null) {
@@ -183,6 +320,7 @@ class FrameSequenceController extends ChangeNotifier {
         }
       }
 
+      if (expectGen != null && expectGen != _loadGen) return;
       _frames.add(img);
     }
   }
@@ -255,6 +393,9 @@ class FrameSequenceController extends ChangeNotifier {
     _timer = Timer.periodic(const Duration(milliseconds: 8), (_) {
       if (!isLoaded) return;
 
+      final len = _len;
+      if (len <= 0) return;
+
       final elapsed = _clock.elapsedMicroseconds / 1e6; // seconds
       final raw = (elapsed * _fps).floor(); // logical frame number since start
       int newIndex;
@@ -262,29 +403,27 @@ class FrameSequenceController extends ChangeNotifier {
       switch (playMode) {
         case FramePlayMode.forward:
           if (loop) {
-            newIndex = raw % _frames.length;
+            newIndex = raw % len;
           } else {
-            newIndex = raw.clamp(0, _frames.length - 1).toInt();
-            if (newIndex == _frames.length - 1) pause();
+            newIndex = raw.clamp(0, len - 1).toInt();
+            if (newIndex == len - 1) pause();
           }
           break;
         case FramePlayMode.reverse:
           if (loop) {
-            newIndex = _frames.length - 1 - (raw % _frames.length);
+            newIndex = len - 1 - (raw % len);
           } else {
-            newIndex =
-                (_frames.length - 1 - raw).clamp(0, _frames.length - 1).toInt();
+            newIndex = (len - 1 - raw).clamp(0, len - 1).toInt();
             if (newIndex == 0) pause();
           }
           break;
         case FramePlayMode.pingPong:
-          if (_frames.length == 1) {
+          if (len == 1) {
             newIndex = 0;
           } else {
-            final span = _spanForPingPong; // N*2-2
-            final int r =
-                loop ? (raw % span) : raw.clamp(0, span - 1).toInt();
-            newIndex = (r < _frames.length) ? r : (span - r); // bounce back
+            final span = _spanForPingPong; // N*2-2 for current active window
+            final int r = loop ? (raw % span) : raw.clamp(0, span - 1).toInt();
+            newIndex = (r < len) ? r : (span - r); // bounce back
             if (!loop && r == span - 1) pause();
           }
           break;
@@ -302,6 +441,16 @@ class FrameSequenceController extends ChangeNotifier {
     // Restart to avoid big jumps when FPS changes.
     pause();
     play();
+  }
+
+  void _reverseFramesInPlace() {
+    final n = _frames.length;
+    for (int i = 0; i < n ~/ 2; i++) {
+      final j = n - 1 - i;
+      final tmp = _frames[i];
+      _frames[i] = _frames[j];
+      _frames[j] = tmp;
+    }
   }
 
   // Supports patterns like "frame_%04d.png" or "img_%d.png"
@@ -344,6 +493,8 @@ class FrameSequenceOverlay extends StatelessWidget {
       isComplex: true,
       willChange: true,
     );
+    // Note: if you intend to change mirror/fit/opacity while paused,
+    // consider updating shouldRepaint in the painter.
   }
 }
 
