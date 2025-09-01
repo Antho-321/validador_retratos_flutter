@@ -59,7 +59,10 @@ class _AxisGate {
   final double extraRelaxAfterFirst; // extra room after first confirm while confirmed
 
   bool hasConfirmedOnce = false;
-  bool _tightenUntilSatisfied = false; // after break during dwell → instant confirm on next entry
+
+  // NEW: endurecer solo en el primer intento del eje; desde el segundo intento, deadband base.
+  bool _firstAttemptDone = false;
+
   _GateState _state = _GateState.searching;
   DateTime? _dwellStart;
 
@@ -68,20 +71,29 @@ class _AxisGate {
   bool get isDwell     => _state == _GateState.dwell;
   bool get isConfirmed => _state == _GateState.confirmed;
 
+  /// Reinicia el intento actual (p. ej., por ruptura momentánea) pero mantiene
+  /// el conocimiento de si ya hubo primer intento.
   void resetTransient() {
-    // Keep hasConfirmedOnce (UX-friendly), reset current attempt.
     _state = _GateState.searching;
     _dwellStart = null;
-    _tightenUntilSatisfied = false;
+    // _firstAttemptDone se conserva: segundo intento y siguientes quedan menos estrictos.
   }
 
-  // UPDATED: tighten subtracts for insideIsOk (yaw/pitch) and ADDS for outsideIsOk (roll)
+  /// Reinicia totalmente el eje (nuevo “primer intento”).
+  void resetForNewStage() {
+    _state = _GateState.searching;
+    _dwellStart = null;
+    _firstAttemptDone = false;
+    hasConfirmedOnce = false;
+  }
+
+  // UPDATED: tighten SOLO en primer intento; para roll (outsideIsOk) “estricto” = más cerca de 180°.
   double get enterBand {
-    final strict = !hasConfirmedOnce || _tightenUntilSatisfied;
+    final strict = !_firstAttemptDone; // solo primer intento
     if (!strict) return baseDeadband;
     return (sense == _GateSense.insideIsOk)
-        ? (baseDeadband - tighten)   // yaw/pitch → smaller threshold
-        : (baseDeadband + tighten);  // roll → larger threshold (closer to 180°), stricter
+        ? (baseDeadband - tighten)   // yaw/pitch → umbral más pequeño (más estricto)
+        : (baseDeadband + tighten);  // roll → umbral más grande (más estricto hacia 180°)
   }
 
   double get exitBand {
@@ -101,32 +113,23 @@ class _AxisGate {
     switch (_state) {
       case _GateState.searching:
         if (_isOk(absDeg, enterBand)) {
-          if (_tightenUntilSatisfied) {
-            // If we already tightened due to a break during dwell,
-            // confirm immediately without waiting another 500 ms.
-            _state = _GateState.confirmed;
-            hasConfirmedOnce = true;
-            _tightenUntilSatisfied = false;
-            return true;
-          } else {
-            _dwellStart = now;
-            _state = _GateState.dwell;
-          }
+          // Siempre inicia dwell; nunca confirmar de inmediato.
+          _firstAttemptDone = true; // a partir de ahora, intentos menos estrictos
+          _dwellStart = now;
+          _state = _GateState.dwell;
         }
         return false;
 
       case _GateState.dwell:
         if (!_isOk(absDeg, exitBand)) {
-          // Broke during dwell → tighten requirement next time, restart.
+          // Se rompió el dwell → reiniciar intento (sin endurecimiento adicional).
           _state = _GateState.searching;
           _dwellStart = null;
-          _tightenUntilSatisfied = true;
           return false;
         }
         if (now.difference(_dwellStart!) >= dwell) {
           _state = _GateState.confirmed;
           hasConfirmedOnce = true;
-          _tightenUntilSatisfied = false;
           return true;
         }
         return false;
@@ -186,7 +189,7 @@ class PoseCaptureController extends ChangeNotifier {
   // Angle thresholds (deg)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
-  static const double _rollDeadbandDeg = 178.4;
+  static const double _rollDeadbandDeg = 178.3;
   static const double _maxOffDeg = 20.0;
 
   // Axis gates (Proposal 1 + small 2)
@@ -194,14 +197,14 @@ class PoseCaptureController extends ChangeNotifier {
     baseDeadband: _yawDeadbandDeg,
     tighten: 0.6,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1900),
+    dwell: Duration(milliseconds: 1800),
     extraRelaxAfterFirst: 0.2,
   );
   final _AxisGate _pitchGate = _AxisGate(
     baseDeadband: _pitchDeadbandDeg,
     tighten: 0.6,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1900),
+    dwell: Duration(milliseconds: 1800),
     extraRelaxAfterFirst: 0.2,
   );
   // Roll uses the inverted sense so that larger thresholds are stricter (closer to 180°).
@@ -210,7 +213,7 @@ class PoseCaptureController extends ChangeNotifier {
     sense: _GateSense.outsideIsOk,
     tighten: 0.1,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1900),
+    dwell: Duration(milliseconds: 1800),
     extraRelaxAfterFirst: 0.2,
   );
 
@@ -295,14 +298,9 @@ class PoseCaptureController extends ChangeNotifier {
   void _resetFlow() {
     _stage = _FlowStage.yaw;
 
-    _yawGate.resetTransient();
-    _pitchGate.resetTransient();
-    _rollGate.resetTransient();
-
-    // Start from scratch (optional but recommended for strict sequencing)
-    _yawGate.hasConfirmedOnce = false;
-    _pitchGate.hasConfirmedOnce = false;
-    _rollGate.hasConfirmedOnce = false;
+    _yawGate.resetForNewStage();
+    _pitchGate.resetForNewStage();
+    _rollGate.resetForNewStage();
   }
 
   // Helper: does a confirmed axis still hold its stability?
@@ -515,42 +513,32 @@ class PoseCaptureController extends ChangeNotifier {
       if (_stage == _FlowStage.pitch) {
         if (!_isHolding(_yawGate, yawAbs)) {
           _stage = _FlowStage.yaw;
-          _yawGate.resetTransient();
-          _yawGate.hasConfirmedOnce = false; // obliga a repetir dwell de 2000 ms
+          _yawGate.resetForNewStage(); // vuelve a primer intento y dwell completo
         }
       } else if (_stage == _FlowStage.roll) {
         if (!_isHolding(_yawGate, yawAbs)) {
           _stage = _FlowStage.yaw;
-          _yawGate.resetTransient();
-          _yawGate.hasConfirmedOnce = false;
+          _yawGate.resetForNewStage();
           // opcional: también “olvida” pitch para ser estrictos:
-          _pitchGate.resetTransient();
-          _pitchGate.hasConfirmedOnce = false;
+          _pitchGate.resetForNewStage();
         } else if (!_isHolding(_pitchGate, pitchAbs)) {
           _stage = _FlowStage.pitch;
-          _pitchGate.resetTransient();
-          _pitchGate.hasConfirmedOnce = false;
+          _pitchGate.resetForNewStage();
         }
       } else if (_stage == _FlowStage.done) {
         // En "done" degrada al primer eje que se rompa (prioridad yaw → pitch → roll)
         if (!_isHolding(_yawGate, yawAbs)) {
           _stage = _FlowStage.yaw;
-          _yawGate.resetTransient();
-          _yawGate.hasConfirmedOnce = false;
-          _pitchGate.resetTransient();
-          _pitchGate.hasConfirmedOnce = false;
-          _rollGate.resetTransient();
-          _rollGate.hasConfirmedOnce = false;
+          _yawGate.resetForNewStage();
+          _pitchGate.resetForNewStage();
+          _rollGate.resetForNewStage();
         } else if (!_isHolding(_pitchGate, pitchAbs)) {
           _stage = _FlowStage.pitch;
-          _pitchGate.resetTransient();
-          _pitchGate.hasConfirmedOnce = false;
-          _rollGate.resetTransient();
-          _rollGate.hasConfirmedOnce = false;
+          _pitchGate.resetForNewStage();
+          _rollGate.resetForNewStage();
         } else if (!_isHolding(_rollGate, rollAbs)) {
           _stage = _FlowStage.roll;
-          _rollGate.resetTransient();
-          _rollGate.hasConfirmedOnce = false;
+          _rollGate.resetForNewStage();
         }
       }
 
@@ -565,7 +553,7 @@ class PoseCaptureController extends ChangeNotifier {
           yawOk = faceOk && _yawGate.update(yawAbs, now);
           if (yawOk) {
             _stage = _FlowStage.pitch;
-            _pitchGate.resetTransient();
+            _pitchGate.resetForNewStage(); // nuevo eje → primer intento estricto + dwell
           }
           break;
 
@@ -573,7 +561,7 @@ class PoseCaptureController extends ChangeNotifier {
           pitchOk = faceOk && _pitchGate.update(pitchAbs, now);
           if (pitchOk) {
             _stage = _FlowStage.roll;
-            _rollGate.resetTransient();
+            _rollGate.resetForNewStage(); // nuevo eje → primer intento estricto + dwell
           }
           break;
 
