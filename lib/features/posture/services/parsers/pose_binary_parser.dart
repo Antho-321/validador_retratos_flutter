@@ -1,41 +1,42 @@
 // lib/features/posture/services/parsers/pose_binary_parser.dart
 //
-// Binary PO/PD parser (Flutter/Dart) aligned with the Python GI client:
+// Binary PO/PD parser (Flutter/Dart) with subpixel quantization support.
+// - Reads scale from `ver` low bits: scale = 1 << (ver & 0x03)
+// - Stores previous baseline in *quantized ints* to avoid drift with int8 deltas.
 //
-// Layout (all integers little-endian unless noted):
+// Layout (little-endian):
 // PO:
 //   0:2  "PO"
-//   2:1  ver (u8)
-//   3:2  nposes (u16 LE)
-//   5:2  w (u16 LE)
-//   7:2  h (u16 LE)
+//   2:1  ver (u8)  -> scale = 1 << (ver & 0x03)  [fallback=1 if inconsistent]
+//   3:2  nposes (u16)
+//   5:2  w_q (u16)  (quantized: w_px * scale)
+//   7:2  h_q (u16)
 //   ...  per pose:
-//        - npts (u16 LE)
-//        - npts * { x(u16 LE), y(u16 LE) }
+//        - npts (u16)
+//        - npts * { x_q(u16), y_q(u16) }   (quantized)
 //
 // PD:
 //   0:2  "PD"
-//   2:1  ver (u8)
-//   3:1  flags (u8)  bit0 = keyframe (absolute)
-//   4:2  seq (u16 LE)
-//   6:2  nposes (u16 LE)
-//   8:2  w (u16 LE)
-//  10:2  h (u16 LE)
+//   2:1  ver (u8)  -> scale = 1 << (ver & 0x03)  [fallback=1 if inconsistent]
+//   3:1  flags (u8)  bit0 = keyframe
+//   4:2  seq (u16)
+//   6:2  nposes (u16)
+//   8:2  w_q (u16)
+//  10:2  h_q (u16)
 //   ...  per pose:
-//        - npts (u16 LE)
-//        - if keyframe || no baseline:
-//             npts * { x(u16 LE), y(u16 LE) }   // absolute
-//          else (delta):
+//        - npts (u16)
+//        - if keyframe (absolute):
+//             npts * { x_q(u16), y_q(u16) }
+//          else (delta vs baseline):
 //             mask = ceil(npts/8) bytes (LSB-first)
 //             for j in 0..npts-1:
-//               if mask bit j == 1: dx(i8), dy(i8)
+//               if bit j == 1: dx_q(i8), dy_q(i8)   (quantized deltas)
 //               else: copy previous point
-//             then clamp to [0..w-1]x[0..h-1]
 //
 // Notes:
-// - No extra per-pose "score" field.
-// - Parser does not enforce sequence continuity (mirrors Python client).
-//   It surfaces `ackSeq` for PD packets; requestKeyframe is only used on parse errors.
+// - We clamp in the quantized domain [0..w_q-1]x[0..h_q-1] and then divide by `scale`.
+// - Public packet exposes w,h in *pixels* (ints) and poses as `Offset` in pixels (floats).
+// - If scale changes mid-stream and the packet is not a KF, we request KF.
 
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -46,17 +47,17 @@ enum PacketKind { po, pd }
 class PosePacket {
   const PosePacket({
     required this.kind,
-    required this.w,
-    required this.h,
-    required this.poses,
+    required this.w,   // pixels (int)
+    required this.h,   // pixels (int)
+    required this.poses, // Offsets in pixels (float)
     this.seq,
     this.keyframe = false,
   });
 
   final PacketKind kind;
-  final int w;
-  final int h;
-  final List<List<Offset>> poses;
+  final int w; // px
+  final int h; // px
+  final List<List<Offset>> poses; // px (float)
   final int? seq;
   final bool keyframe;
 }
@@ -82,19 +83,37 @@ class PoseParseNeedKF extends PoseParseResult {
   final String reason;
 }
 
+// Internal quantized point (integers)
+class _PtQ {
+  int x;
+  int y;
+  _PtQ(this.x, this.y);
+}
+
 class PoseBinaryParser {
   PoseBinaryParser({this.enforceBounds = true});
 
   final bool enforceBounds;
 
+  // Last published (float px) — external visibility
   List<List<Offset>>? _lastPoses;
   int _errors = 0;
+
+  // Baseline in quantized integers — used to apply int8 deltas precisely
+  List<List<_PtQ>>? _lastQ;
+  int _lastScale = 1;   // last quantization scale (1,2,4…)
+  int _lastWq = 0;      // last width in quantized units
+  int _lastHq = 0;      // last height in quantized units
 
   List<List<Offset>>? get lastPoses => _lastPoses;
   int get parseErrors => _errors;
 
   void reset() {
     _lastPoses = null;
+    _lastQ = null;
+    _lastScale = 1;
+    _lastWq = 0;
+    _lastHq = 0;
     _errors = 0;
   }
 
@@ -109,30 +128,13 @@ class PoseBinaryParser {
       if (b[0] == 0x50 && b[1] == 0x4F) {
         final pkt = _parsePO(b);
         _lastPoses = pkt.poses;
-
-        // (Optional) tiny debug sample
-        final pts = pkt.poses.isNotEmpty ? pkt.poses.first : const <Offset>[];
-        if (pts.isNotEmpty) {
-          final a = pts.first, m = pts[pts.length ~/ 2];
-          // ignore: avoid_print
-        }
-
         return PoseParseOk(packet: pkt);
       }
 
       // 'P''D'
       if (b[0] == 0x50 && b[1] == 0x44) {
-        final pkt = _parsePD(b, _lastPoses);
+        final pkt = _parsePD(b);
         _lastPoses = pkt.poses;
-
-        // (Optional) tiny debug sample
-        final pts = pkt.poses.isNotEmpty ? pkt.poses.first : const <Offset>[];
-        if (pts.isNotEmpty) {
-          final a = pts.first, m = pts[pts.length ~/ 2];
-          // ignore: avoid_print
-        }
-
-        // Mirror Python client: do not auto-request KF on seq gaps here.
         return PoseParseOk(packet: pkt, ackSeq: pkt.seq, requestKeyframe: false);
       }
 
@@ -149,18 +151,24 @@ class PoseBinaryParser {
   PosePacket _parsePO(Uint8List b) {
     int i = 2; // skip 'P','O'
     _require(i + 1 <= b.length, 'PO missing ver');
-    i += 1; // ver
+    final ver = b[i]; i += 1;
 
     _require(i + 2 <= b.length, 'PO missing nposes');
     final nposes = _u16le(b, i); i += 2;
 
     _require(i + 2 <= b.length, 'PO missing w');
-    final w = _u16le(b, i); i += 2;
+    final wq = _u16le(b, i); i += 2;
 
     _require(i + 2 <= b.length, 'PO missing h');
-    final h = _u16le(b, i); i += 2;
+    final hq = _u16le(b, i); i += 2;
 
-    final poses = <List<Offset>>[];
+    final scale = _deriveScale(ver, wq, hq);
+    final wpx = wq ~/ scale;
+    final hpx = hq ~/ scale;
+
+    final posesQ = <List<_PtQ>>[];
+    final posesPx = <List<Offset>>[];
+
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PO pose[$p] missing npts');
       final npts = _u16le(b, i); i += 2;
@@ -168,29 +176,41 @@ class PoseBinaryParser {
       final need = npts * 4;
       _require(i + need <= b.length, 'PO pose[$p] points short');
 
-      final pts = <Offset>[];
+      final ptsQ = <_PtQ>[];
+      final ptsPx = <Offset>[];
       for (int k = 0; k < npts; k++) {
-        final x = _u16le(b, i); i += 2;
-        final y = _u16le(b, i); i += 2;
-        pts.add(Offset(x.toDouble(), y.toDouble()));
+        final xq = _u16le(b, i); i += 2;
+        final yq = _u16le(b, i); i += 2;
+
+        final cxq = _clampQ(xq, wq);
+        final cyq = _clampQ(yq, hq);
+        ptsQ.add(_PtQ(cxq, cyq));
+        ptsPx.add(Offset(cxq / scale, cyq / scale));
       }
-      poses.add(pts);
+      posesQ.add(ptsQ);
+      posesPx.add(ptsPx);
     }
+
+    // Update baseline (quantized)
+    _lastQ = posesQ;
+    _lastScale = scale;
+    _lastWq = wq;
+    _lastHq = hq;
 
     return PosePacket(
       kind: PacketKind.po,
-      w: w,
-      h: h,
-      poses: poses,
+      w: wpx,
+      h: hpx,
+      poses: posesPx,
       keyframe: true,
     );
   }
 
-  PosePacket _parsePD(Uint8List b, List<List<Offset>>? prev) {
+  PosePacket _parsePD(Uint8List b) {
     int i = 2; // skip 'P','D'
 
     _require(i + 1 <= b.length, 'PD missing ver');
-    i += 1; // ver
+    final ver = b[i]; i += 1;
 
     _require(i + 1 <= b.length, 'PD missing flags');
     final flags = b[i]; i += 1;
@@ -202,16 +222,23 @@ class PoseBinaryParser {
     final nposes = _u16le(b, i); i += 2;
 
     _require(i + 2 <= b.length, 'PD missing w');
-    final w = _u16le(b, i); i += 2;
+    final wq = _u16le(b, i); i += 2;
 
     _require(i + 2 <= b.length, 'PD missing h');
-    final h = _u16le(b, i); i += 2;
+    final hq = _u16le(b, i); i += 2;
 
-    final isKey = (flags & 1) != 0;
+    final bool isKey = (flags & 1) != 0;
+    final scale = _deriveScale(ver, wq, hq);
+    final wpx = wq ~/ scale;
+    final hpx = hq ~/ scale;
 
-    // Absolute (keyframe) or no baseline available
-    if (isKey || prev == null) {
-      final poses = <List<Offset>>[];
+    // If KF or no valid baseline/scale mismatch → decode absolute like PO
+    final noBaseline = (_lastQ == null);
+    final scaleChanged = (!noBaseline && _lastScale != scale);
+    if (isKey || noBaseline || scaleChanged) {
+      final posesQ = <List<_PtQ>>[];
+      final posesPx = <List<Offset>>[];
+
       for (int p = 0; p < nposes; p++) {
         _require(i + 2 <= b.length, 'PD(KF) pose[$p] missing npts');
         final npts = _u16le(b, i); i += 2;
@@ -219,29 +246,43 @@ class PoseBinaryParser {
         final need = npts * 4;
         _require(i + need <= b.length, 'PD(KF) pose[$p] points short');
 
-        final pts = <Offset>[];
+        final ptsQ = <_PtQ>[];
+        final ptsPx = <Offset>[];
         for (int k = 0; k < npts; k++) {
-          final x = _u16le(b, i); i += 2;
-          final y = _u16le(b, i); i += 2;
-          pts.add(_clampedOffset(x, y, w, h));
+          final xq = _u16le(b, i); i += 2;
+          final yq = _u16le(b, i); i += 2;
+          final cxq = _clampQ(xq, wq);
+          final cyq = _clampQ(yq, hq);
+          ptsQ.add(_PtQ(cxq, cyq));
+          ptsPx.add(Offset(cxq / scale, cyq / scale));
         }
-        poses.add(pts);
+        posesQ.add(ptsQ);
+        posesPx.add(ptsPx);
       }
+
+      // Update baseline (quantized)
+      _lastQ = posesQ;
+      _lastScale = scale;
+      _lastWq = wq;
+      _lastHq = hq;
 
       return PosePacket(
         kind: PacketKind.pd,
-        w: w,
-        h: h,
-        poses: poses,
+        w: wpx,
+        h: hpx,
+        poses: posesPx,
         seq: seq,
         keyframe: true,
       );
     }
 
     // Delta from previous baseline
-    _require(prev.length == nposes, 'PD(Δ) nposes mismatch');
+    final prevQ = _lastQ!;
+    _require(prevQ.length == nposes, 'PD(Δ) nposes mismatch');
 
-    final poses = <List<Offset>>[];
+    final posesQ = <List<_PtQ>>[];
+    final posesPx = <List<Offset>>[];
+
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
       final npts = _u16le(b, i); i += 2;
@@ -256,43 +297,75 @@ class PoseBinaryParser {
       }
       i += maskBytes;
 
-      final prevPts = prev[p];
+      final prevPts = prevQ[p];
       _require(prevPts.length == npts, 'PD(Δ) pose[$p] npts mismatch');
 
-      final out = <Offset>[];
+      final outQ = <_PtQ>[];
+      final outPx = <Offset>[];
+
       for (int j = 0; j < npts; j++) {
-        int x = prevPts[j].dx.toInt();
-        int y = prevPts[j].dy.toInt();
+        int xq = prevPts[j].x;
+        int yq = prevPts[j].y;
 
         if (((mask >> j) & 1) == 1) {
           _require(i + 2 <= b.length, 'PD(Δ) pose[$p] dxdy short @pt $j');
-          x += _asInt8(b[i]); i += 1;
-          y += _asInt8(b[i]); i += 1;
+          xq += _asInt8(b[i]); i += 1;
+          yq += _asInt8(b[i]); i += 1;
         }
-        out.add(_clampedOffset(x, y, w, h));
+
+        // Clamp in quantized domain, then convert to px
+        xq = _clampQ(xq, wq);
+        yq = _clampQ(yq, hq);
+        outQ.add(_PtQ(xq, yq));
+        outPx.add(Offset(xq / scale, yq / scale));
       }
-      poses.add(out);
+
+      posesQ.add(outQ);
+      posesPx.add(outPx);
     }
+
+    // Update baseline (quantized)
+    _lastQ = posesQ;
+    _lastScale = scale;
+    _lastWq = wq;
+    _lastHq = hq;
 
     return PosePacket(
       kind: PacketKind.pd,
-      w: w,
-      h: h,
-      poses: poses,
+      w: wpx,
+      h: hpx,
+      poses: posesPx,
       seq: seq,
       keyframe: false,
     );
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
   static int _u16le(Uint8List b, int i) => b[i] | (b[i + 1] << 8);
   static int _asInt8(int u) => (u & 0x80) != 0 ? (u - 256) : u;
 
-  Offset _clampedOffset(int x, int y, int w, int h) {
-    if (!enforceBounds) return Offset(x.toDouble(), y.toDouble());
-    final cx = math.max(0, math.min(w - 1, x));
-    final cy = math.max(0, math.min(h - 1, y));
-    return Offset(cx.toDouble(), cy.toDouble());
+  // Clamp an integer coordinate in quantized domain [0..limit-1]
+  int _clampQ(int v, int limitQ) {
+    if (!enforceBounds) return v;
+    return math.max(0, math.min(limitQ - 1, v));
+    // (if limitQ==0 we never get here because headers would be invalid)
+  }
+
+  // Derive scale from ver low bits; fall back to 1 if inconsistent.
+  static int _deriveScale(int ver, int wq, int hq) {
+    final pow2 = ver & 0x03; // bits 0..1
+    int s = 1 << pow2;
+    if (s < 1) s = 1;
+
+    // Back-compat guard: if header doesn't look quantized to s, use 1.
+    if (s != 1) {
+      if ((wq % s) != 0 || (hq % s) != 0) {
+        // Older servers might set ver=2 but not scale the dims; be conservative.
+        return 1;
+      }
+    }
+    return s;
   }
 
   static void _require(bool cond, String msg) {
