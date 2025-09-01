@@ -186,7 +186,7 @@ class PoseCaptureController extends ChangeNotifier {
   // Angle thresholds (deg)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
-  static const double _rollDeadbandDeg = 178.5;
+  static const double _rollDeadbandDeg = 178.4;
   static const double _maxOffDeg = 20.0;
 
   // Axis gates (Proposal 1 + small 2)
@@ -254,7 +254,7 @@ class PoseCaptureController extends ChangeNotifier {
   bool? _activeRollPositive;
 
   // EMA smoothing for angles
-  static const double _emaTauMs = 150.0;
+  static const double _emaTauMs = 250.0;
   DateTime? _lastSampleAt;
   double? _emaYawDeg;
   double? _emaPitchDeg;

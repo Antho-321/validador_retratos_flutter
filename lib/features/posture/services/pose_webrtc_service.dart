@@ -131,6 +131,14 @@ class PoseWebRTCService {
   int? _lastW;
   int? _lastH;
 
+  // NEW: último seq aceptado por task (comparación circular 16-bit)
+  final Map<String, int> _lastSeqPerTask = {};
+  bool _isNewer16(int seq, int? last) {
+    if (last == null) return true;
+    final int d = (seq - last) & 0xFFFF;        // [0..65535]
+    return d != 0 && (d & 0x8000) == 0;         // 1..32767 → más nuevo
+  }
+
   // Simple logging helper that respects [logEverything]
   void _log(Object? message) {
     if (!logEverything) return;
@@ -636,12 +644,28 @@ class PoseWebRTCService {
     final res = parser.parse(b);
 
     if (res is PoseParseOk) {
-      final pkt = res.packet;
+      final pkt = res.packet; // has kind, keyframe, seq, w, h, poses
+      final int? seq = pkt.seq;
 
-      // Save per-task state
+      // ── DROP: PD no-KF re-ordenados (unordered/lossy DC) ─────────────
+      if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
+        final int? last = _lastSeqPerTask[task];
+        if (last != null && !_isNewer16(seq, last)) {
+          _log("[client] drop stale PD task=$task seq=$seq (last=$last)");
+          // ACK igualmente si es el stream primario, para no confundir al servidor
+          if (task == _primaryTask && res.ackSeq != null) {
+            _sendCtrlAck(res.ackSeq!);
+          }
+          return; // no actualices estado ni emitas frame
+        }
+      }
+      // ─────────────────────────────────────────────────────────────────
+
+      // Save accepted packet state
       _lastW = pkt.w;
       _lastH = pkt.h;
       _lastPosesPerTask[task] = pkt.poses;
+      if (seq != null) _lastSeqPerTask[task] = seq;
 
       // Fuse all tasks' poses into one list for the existing overlay
       final fused = _lastPosesPerTask.values
@@ -1016,6 +1040,10 @@ class PoseWebRTCService {
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();
     await _framesCtrl.close();
+
+    // NEW: limpia estados para siguiente sesión
+    _lastSeqPerTask.clear();
+    _lastPosesPerTask.clear();
 
     _log('[client] disposed');
   }
