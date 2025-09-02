@@ -15,9 +15,14 @@ import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 import '../widgets/frame_sequence_overlay.dart'
     show FrameSequenceOverlay, FrameSequenceController, FramePlayMode;
-
 import '../../domain/validators/portrait_validations.dart'
     show PortraitValidator;
+
+// ⬇️ add this line:
+part 'pose_capture_controller.onframe.dart';
+
+/// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
+String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
 
 /// Private direction enum must be top-level (not inside a class).
 enum _TurnDir { none, left, right }
@@ -28,10 +33,6 @@ enum _Axis { none, yaw, pitch, roll }
 /// Sequential flow: enforce yaw → pitch → roll
 enum _FlowStage { yaw, pitch, roll, done }
 
-/// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
-String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
-
-/// ─────────────────────────────────────────────────────────────────────────
 /// Axis stability gate with dwell + hysteresis + first-pass tightening.
 /// Implements Proposal 1 (+ touch of Proposal 2).
 enum _GateState { searching, dwell, confirmed }
@@ -51,11 +52,11 @@ class _AxisGate {
     this.extraRelaxAfterFirst = 0.2,
   });
 
-  final double baseDeadband;       // e.g., 2.2°
+  final double baseDeadband; // e.g., 2.2°
   final _GateSense sense;
-  final double tighten;            // e.g., 0.2° → first pass stricter
-  final double hysteresis;         // inside: exit = enter + hys, outside: exit = enter - hys
-  final Duration dwell;            // e.g., 500 ms
+  final double tighten; // e.g., 0.2° → first pass stricter
+  final double hysteresis; // inside: exit = enter + hys, outside: exit = enter - hys
+  final Duration dwell; // e.g., 500 ms
   final double extraRelaxAfterFirst; // extra room after first confirm while confirmed
 
   bool hasConfirmedOnce = false;
@@ -68,7 +69,7 @@ class _AxisGate {
 
   // NEW: expose state for UI decisions (e.g., suppressing hints during dwell)
   bool get isSearching => _state == _GateState.searching;
-  bool get isDwell     => _state == _GateState.dwell;
+  bool get isDwell => _state == _GateState.dwell;
   bool get isConfirmed => _state == _GateState.confirmed;
 
   /// Reinicia el intento actual (p. ej., por ruptura momentánea) pero mantiene
@@ -87,13 +88,13 @@ class _AxisGate {
     hasConfirmedOnce = false;
   }
 
-  // UPDATED: tighten SOLO en primer intento; para roll (outsideIsOk) “estricto” = más cerca de 180°.
+  // tighten SOLO en primer intento; para roll (outsideIsOk) “estricto” = más cerca de 180°.
   double get enterBand {
     final strict = !_firstAttemptDone; // solo primer intento
     if (!strict) return baseDeadband;
     return (sense == _GateSense.insideIsOk)
-        ? (baseDeadband - tighten)   // yaw/pitch → umbral más pequeño (más estricto)
-        : (baseDeadband + tighten);  // roll → umbral más grande (más estricto hacia 180°)
+        ? (baseDeadband - tighten) // yaw/pitch → umbral más pequeño (más estricto)
+        : (baseDeadband + tighten); // roll → umbral más grande (más estricto hacia 180°)
   }
 
   double get exitBand {
@@ -324,7 +325,8 @@ class PoseCaptureController extends ChangeNotifier {
       final track = stream.getVideoTracks().first;
       final dynamic dynTrack = track;
 
-      final Object data = await dynTrack.captureFrame(); // may be Uint8List / ByteBuffer / ByteData
+      final Object data =
+          await dynTrack.captureFrame(); // may be Uint8List / ByteBuffer / ByteData
       late final Uint8List bytes;
 
       if (data is Uint8List) {
@@ -377,16 +379,16 @@ class PoseCaptureController extends ChangeNotifier {
     final cur = hud.value;
     final same =
         cur.statusLabel == next.statusLabel &&
-        cur.primaryMessage == next.primaryMessage &&
-        cur.secondaryMessage == next.secondaryMessage &&
-        cur.countdownSeconds == next.countdownSeconds &&
-        cur.countdownProgress == next.countdownProgress &&
-        cur.checkFraming == next.checkFraming &&
-        cur.checkHead == next.checkHead &&
-        cur.checkEyes == next.checkEyes &&
-        cur.checkLighting == next.checkLighting &&
-        cur.checkBackground == next.checkBackground &&
-        cur.ovalProgress == next.ovalProgress;
+            cur.primaryMessage == next.primaryMessage &&
+            cur.secondaryMessage == next.secondaryMessage &&
+            cur.countdownSeconds == next.countdownSeconds &&
+            cur.countdownProgress == next.countdownProgress &&
+            cur.checkFraming == next.checkFraming &&
+            cur.checkHead == next.checkHead &&
+            cur.checkEyes == next.checkEyes &&
+            cur.checkLighting == next.checkLighting &&
+            cur.checkBackground == next.checkBackground &&
+            cur.ovalProgress == next.ovalProgress;
 
     if (!same) {
       hud.value = next;
@@ -394,427 +396,8 @@ class PoseCaptureController extends ChangeNotifier {
     }
   }
 
-  void _onFrame() {
-    // While capturing OR while a photo is displayed, ignore frame/HUD updates.
-    if (isCapturing || capturedPng != null) return;
-
-    final frame = poseService.latestFrame.value;
-
-    if (frame == null) {
-      // Lost face → abort countdown and reset.
-      _stopCountdown();
-      final cur = hud.value;
-      _setHud(
-        PortraitUiModel(
-          statusLabel: 'Searching',
-          privacyLabel: cur.privacyLabel,
-          primaryMessage: 'Show your face in the oval',
-          secondaryMessage: null,
-          checkFraming: Tri.pending,
-          checkHead: Tri.pending,
-          checkEyes: Tri.pending,
-          checkLighting: Tri.pending,
-          checkBackground: Tri.pending,
-          countdownSeconds: null,
-          countdownProgress: null,
-          ovalProgress: 0.0,
-        ),
-      );
-      _readySince = null;
-
-      if (showTurnRightSeq) {
-        showTurnRightSeq = false;
-        try { seq.pause(); } catch (_) {}
-        notifyListeners();
-      }
-
-      // Reset sequential flow + filters when face disappears.
-      _resetFlow();
-      _emaYawDeg = _emaPitchDeg = _emaRollDeg = null;
-      _lastSampleAt = null;
-      return;
-    }
-
-    // Defaults when we can't evaluate.
-    bool faceOk = false;
-    bool yawOk = false;
-    bool pitchOk = false;
-    bool rollOk = false;
-    double arcProgress = 0.0;
-
-    // Keep values available outside the block for the animation chooser
-    double? yawDegForAnim;
-    double? pitchDegForAnim;
-    double? rollDegForAnim;
-
-    final faces = poseService.latestFaceLandmarks;
-    final canvas = _canvasSize;
-
-    // Use current enter-bands so progress bars match what we are enforcing
-    final double _yawDeadbandNow = _yawGate.enterBand;
-    final double _pitchDeadbandNow = _pitchGate.enterBand;
-    final double _rollDeadbandNow = _rollGate.enterBand;
-
-    if (faces != null && faces.isNotEmpty && canvas != null) {
-      final report = _validator.evaluate(
-        landmarksImg: faces.first, // image-space points (px)
-        imageSize: frame.imageSize, // from latestFrame
-        canvasSize: canvas, // from LayoutBuilder
-        mirror: mirror, // must match your preview overlay
-        fit: BoxFit.cover, // must match your preview overlay
-        minFractionInside: 1.0, // require ALL landmarks inside
-
-        // Yaw thresholds (dynamic for progress only)
-        enableYaw: true,
-        yawDeadbandDeg: _yawDeadbandNow,
-        yawMaxOffDeg: _maxOffDeg,
-
-        // Pitch thresholds (dynamic for progress only)
-        enablePitch: true,
-        pitchDeadbandDeg: _pitchDeadbandNow,
-        pitchMaxOffDeg: _maxOffDeg,
-
-        // Roll thresholds (permissive)
-        enableRoll: true,
-        rollDeadbandDeg: _rollDeadbandNow,
-        rollMaxOffDeg: _maxOffDeg,
-      );
-
-      faceOk = report.faceInOval;
-      arcProgress = report.ovalProgress; // switches to head progress when faceOk
-
-      // Smooth angles with EMA
-      final now = DateTime.now();
-      final dtMs = (() {
-        if (_lastSampleAt == null) return 16.0;
-        return now.difference(_lastSampleAt!).inMilliseconds.toDouble().clamp(1.0, 1000.0);
-      })();
-      final a = 1 - math.exp(-dtMs / _emaTauMs);
-      _lastSampleAt ??= now;
-
-      _emaYawDeg = (_emaYawDeg == null)
-          ? report.yawDeg
-          : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
-      _emaPitchDeg = (_emaPitchDeg == null)
-          ? report.pitchDeg
-          : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
-      _emaRollDeg = (_emaRollDeg == null)
-          ? report.rollDeg
-          : (a * report.rollDeg + (1 - a) * _emaRollDeg!);
-
-      _lastSampleAt = now;
-
-      // Use filtered values for gating + animations/messages
-      final double yawAbs = _emaYawDeg!.abs();
-      final double pitchAbs = _emaPitchDeg!.abs();
-      final double rollAbs = _emaRollDeg!.abs();
-
-      // ── Retroceso de etapas si una validación previa deja de sostenerse
-      if (_stage == _FlowStage.pitch) {
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage(); // vuelve a primer intento y dwell completo
-        }
-      } else if (_stage == _FlowStage.roll) {
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage();
-          // opcional: también “olvida” pitch para ser estrictos:
-          _pitchGate.resetForNewStage();
-        } else if (!_isHolding(_pitchGate, pitchAbs)) {
-          _stage = _FlowStage.pitch;
-          _pitchGate.resetForNewStage();
-        }
-      } else if (_stage == _FlowStage.done) {
-        // En "done" degrada al primer eje que se rompa (prioridad yaw → pitch → roll)
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage();
-          _pitchGate.resetForNewStage();
-          _rollGate.resetForNewStage();
-        } else if (!_isHolding(_pitchGate, pitchAbs)) {
-          _stage = _FlowStage.pitch;
-          _pitchGate.resetForNewStage();
-          _rollGate.resetForNewStage();
-        } else if (!_isHolding(_rollGate, rollAbs)) {
-          _stage = _FlowStage.roll;
-          _rollGate.resetForNewStage();
-        }
-      }
-
-      // Sequential gating:
-      // axes already confirmed remain OK; only current stage axis is updated.
-      yawOk   = _yawGate.hasConfirmedOnce;
-      pitchOk = _pitchGate.hasConfirmedOnce;
-      rollOk  = _rollGate.hasConfirmedOnce;
-
-      switch (_stage) {
-        case _FlowStage.yaw:
-          yawOk = faceOk && _yawGate.update(yawAbs, now);
-          if (yawOk) {
-            _stage = _FlowStage.pitch;
-            _pitchGate.resetForNewStage(); // nuevo eje → primer intento estricto + dwell
-          }
-          break;
-
-        case _FlowStage.pitch:
-          pitchOk = faceOk && _pitchGate.update(pitchAbs, now);
-          if (pitchOk) {
-            _stage = _FlowStage.roll;
-            _rollGate.resetForNewStage(); // nuevo eje → primer intento estricto + dwell
-          }
-          break;
-
-        case _FlowStage.roll:
-          rollOk = faceOk && _rollGate.update(rollAbs, now);
-          if (rollOk) {
-            _stage = _FlowStage.done;
-          }
-          break;
-
-        case _FlowStage.done:
-          // keep state; already handled degradation above if needed
-          break;
-      }
-
-      // Provide values to animation chooser
-      yawDegForAnim = _emaYawDeg;
-      pitchDegForAnim = _emaPitchDeg;
-      rollDegForAnim = _emaRollDeg;
-    }
-
-    // Decide which axis to animate/hint: only the current stage if not OK.
-    // NEW: suppress hint + animation while the current axis is in dwell.
-    _Axis desiredAxis = _Axis.none;
-    String? finalHint;
-
-    if (faceOk) {
-      if (_stage == _FlowStage.yaw && !yawOk && yawDegForAnim != null && !_yawGate.isDwell) {
-        desiredAxis = _Axis.yaw;
-        finalHint = (_emaYawDeg! > 0)
-            ? 'Gira ligeramente la cabeza a la izquierda'
-            : 'Gira ligeramente la cabeza a la derecha';
-      } else if (_stage == _FlowStage.pitch && !pitchOk && pitchDegForAnim != null && !_pitchGate.isDwell) {
-        desiredAxis = _Axis.pitch;
-        finalHint = (_emaPitchDeg! > 0)
-            ? 'Sube ligeramente la cabeza'
-            : 'Baja ligeramente la cabeza';
-      } else if (_stage == _FlowStage.roll && !rollOk && rollDegForAnim != null && !_rollGate.isDwell) {
-        desiredAxis = _Axis.roll;
-        finalHint = (_emaRollDeg! > 0)
-            ? 'Rota ligeramente tu cabeza en sentido antihorario ⟲'
-            : 'Rota ligeramente tu cabeza en sentido horario ⟳';
-      }
-    }
-
-    // ───────────────────────────────────────────────────────────────────
-    // Axis-specific animation loaders (unchanged behavior, per strip)
-    if (desiredAxis == _Axis.yaw && yawDegForAnim != null) {
-      // YAW animation (x:0..256)
-      _TurnDir desiredTurn =
-          (yawDegForAnim! > 0) ? _TurnDir.left : _TurnDir.right; // + → left, - → right
-
-      // reset pitch/roll state so we can reload it next time if needed
-      _activePitchUp = null;
-      _activeRollPositive = null;
-
-      if (desiredTurn != _activeTurn) {
-        _activeTurn = desiredTurn;
-        if (desiredTurn == _TurnDir.right) {
-          _turnRightSeqLoaded = true;
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 14,
-            count: 22,
-            xStart: 0,
-            xEnd: 256,
-          );
-        } else {
-          _turnLeftSeqLoaded = true;
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 30,
-            count: 21,
-            xStart: 0,
-            xEnd: 256,
-            reverseOrder: true,
-          );
-        }
-      }
-
-      if (!showTurnRightSeq) {
-        showTurnRightSeq = true;
-        notifyListeners();
-      }
-      try { seq.play(); } catch (_) {}
-
-    } else if (desiredAxis == _Axis.pitch && pitchDegForAnim != null) {
-      // PITCH animation (x:256..512)
-      final bool desiredPitchUp = pitchDegForAnim! > 0; // true = head up
-
-      // reset yaw/roll state so we can reload it next time if needed
-      _activeTurn = _TurnDir.none;
-      _activeRollPositive = null;
-
-      if (_activePitchUp != desiredPitchUp) {
-        _activePitchUp = desiredPitchUp;
-
-        if (desiredPitchUp) {
-          // Head up (pitch > 0)
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 30,
-            count: 21,
-            xStart: 256,
-            xEnd: 512,
-            reverseOrder: true,
-          );
-        } else {
-          // Head down (pitch <= 0)
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 14,
-            count: 22,
-            xStart: 256,
-            xEnd: 512,
-          );
-        }
-      }
-
-      if (!showTurnRightSeq) {
-        showTurnRightSeq = true; // reuse same visibility flag
-        notifyListeners();
-      }
-      try { seq.play(); } catch (_) {}
-
-    } else if (desiredAxis == _Axis.roll && rollDegForAnim != null) {
-      // ROLL animation (x:512..768)
-      final bool desiredRollPositive = rollDegForAnim! > 0; // true = CCW (antihorario)
-
-      // Reset other axis states so they reload next time if chosen
-      _activeTurn = _TurnDir.none;   // yaw
-      _activePitchUp = null;         // pitch
-
-      if (_activeRollPositive != desiredRollPositive) {
-        _activeRollPositive = desiredRollPositive;
-
-        if (desiredRollPositive) {
-          // rollDeg > 0  → use (start 14, count 22), forward
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 14,
-            count: 22,
-            xStart: 512,
-            xEnd: 768,
-          );
-        } else {
-          // rollDeg <= 0 → use (start 30, count 21), reverse
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 30,
-            count: 21,
-            xStart: 512,
-            xEnd: 768,
-            reverseOrder: true,
-          );
-        }
-      }
-
-      if (!showTurnRightSeq) {
-        showTurnRightSeq = true; // reuse the same visibility flag
-        notifyListeners();
-      }
-      try { seq.play(); } catch (_) {}
-
-    } else {
-      // No axis selected → hide/pause overlay
-      if (showTurnRightSeq) {
-        try { seq.pause(); } catch (_) {}
-        showTurnRightSeq = false;
-        notifyListeners();
-      }
-      _activeTurn = _TurnDir.none;
-      _activePitchUp = null;
-      _activeRollPositive = null;
-    }
-    // ───────────────────────────────────────────────────────────────────
-
-    // Track stability window (global) – already enforced by gates, keep zero hold
-    final now = DateTime.now();
-    final bool allChecksOk = faceOk && _stage == _FlowStage.done;
-
-    if (allChecksOk) {
-      _readySince ??= now;
-    } else {
-      _readySince = null;
-    }
-
-    // If we were counting down and any validation failed, stop now
-    if (isCountingDown && !allChecksOk) {
-      _stopCountdown();
-    }
-
-    // Update HUD (no countdown UI changes here)
-    if (!isCountingDown) {
-      final cur = hud.value;
-      if (allChecksOk) {
-        _setHud(
-          PortraitUiModel(
-            statusLabel: 'Ready',
-            privacyLabel: cur.privacyLabel,
-            primaryMessage: '¡Perfecto! ¡Permanece así!',
-            secondaryMessage: null,
-            checkFraming: Tri.ok,
-            checkHead: Tri.ok,
-            checkEyes: cur.checkEyes ?? Tri.almost,
-            checkLighting: cur.checkLighting ?? Tri.almost,
-            checkBackground: cur.checkBackground ?? Tri.almost,
-            countdownSeconds: null,
-            countdownProgress: null,
-            ovalProgress: arcProgress,
-          ),
-        );
-      } else {
-        _setHud(
-          PortraitUiModel(
-            statusLabel: 'Adjusting',
-            privacyLabel: cur.privacyLabel,
-            primaryMessage:
-                faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
-            secondaryMessage: _nullIfBlank(faceOk ? (finalHint ?? '') : ''),
-            checkFraming: faceOk ? Tri.ok : Tri.almost,
-            checkHead: faceOk ? (_stage == _FlowStage.done ? Tri.ok : Tri.almost) : Tri.pending,
-            checkEyes: Tri.almost,
-            checkLighting: Tri.almost,
-            checkBackground: Tri.almost,
-            countdownSeconds: null,
-            countdownProgress: null,
-            ovalProgress: arcProgress,
-          ),
-        );
-      }
-    }
-
-    // Start countdown only when sequential rules are done *and* state has been stable
-    if (!isCountingDown &&
-        allChecksOk &&
-        _readySince != null &&
-        now.difference(_readySince!) >= _readyHold) {
-      _startCountdown();
-    }
-  }
+  // Keep the same name/signature used by addListener tear-off:
+  void _onFrame() => this._onFrameImpl(); // calls the extension method
 
   void _startCountdown() {
     _stopCountdown();
@@ -862,8 +445,7 @@ class PoseCaptureController extends ChangeNotifier {
 
       // Abort if stream died or validations failed mid-countdown.
       final bool okNow =
-          poseService.latestFrame.value != null &&
-          _stage == _FlowStage.done;
+          poseService.latestFrame.value != null && _stage == _FlowStage.done;
       if (poseService.latestFrame.value == null || !okNow) {
         _stopCountdown();
         return;
