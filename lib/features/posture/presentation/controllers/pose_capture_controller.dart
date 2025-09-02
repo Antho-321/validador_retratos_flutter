@@ -77,7 +77,6 @@ class _AxisGate {
   void resetTransient() {
     _state = _GateState.searching;
     _dwellStart = null;
-    // _firstAttemptDone se conserva: segundo intento y siguientes quedan menos estrictos.
   }
 
   /// Reinicia totalmente el eje (nuevo “primer intento”).
@@ -150,7 +149,212 @@ class _AxisGate {
   }
 }
 
-/// Pequeño contenedor para métrica de roll
+// ───────────────────────────────────────────────────────────────────────────
+// MÓDULOS PRIVADOS (mismo archivo) — para modularizar countdown, captura y roll
+// ───────────────────────────────────────────────────────────────────────────
+
+typedef SnapshotFn = Future<Uint8List?> Function();
+
+/// Tuning centralizado
+class _Tuning {
+  final double yawDeadbandDeg;
+  final double pitchDeadbandDeg;
+  final double shouldersDeadbandDeg;
+  final double rollErrorDeadbandDeg;
+  final double maxOffDeg;
+  final double rollHintDeadzoneDeg;
+  final double emaTauMs;
+  final double rollMaxDpsDuringDwell;
+  final Duration hudMinInterval;
+
+  const _Tuning({
+    this.yawDeadbandDeg = 2.2,
+    this.pitchDeadbandDeg = 2.2,
+    this.shouldersDeadbandDeg = 1.8,
+    this.rollErrorDeadbandDeg = 1.7,
+    this.maxOffDeg = 20.0,
+    this.rollHintDeadzoneDeg = 0.3,
+    this.emaTauMs = 150.0,
+    this.rollMaxDpsDuringDwell = 15.0,
+    this.hudMinInterval = const Duration(milliseconds: 66),
+  });
+}
+
+/// Métricas de roll tras filtrar/unwrap
+class _RollFilterMetrics {
+  final double errDeg;       // distancia a 180° (0 = perfecto)
+  final double dps;          // grados/seg en señal suavizada
+  final double smoothedDeg;  // roll suavizado (unwrapped) para HUD/debug
+  const _RollFilterMetrics(this.errDeg, this.dps, this.smoothedDeg);
+}
+
+/// Filtro de roll con unwrap + EMA + dps
+class _RollFilter {
+  _RollFilter({required this.tauMs});
+  final double tauMs;
+
+  double? _smoothedDeg;
+  DateTime? _lastAt;
+
+  double _wrapDeg180(double x) => ((x + 180.0) % 360.0) - 180.0;
+  double _distTo180(double deg) => _wrapDeg180(deg - 180.0).abs();
+
+  _RollFilterMetrics update(double rawRollDeg, DateTime now) {
+    if (_smoothedDeg == null || _lastAt == null) {
+      _smoothedDeg = rawRollDeg;
+      _lastAt = now;
+      return _RollFilterMetrics(_distTo180(_smoothedDeg!), 0.0, _smoothedDeg!);
+    }
+
+    final prev = _smoothedDeg!;
+    double cur = rawRollDeg;
+    double delta = cur - prev;
+    if (delta > 180.0) cur -= 360.0;
+    if (delta < -180.0) cur += 360.0;
+
+    final dtMs = now.difference(_lastAt!).inMilliseconds.clamp(1, 1000);
+    final alpha = 1.0 - math.exp(-dtMs / tauMs);
+
+    final next = prev + alpha * (cur - prev);
+    final dps = ((next - prev) / dtMs) * 1000.0;
+
+    _smoothedDeg = next;
+    _lastAt = now;
+
+    return _RollFilterMetrics(_distTo180(next), dps, next);
+  }
+}
+
+/// Controlador de cuenta regresiva reutilizable
+class _Countdown {
+  _Countdown({
+    required this.duration,
+    required this.fps,
+    required this.speed,
+    required this.isOkNow,
+    required this.onTick,
+    required this.onFire,
+    required this.onAbort,
+  })  : assert(fps > 0),
+        assert(speed > 0);
+
+  final Duration duration;
+  final int fps;
+  final double speed;
+
+  /// Debe ser true para continuar (validaciones mantienen "ok")
+  final bool Function() isOkNow;
+
+  /// (seconds, progress[0..1]) → para HUD
+  final void Function(int seconds, double progress) onTick;
+
+  /// Acción final (disparo/captura)
+  final Future<void> Function() onFire;
+
+  /// Abort callback (e.g., clear HUD)
+  final void Function() onAbort;
+
+  Timer? _ticker;
+  bool get isRunning => _ticker != null;
+
+  void start() {
+    stop();
+
+    final totalLogicalMs = duration.inMilliseconds;
+    final totalScaledMs = (totalLogicalMs / speed).round().clamp(1, 86400000);
+    int seconds = (totalLogicalMs / 1000.0).ceil();
+    double progress = 1.0;
+
+    // Push inicial
+    onTick(seconds, progress);
+
+    final tickMs = (1000 / fps).round().clamp(10, 1000);
+    int elapsedScaled = 0;
+    bool firedAtOne = false;
+
+    _ticker = Timer.periodic(Duration(milliseconds: tickMs), (t) async {
+      elapsedScaled += tickMs;
+
+      final remainingScaledMs =
+          (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
+      progress = remainingScaledMs / totalScaledMs;
+
+      final remainingLogicalMs =
+          (remainingScaledMs / totalScaledMs * totalLogicalMs).round();
+      final nextSeconds =
+          (remainingLogicalMs / 1000.0).ceil().clamp(1, seconds);
+
+      if (nextSeconds != seconds) seconds = nextSeconds;
+
+      onTick(seconds, progress);
+
+      if (!isOkNow()) {
+        stop();
+        onAbort();
+        return;
+      }
+
+      // Early fire al llegar a "1"
+      if (!firedAtOne && seconds == 1) {
+        firedAtOne = true;
+        await onFire();
+        stop();
+        return;
+      }
+
+      // Fin normal
+      if (!firedAtOne && elapsedScaled >= totalScaledMs) {
+        await onFire();
+        stop();
+      }
+    });
+  }
+
+  void stop() {
+    _ticker?.cancel();
+    _ticker = null;
+  }
+}
+
+/// Pipeline de captura (WebRTC → fallback)
+class _Capture {
+  static Future<Uint8List?> tryAll(
+    PoseWebRTCService svc,
+    SnapshotFn? fallback,
+  ) async {
+    // 1) WebRTC track
+    try {
+      final stream = svc.localRenderer.srcObject ?? svc.localStream;
+      if (stream != null && stream.getVideoTracks().isNotEmpty) {
+        final track = stream.getVideoTracks().first;
+        final dynamic dynTrack = track;
+        final Object data = await dynTrack.captureFrame(); // plugin-specific
+        if (data is Uint8List && data.isNotEmpty) return data;
+        if (data is ByteBuffer) return data.asUint8List();
+        if (data is ByteData) {
+          return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+        }
+      }
+    } catch (_) {
+      // continúa a fallback
+    }
+
+    // 2) Fallback a snapshot proporcionado por widget/controlador
+    if (fallback != null) {
+      try {
+        final bytes = await fallback();
+        if (bytes != null && bytes.isNotEmpty) return bytes;
+      } catch (_) {/* noop */}
+    }
+    return null;
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Estructuras usadas por onframe (compatibilidad con tu extensión existente)
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Pequeño contenedor para métrica de roll usado en onframe
 class _RollMetrics {
   final double errDeg; // distancia a 180°, en grados (0 = perfecto)
   final double dps;    // velocidad angular (grados/seg) sobre señal suavizada
@@ -165,8 +369,10 @@ class PoseCaptureController extends ChangeNotifier {
     required this.countdownFps,
     required this.countdownSpeed,
     this.mirror = true,
+    _Tuning? tuning, // opcional para ajustar parámetros en tests
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
+        _tuning = tuning ?? const _Tuning(),
         hud = PortraitUiController(
           const PortraitUiModel(
             statusLabel: 'Adjusting',
@@ -180,7 +386,59 @@ class PoseCaptureController extends ChangeNotifier {
           playMode: FramePlayMode.forward,
           loop: true,
           autoplay: true,
+        ) {
+    // Configura countdown con callbacks → HUD y captura integrados
+    _countdown = _Countdown(
+      duration: countdownDuration,
+      fps: countdownFps,
+      speed: countdownSpeed,
+      isOkNow: () => poseService.latestFrame.value != null && _stage == _FlowStage.done,
+      onTick: (seconds, progress) {
+        _setHud(
+          hud.value.copyWith(
+            countdownSeconds: seconds,
+            countdownProgress: progress,
+          ),
         );
+      },
+      onFire: () async {
+        // Disparo/captura
+        isCapturing = true;
+        notifyListeners();
+
+        final bytes = await _Capture.tryAll(poseService, _fallbackSnapshot);
+        if (bytes != null && bytes.isNotEmpty) {
+          capturedPng = bytes;
+        }
+
+        isCapturing = false;
+        _readySince = null;
+        notifyListeners();
+      },
+      onAbort: () {
+        // Limpia HUD de countdown si aborta
+        final cur = hud.value;
+        _setHud(
+          PortraitUiModel(
+            statusLabel: cur.statusLabel,
+            privacyLabel: cur.privacyLabel,
+            primaryMessage: cur.primaryMessage,
+            secondaryMessage: cur.secondaryMessage,
+            checkFraming: cur.checkFraming,
+            checkHead: cur.checkHead,
+            checkEyes: cur.checkEyes,
+            checkLighting: cur.checkLighting,
+            checkBackground: cur.checkBackground,
+            countdownSeconds: null,
+            countdownProgress: null,
+            ovalProgress: cur.ovalProgress,
+          ),
+          force: true,
+        );
+        _readySince = null;
+      },
+    );
+  }
 
   // ── External deps/config ──────────────────────────────────────────────
   final PoseWebRTCService poseService;
@@ -188,28 +446,22 @@ class PoseCaptureController extends ChangeNotifier {
   final int countdownFps;
   final double countdownSpeed;
   final bool mirror; // front camera UX
+  final _Tuning _tuning;
 
   // ── Controllers owned by this class ───────────────────────────────────
   final PortraitUiController hud;
   final FrameSequenceController seq;
+  late final _Countdown _countdown;
 
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
   final PortraitValidator _validator = const PortraitValidator();
 
-  // Angle thresholds (deg)
+  // Angle thresholds (deg) — mantenidas por compatibilidad con ext onframe
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
-  // ⬇️ NEW: shoulders tilt (absolute degrees of shoulder-line slope)
   static const double _shouldersDeadbandDeg = 1.8;
-
-  // Para roll AHORA usamos **error a 180°** en grados (no 178.x).
-  // Ej.: tolerar ±1.7° alrededor de 180° ⇒ error ≤ 1.7°
   static const double _rollErrorDeadbandDeg = 1.7;
-
   static const double _maxOffDeg = 20.0;
-
-  // 👇 Opcional (para usar en el onframe): zona muerta para no cambiar
-  // el texto cuando ya estás prácticamente en 180°.
   static const double _rollHintDeadzoneDeg = 0.3;
 
   // Axis gates (Proposal 1 + adjustments)
@@ -253,10 +505,7 @@ class PoseCaptureController extends ChangeNotifier {
   void setCanvasSize(Size s) => _canvasSize = s;
 
   // Countdown state
-  Timer? _countdownTicker;
-  double _countdownProgress = 1.0; // 1 → 0
-  int _countdownSeconds = 3;
-  bool get isCountingDown => _countdownTicker != null;
+  bool get isCountingDown => _countdown.isRunning;
 
   // Global stability (no extra hold; gates already enforce dwell)
   DateTime? _readySince;
@@ -264,14 +513,11 @@ class PoseCaptureController extends ChangeNotifier {
 
   // Throttle HUD updates to ~15 Hz
   DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
-  static const _hudMinInterval = Duration(milliseconds: 66);
+  // (usaremos _tuning.hudMinInterval en _setHud)
 
   // Snapshot state (exposed)
   Uint8List? capturedPng; // captured bytes (from WebRTC track or boundary fallback)
   bool isCapturing = false; // Capture-mode flag to hide preview/HUD instantly at T=0
-
-  // Early-fire latch so we shoot as soon as digits hit '1'
-  bool _firedAtOne = false;
 
   // Hint trigger & visibility for sequence
   bool _turnRightSeqLoaded = false;
@@ -287,18 +533,21 @@ class PoseCaptureController extends ChangeNotifier {
   // Track roll sign (true => rollDeg > 0)
   bool? _activeRollPositive;
 
-  // EMA smoothing for angles (yaw/pitch siguen igual)
-  static const double _emaTauMs = 150.0;
-  DateTime? _lastSampleAt;
+  // EMA smoothing for angles (yaw/pitch HUD)
+  static const double _emaTauMs = 150.0; // kept for compatibility
   double? _emaYawDeg;
   double? _emaPitchDeg;
-  double? _emaRollDeg; // mantenida por compatibilidad si la usa el onframe
+  double? _emaRollDeg; // for HUD/debug
 
-  // ── Dinámica de ROLL (unwrap + suavizado propio + velocidad) ─────────
-  static const double _rollMaxDpsDuringDwell = 15.0; // umbral sugerido
-  double? _rollSmoothedDeg;  // señal de roll suavizada y "unwrapped"
-  DateTime? _rollSmoothedAt; // timestamp de la muestra suavizada
-  double? _lastRollDps;      // velocidad angular estimada (deg/s)
+  // ✅ Legacy smoothing state used by the existing onframe implementation
+  DateTime? _lastSampleAt;   // global timestamp for EMA deltas (yaw/pitch)
+  double? _rollSmoothedDeg;  // smoothed + unwrapped roll (for compatibility)
+  DateTime? _rollSmoothedAt; // timestamp of last smoothed roll sample
+  double? _lastRollDps;      // last angular velocity estimate for roll
+
+  // ── Dinámica de ROLL modular ──────────────────────────────────────────
+  static const double _rollMaxDpsDuringDwell = 15.0; // compatibilidad
+  final _RollFilter _rollFilter = _RollFilter(tauMs: 150.0);
 
   /// Envuelve ángulos a (-180, 180]
   double _wrapDeg180(double x) => ((x + 180.0) % 360.0) - 180.0;
@@ -318,8 +567,8 @@ class PoseCaptureController extends ChangeNotifier {
   _FlowStage _stage = _FlowStage.yaw;
 
   // Fallback snapshot closure (widget provides it)
-  Future<Uint8List?> Function()? _fallbackSnapshot;
-  void setFallbackSnapshot(Future<Uint8List?> Function() fn) {
+  SnapshotFn? _fallbackSnapshot;
+  void setFallbackSnapshot(SnapshotFn fn) {
     _fallbackSnapshot = fn;
   }
 
@@ -331,7 +580,7 @@ class PoseCaptureController extends ChangeNotifier {
   @override
   void dispose() {
     poseService.latestFrame.removeListener(_onFrame);
-    _stopCountdown();
+    _countdown.stop();
     seq.dispose();
     hud.dispose();
     super.dispose();
@@ -376,60 +625,33 @@ extension _FlowHelpers on PoseCaptureController {
 }
 
 extension _RollMathKinematics on PoseCaptureController {
-  /// Actualiza cinemática de roll: *unwrap*, EMA propio, dps y error a 180°.
-  /// Si se está en dwell y hay demasiada velocidad, reinicia el intento.
+  /// Actualiza cinemática de roll usando el filtro modular (unwrap + EMA + dps)
+  /// y mantiene sincronizados los campos legados usados por onframe.
   _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
-    // Inicialización
-    if (_rollSmoothedDeg == null || _rollSmoothedAt == null) {
-      _rollSmoothedDeg = rawRollDeg;
-      _rollSmoothedAt = now;
-      _lastRollDps = 0.0;
-      final err0 = _distTo180(_rollSmoothedDeg!);
-      return _RollMetrics(err0, _lastRollDps!);
-    }
+    final m = _rollFilter.update(rawRollDeg, now);
 
-    // Unwrap local alrededor del último valor suavizado
-    final prev = _rollSmoothedDeg!;
-    double cur = rawRollDeg;
-    double delta = cur - prev;
-    if (delta > 180.0) cur -= 360.0;
-    if (delta < -180.0) cur += 360.0;
-
-    final dtMs = now.difference(_rollSmoothedAt!).inMilliseconds.clamp(1, 1000);
-    final alpha = 1.0 -
-        math.exp(-dtMs / PoseCaptureController._emaTauMs); // ⬅️ qualified
-
-    // EMA sobre señal "cur" (ya desenvuelta)
-    final next = prev + alpha * (cur - prev);
-
-    // Velocidad sobre la señal suavizada
-    final dps = ((next - prev) / dtMs) * 1000.0;
-
-    _rollSmoothedDeg = next;
+    // ✅ Mantener compatibilidad con el onframe existente
+    _rollSmoothedDeg = m.smoothedDeg;
     _rollSmoothedAt = now;
-    _lastRollDps = dps;
+    _lastRollDps = m.dps;
 
-    final err = _distTo180(next);
-
-    // Si el usuario aún se mueve demasiado durante dwell, reinicia intento
-    if (_rollGate.isDwell &&
-        dps.abs() > PoseCaptureController._rollMaxDpsDuringDwell) { // ⬅️ qualified
+    // Si el usuario se mueve demasiado durante dwell, reinicia intento
+    if (_rollGate.isDwell && m.dps.abs() > _tuning.rollMaxDpsDuringDwell) {
       _rollGate.resetTransient();
     }
 
-    // (Opcional) sincronizar _emaRollDeg si tu onframe lo muestra en HUD
-    _emaRollDeg = next;
+    // (Opcional) sincronizar _emaRollDeg si tu HUD lo muestra
+    _emaRollDeg = m.smoothedDeg;
 
-    return _RollMetrics(err, dps);
+    return _RollMetrics(m.errDeg, m.dps);
   }
 }
+
 
 extension _HudHelpers on PoseCaptureController {
   void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
-    if (!force &&
-        now.difference(_lastHudPush) <
-            PoseCaptureController._hudMinInterval) return; // ⬅️ qualified
+    if (!force && now.difference(_lastHudPush) < _tuning.hudMinInterval) return;
 
     final cur = hud.value;
     final same =
@@ -452,153 +674,13 @@ extension _HudHelpers on PoseCaptureController {
   }
 }
 
-extension _CaptureHelpers on PoseCaptureController {
-  Future<void> _captureFromWebRtcTrack() async {
-    try {
-      MediaStream? stream =
-          poseService.localRenderer.srcObject ?? poseService.localStream;
-      if (stream == null || stream.getVideoTracks().isEmpty) {
-        throw StateError('No local WebRTC video track available');
-      }
-
-      final track = stream.getVideoTracks().first;
-      final dynamic dynTrack = track;
-
-      final Object data =
-          await dynTrack.captureFrame(); // may be Uint8List / ByteBuffer / ByteData
-      late final Uint8List bytes;
-
-      if (data is Uint8List) {
-        bytes = data;
-      } else if (data is ByteBuffer) {
-        bytes = data.asUint8List();
-      } else if (data is ByteData) {
-        bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-      } else {
-        throw StateError('Unsupported captureFrame type: ${data.runtimeType}');
-      }
-
-      if (bytes.isNotEmpty) {
-        capturedPng = bytes; // if your plugin returns encoded PNG/JPEG
-        isCapturing = false;
-        _readySince = null;
-        notifyListeners();
-        return;
-      }
-    } catch (e) {
-      // ignore: avoid_print
-      print('captureFrame failed, falling back to boundary: $e');
-    }
-
-    // Fallback to widget-provided snapshot if available
-    if (_fallbackSnapshot != null) {
-      try {
-        final bytes = await _fallbackSnapshot!.call();
-        if (bytes != null && bytes.isNotEmpty) {
-          capturedPng = bytes;
-          isCapturing = false;
-          _readySince = null;
-          notifyListeners();
-          return;
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    // If nothing worked, recover UI
-    isCapturing = false;
-    notifyListeners();
-  }
-}
-
 extension _CountdownHelpers on PoseCaptureController {
   void _startCountdown() {
-    _stopCountdown();
-    _countdownProgress = 1.0;
-    _firedAtOne = false;
-
-    final int totalLogicalMs = countdownDuration.inMilliseconds;
-    final int totalScaledMs =
-        (totalLogicalMs / countdownSpeed).round().clamp(1, 24 * 60 * 60 * 1000);
-
-    _countdownSeconds = (totalLogicalMs / 1000.0).ceil();
-
-    _setHud(
-      hud.value.copyWith(
-        countdownSeconds: _countdownSeconds,
-        countdownProgress: _countdownProgress,
-      ),
-      force: true,
-    );
-
-    final int tickMs = (1000 / countdownFps).round().clamp(10, 1000);
-    int elapsedScaled = 0;
-
-    _countdownTicker = Timer.periodic(Duration(milliseconds: tickMs), (_) {
-      elapsedScaled += tickMs;
-
-      final int remainingScaledMs =
-          (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
-      _countdownProgress = remainingScaledMs / totalScaledMs;
-
-      final int remainingLogicalMs =
-          (remainingScaledMs / totalScaledMs * totalLogicalMs).round();
-      final int nextSeconds =
-          (remainingLogicalMs / 1000.0).ceil().clamp(1, _countdownSeconds);
-
-      if (nextSeconds != _countdownSeconds) {
-        _countdownSeconds = nextSeconds;
-      }
-
-      _setHud(
-        hud.value.copyWith(
-          countdownSeconds: _countdownSeconds,
-          countdownProgress: _countdownProgress,
-        ),
-      );
-
-      // Abort if stream died or validations failed mid-countdown.
-      final bool okNow =
-          poseService.latestFrame.value != null && _stage == _FlowStage.done;
-      if (poseService.latestFrame.value == null || !okNow) {
-        _stopCountdown();
-        return;
-      }
-
-      // Early fire: as soon as digits read "1", shoot immediately.
-      if (!_firedAtOne && nextSeconds == 1) {
-        final bool okToShoot =
-            poseService.latestFrame.value != null && okNow;
-        if (okToShoot) {
-          isCapturing = true;
-          notifyListeners();
-          _firedAtOne = true;
-          unawaited(_captureFromWebRtcTrack());
-          _stopCountdown();
-          return;
-        }
-      }
-
-      // Countdown finished → capture, then stop. (Fallback if not fired at "1")
-      if (!_firedAtOne && elapsedScaled >= totalScaledMs) {
-        final bool okToShoot =
-            poseService.latestFrame.value != null && okNow;
-
-        if (okToShoot) {
-          isCapturing = true;
-          notifyListeners();
-          unawaited(_captureFromWebRtcTrack());
-        }
-
-        _stopCountdown();
-      }
-    });
+    _countdown.start();
   }
 
   void _stopCountdown() {
-    _countdownTicker?.cancel();
-    _countdownTicker = null;
+    _countdown.stop();
 
     _readySince = null;
 
