@@ -2,9 +2,13 @@
 part of 'pose_capture_controller.dart';
 
 extension _OnFrameLogicExt on PoseCaptureController {
-  // Updated _onFrame() body integrating roll unwrap + error-to-180° gating.
+  // Updated _onFrame() body:
+  // - Roll unwrap + error-to-180° gating
+  // - Backtrack to previous axes only after current axis finishes
+  // - Hints decided by *current* metric vs band (not hasConfirmedOnce)
+  // - Actionable hint promoted to primaryMessage
   void _onFrameImpl() {
-    // ── begin: original _onFrame body (with roll integration) ───────────
+    // ── begin: original _onFrame body (with fixes) ───────────
     // While capturing OR while a photo is displayed, ignore frame/HUD updates.
     if (isCapturing || capturedPng != null) return;
 
@@ -53,15 +57,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // Defaults when we can't evaluate.
     bool faceOk = false;
-    bool yawOk = false;
-    bool pitchOk = false;
-    bool rollOk = false;
     double arcProgress = 0.0;
 
     // Keep values available outside the block for the animation chooser
     double? yawDegForAnim;
     double? pitchDegForAnim;
     double? rollDegForAnim; // smoothed, unwrapped roll (not the error)
+
+    // For hint decisions (current position vs thresholds)
+    bool? yawInsideNow;
+    bool? pitchInsideNow;
+    bool? rollInsideNow;
 
     final faces = poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
@@ -130,66 +136,103 @@ extension _OnFrameLogicExt on PoseCaptureController {
       final double pitchAbs = _emaPitchDeg!.abs();
       final double rollErr  = rollM.errDeg; // métrica de roll para el gate (distancia a 180°)
 
-      // Stage rollback si una validación previa dejó de sostenerse
-      if (_stage == _FlowStage.pitch) {
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage();
-        }
-      } else if (_stage == _FlowStage.roll) {
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage();
-          _pitchGate.resetForNewStage();
-        } else if (!_isHolding(_pitchGate, pitchAbs)) {
-          _stage = _FlowStage.pitch;
-          _pitchGate.resetForNewStage();
-        }
-      } else if (_stage == _FlowStage.done) {
-        if (!_isHolding(_yawGate, yawAbs)) {
-          _stage = _FlowStage.yaw;
-          _yawGate.resetForNewStage();
-          _pitchGate.resetForNewStage();
-          _rollGate.resetForNewStage();
-        } else if (!_isHolding(_pitchGate, pitchAbs)) {
-          _stage = _FlowStage.pitch;
-          _pitchGate.resetForNewStage();
-          _rollGate.resetForNewStage();
-        } else if (!_isHolding(_rollGate, rollErr)) {
-          _stage = _FlowStage.roll;
-          _rollGate.resetForNewStage();
-        }
+      // Helper para saber si *ahora mismo* estoy dentro del umbral de entrada
+      bool _insideEnter(_AxisGate g, double metric) {
+        final th = g.enterBand;
+        final inside = g.sense == _GateSense.insideIsOk;
+        return inside ? (metric <= th) : (metric >= th);
       }
 
-      // Sequential gating (usar hasConfirmedOnce para checks previos)
-      yawOk   = _yawGate.hasConfirmedOnce;
-      pitchOk = _pitchGate.hasConfirmedOnce;
-      rollOk  = _rollGate.hasConfirmedOnce;
+      yawInsideNow   = _insideEnter(_yawGate, yawAbs);
+      pitchInsideNow = _insideEnter(_pitchGate, pitchAbs);
+      rollInsideNow  = _insideEnter(_rollGate, rollErr);
 
+      // ── Máquina de estados con backtrack diferido ─────────────────────
       switch (_stage) {
-        case _FlowStage.yaw:
-          yawOk = faceOk && _yawGate.update(yawAbs, now);
-          if (yawOk) {
+        case _FlowStage.yaw: {
+          // Validar YAW normalmente (entra a dwell, espera dwell, confirma).
+          final bool confirmedNow = faceOk && _yawGate.update(yawAbs, now);
+
+          if (confirmedNow) {
             _stage = _FlowStage.pitch;
-            _pitchGate.resetForNewStage();
+            // No reseteamos yaw ni pitch completo; pitch comienza su intento fresco:
+            _pitchGate.resetTransient(); // mantiene knowledge del tighten post-primer-intento
           }
           break;
-        case _FlowStage.pitch:
-          pitchOk = faceOk && _pitchGate.update(pitchAbs, now);
-          if (pitchOk) {
+        }
+
+        case _FlowStage.pitch: {
+          // Mientras pitch esté en searching/dwell, NO interrumpimos por YAW.
+          // Si pitch ya estaba confirmado y yaw dejó de sostenerse, retrocedemos.
+          if (_pitchGate.isConfirmed && !_isHolding(_yawGate, yawAbs)) {
+            _yawGate.resetTransient();
+            _stage = _FlowStage.yaw;
+            break;
+          }
+
+          final bool confirmedNow = faceOk && _pitchGate.update(pitchAbs, now);
+
+          if (confirmedNow) {
+            // Pitch terminó. AHORA exigimos que YAW siga sosteniéndose.
+            if (!_isHolding(_yawGate, yawAbs)) {
+              _yawGate.resetTransient();
+              _stage = _FlowStage.yaw;
+            } else {
+              _stage = _FlowStage.roll;
+              _rollGate.resetTransient();
+            }
+          }
+          break;
+        }
+
+        case _FlowStage.roll: {
+          // Mientras roll esté en searching/dwell, NO interrumpimos por YAW/PITCH.
+          // Si roll ya estaba confirmado y Y/P dejan de sostenerse, retrocedemos.
+          if (_rollGate.isConfirmed) {
+            if (!_isHolding(_yawGate, yawAbs)) {
+              _yawGate.resetTransient();
+              _stage = _FlowStage.yaw;
+              break;
+            }
+            if (!_isHolding(_pitchGate, pitchAbs)) {
+              _pitchGate.resetTransient();
+              _stage = _FlowStage.pitch;
+              break;
+            }
+          }
+
+          final bool confirmedNow = faceOk && _rollGate.update(rollErr, now);
+
+          if (confirmedNow) {
+            // Roll terminó. AHORA exigimos sostener YAW y PITCH.
+            if (!_isHolding(_yawGate, yawAbs)) {
+              _yawGate.resetTransient();
+              _stage = _FlowStage.yaw;
+            } else if (!_isHolding(_pitchGate, pitchAbs)) {
+              _pitchGate.resetTransient();
+              _stage = _FlowStage.pitch;
+            } else {
+              _stage = _FlowStage.done;
+            }
+          }
+          break;
+        }
+
+        case _FlowStage.done: {
+          // Ya no hay “validación actual”; aquí sí se puede retroceder inmediatamente
+          // si algún eje deja de sostenerse (comportamiento esperado tras completar todo).
+          if (!_isHolding(_yawGate, yawAbs)) {
+            _yawGate.resetTransient();
+            _stage = _FlowStage.yaw;
+          } else if (!_isHolding(_pitchGate, pitchAbs)) {
+            _pitchGate.resetTransient();
+            _stage = _FlowStage.pitch;
+          } else if (!_isHolding(_rollGate, rollErr)) {
+            _rollGate.resetTransient();
             _stage = _FlowStage.roll;
-            _rollGate.resetForNewStage();
           }
           break;
-        case _FlowStage.roll:
-          // IMPORTANTE: para roll usamos la **métrica de error** (no |roll|)
-          rollOk = faceOk && _rollGate.update(rollErr, now);
-          if (rollOk) {
-            _stage = _FlowStage.done;
-          }
-          break;
-        case _FlowStage.done:
-          break;
+        }
       }
 
       // Valores para el selector de animaciones (signo usa _emaRollDeg suavizado)
@@ -198,22 +241,32 @@ extension _OnFrameLogicExt on PoseCaptureController {
       rollDegForAnim = _emaRollDeg;
     }
 
-    // Choose axis animation/hint (suppress during dwell)
+    // Choose axis animation/hint (suppress during dwell).
+    // IMPORTANT: Decide by *current* metric vs enter band, not hasConfirmedOnce.
     _Axis desiredAxis = _Axis.none;
     String? finalHint;
 
     if (faceOk) {
-      if (_stage == _FlowStage.yaw && !yawOk && yawDegForAnim != null && !_yawGate.isDwell) {
+      if (_stage == _FlowStage.yaw &&
+          yawDegForAnim != null &&
+          yawInsideNow == false && // actualmente fuera del umbral
+          !_yawGate.isDwell) {
         desiredAxis = _Axis.yaw;
         finalHint = (_emaYawDeg! > 0)
             ? 'Gira ligeramente la cabeza a la izquierda'
             : 'Gira ligeramente la cabeza a la derecha';
-      } else if (_stage == _FlowStage.pitch && !pitchOk && pitchDegForAnim != null && !_pitchGate.isDwell) {
+      } else if (_stage == _FlowStage.pitch &&
+          pitchDegForAnim != null &&
+          pitchInsideNow == false &&
+          !_pitchGate.isDwell) {
         desiredAxis = _Axis.pitch;
         finalHint = (_emaPitchDeg! > 0)
             ? 'Sube ligeramente la cabeza'
             : 'Baja ligeramente la cabeza';
-      } else if (_stage == _FlowStage.roll && !rollOk && rollDegForAnim != null && !_rollGate.isDwell) {
+      } else if (_stage == _FlowStage.roll &&
+          rollDegForAnim != null &&
+          rollInsideNow == false &&
+          !_rollGate.isDwell) {
         desiredAxis = _Axis.roll;
         finalHint = (_emaRollDeg! > 0)
             ? 'Rota ligeramente tu cabeza en sentido antihorario ⟲'
@@ -390,9 +443,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
           PortraitUiModel(
             statusLabel: 'Adjusting',
             privacyLabel: cur.privacyLabel,
-            primaryMessage:
-                faceOk ? 'Mantén la cabeza recta' : 'Ubica tu rostro dentro del óvalo',
-            secondaryMessage: _nullIfBlank(faceOk ? (finalHint ?? '') : ''),
+            primaryMessage: faceOk
+                ? (finalHint ?? 'Mantén la cabeza recta')
+                : 'Ubica tu rostro dentro del óvalo',
+            secondaryMessage: null, // el mensaje accionable es primario
             checkFraming: faceOk ? Tri.ok : Tri.almost,
             checkHead: faceOk ? (_stage == _FlowStage.done ? Tri.ok : Tri.almost) : Tri.pending,
             checkEyes: Tri.almost,

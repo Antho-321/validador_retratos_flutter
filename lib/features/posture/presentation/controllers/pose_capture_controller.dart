@@ -209,16 +209,16 @@ class PoseCaptureController extends ChangeNotifier {
   // Axis gates (Proposal 1 + adjustments)
   final _AxisGate _yawGate = _AxisGate(
     baseDeadband: _yawDeadbandDeg,
-    tighten: 1.3,
+    tighten: 1.4,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1800),
+    dwell: Duration(milliseconds: 0),
     extraRelaxAfterFirst: 0.2,
   );
   final _AxisGate _pitchGate = _AxisGate(
     baseDeadband: _pitchDeadbandDeg,
-    tighten: 1.3,
+    tighten: 1.4,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1800),
+    dwell: Duration(milliseconds: 0),
     extraRelaxAfterFirst: 0.2,
   );
 
@@ -228,7 +228,7 @@ class PoseCaptureController extends ChangeNotifier {
     sense: _GateSense.insideIsOk, // unificado
     tighten: 0.4,
     hysteresis: 0.3,
-    dwell: Duration(milliseconds: 1800),
+    dwell: Duration(milliseconds: 0),
     extraRelaxAfterFirst: 0.4,
   );
 
@@ -272,7 +272,7 @@ class PoseCaptureController extends ChangeNotifier {
   bool? _activeRollPositive;
 
   // EMA smoothing for angles (yaw/pitch siguen igual)
-  static const double _emaTauMs = 250.0;
+  static const double _emaTauMs = 150.0;
   DateTime? _lastSampleAt;
   double? _emaYawDeg;
   double? _emaPitchDeg;
