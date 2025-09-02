@@ -469,14 +469,14 @@ class PoseCaptureController extends ChangeNotifier {
     baseDeadband: _yawDeadbandDeg,
     tighten: 1.4,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 0),
+    dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.2,
   );
   final _AxisGate _pitchGate = _AxisGate(
     baseDeadband: _pitchDeadbandDeg,
     tighten: 1.4,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 0),
+    dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.2,
   );
 
@@ -486,7 +486,7 @@ class PoseCaptureController extends ChangeNotifier {
     sense: _GateSense.insideIsOk, // unificado
     tighten: 0.4,
     hysteresis: 0.3,
-    dwell: Duration(milliseconds: 0),
+    dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.4,
   );
 
@@ -494,9 +494,9 @@ class PoseCaptureController extends ChangeNotifier {
   final _AxisGate _shouldersGate = _AxisGate(
     baseDeadband: _shouldersDeadbandDeg,
     sense: _GateSense.insideIsOk,
-    tighten: 0.4,
+    tighten: 0.5,
     hysteresis: 0.2,
-    dwell: Duration(milliseconds: 0),
+    dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.2,
   );
 
