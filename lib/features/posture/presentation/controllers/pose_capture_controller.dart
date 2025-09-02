@@ -38,8 +38,8 @@ enum _FlowStage { yaw, pitch, roll, done }
 enum _GateState { searching, dwell, confirmed }
 
 /// How to interpret the threshold comparison.
-/// - insideIsOk: value <= threshold passes (yaw/pitch).
-/// - outsideIsOk: value >= threshold passes (roll near 180°).
+/// - insideIsOk: value <= threshold passes (yaw/pitch and roll-error).
+/// - outsideIsOk: value >= threshold passes (modo legado, ya no usado para roll).
 enum _GateSense { insideIsOk, outsideIsOk }
 
 class _AxisGate {
@@ -52,7 +52,7 @@ class _AxisGate {
     this.extraRelaxAfterFirst = 0.2,
   });
 
-  final double baseDeadband; // e.g., 2.2°
+  final double baseDeadband; // p.ej., yaw/pitch: 2.2°, roll: error a 180° (p.ej., 1.7°)
   final _GateSense sense;
   final double tighten; // e.g., 0.2° → first pass stricter
   final double hysteresis; // inside: exit = enter + hys, outside: exit = enter - hys
@@ -61,13 +61,13 @@ class _AxisGate {
 
   bool hasConfirmedOnce = false;
 
-  // NEW: endurecer solo en el primer intento del eje; desde el segundo intento, deadband base.
+  // Endurecer solo en el primer intento del eje; desde el segundo intento, deadband base.
   bool _firstAttemptDone = false;
 
   _GateState _state = _GateState.searching;
   DateTime? _dwellStart;
 
-  // NEW: expose state for UI decisions (e.g., suppressing hints during dwell)
+  // Exponer estado para UI/decisiones
   bool get isSearching => _state == _GateState.searching;
   bool get isDwell => _state == _GateState.dwell;
   bool get isConfirmed => _state == _GateState.confirmed;
@@ -88,13 +88,15 @@ class _AxisGate {
     hasConfirmedOnce = false;
   }
 
-  // tighten SOLO en primer intento; para roll (outsideIsOk) “estricto” = más cerca de 180°.
+  // tighten SOLO en primer intento.
+  // - insideIsOk (yaw/pitch y roll-error): primer intento más estricto = umbral más pequeño.
+  // - outsideIsOk (legado): primer intento más estricto = umbral más grande.
   double get enterBand {
     final strict = !_firstAttemptDone; // solo primer intento
     if (!strict) return baseDeadband;
     return (sense == _GateSense.insideIsOk)
-        ? (baseDeadband - tighten) // yaw/pitch → umbral más pequeño (más estricto)
-        : (baseDeadband + tighten); // roll → umbral más grande (más estricto hacia 180°)
+        ? (baseDeadband - tighten)
+        : (baseDeadband + tighten);
   }
 
   double get exitBand {
@@ -108,12 +110,12 @@ class _AxisGate {
   double _withRelax(double th, double relax) =>
       (sense == _GateSense.insideIsOk) ? (th + relax) : (th - relax);
 
-  /// Update with absolute degrees and current time.
-  /// Returns whether the axis is considered "OK" after applying gate logic.
-  bool update(double absDeg, DateTime now) {
+  /// Update with a metric in degrees and current time.
+  /// Para yaw/pitch, usa |ángulo|; para roll, usa **error a 180°**.
+  bool update(double metricDeg, DateTime now) {
     switch (_state) {
       case _GateState.searching:
-        if (_isOk(absDeg, enterBand)) {
+        if (_isOk(metricDeg, enterBand)) {
           // Siempre inicia dwell; nunca confirmar de inmediato.
           _firstAttemptDone = true; // a partir de ahora, intentos menos estrictos
           _dwellStart = now;
@@ -122,7 +124,7 @@ class _AxisGate {
         return false;
 
       case _GateState.dwell:
-        if (!_isOk(absDeg, exitBand)) {
+        if (!_isOk(metricDeg, exitBand)) {
           // Se rompió el dwell → reiniciar intento (sin endurecimiento adicional).
           _state = _GateState.searching;
           _dwellStart = null;
@@ -138,7 +140,7 @@ class _AxisGate {
       case _GateState.confirmed:
         final double relax = hasConfirmedOnce ? extraRelaxAfterFirst : 0.0;
         final double exitWithRelax = _withRelax(exitBand, relax);
-        if (!_isOk(absDeg, exitWithRelax)) {
+        if (!_isOk(metricDeg, exitWithRelax)) {
           _state = _GateState.searching;
           _dwellStart = null;
           return false;
@@ -146,6 +148,13 @@ class _AxisGate {
         return true;
     }
   }
+}
+
+/// Pequeño contenedor para métrica de roll
+class _RollMetrics {
+  final double errDeg; // distancia a 180°, en grados (0 = perfecto)
+  final double dps;    // velocidad angular (grados/seg) sobre señal suavizada
+  const _RollMetrics(this.errDeg, this.dps);
 }
 
 /// Controller
@@ -190,32 +199,37 @@ class PoseCaptureController extends ChangeNotifier {
   // Angle thresholds (deg)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
-  static const double _rollDeadbandDeg = 178.3;
+
+  // Para roll AHORA usamos **error a 180°** en grados (no 178.x).
+  // Ej.: tolerar ±1.7° alrededor de 180° ⇒ error ≤ 1.7°
+  static const double _rollErrorDeadbandDeg = 1.7;
+
   static const double _maxOffDeg = 20.0;
 
-  // Axis gates (Proposal 1 + small 2)
+  // Axis gates (Proposal 1 + adjustments)
   final _AxisGate _yawGate = _AxisGate(
     baseDeadband: _yawDeadbandDeg,
-    tighten: 0.6,
+    tighten: 1.3,
     hysteresis: 0.2,
     dwell: Duration(milliseconds: 1800),
     extraRelaxAfterFirst: 0.2,
   );
   final _AxisGate _pitchGate = _AxisGate(
     baseDeadband: _pitchDeadbandDeg,
-    tighten: 0.6,
+    tighten: 1.3,
     hysteresis: 0.2,
     dwell: Duration(milliseconds: 1800),
     extraRelaxAfterFirst: 0.2,
   );
-  // Roll uses the inverted sense so that larger thresholds are stricter (closer to 180°).
+
+  // ROLL: métrica unificada = **distancia a 180°** → insideIsOk (≤ umbral)
   final _AxisGate _rollGate = _AxisGate(
-    baseDeadband: _rollDeadbandDeg,
-    sense: _GateSense.outsideIsOk,
-    tighten: 0.1,
-    hysteresis: 0.2,
+    baseDeadband: _rollErrorDeadbandDeg,
+    sense: _GateSense.insideIsOk, // unificado
+    tighten: 0.4,
+    hysteresis: 0.3,
     dwell: Duration(milliseconds: 1800),
-    extraRelaxAfterFirst: 0.2,
+    extraRelaxAfterFirst: 0.4,
   );
 
   // Keep current canvas size to map image↔canvas consistently.
@@ -257,12 +271,69 @@ class PoseCaptureController extends ChangeNotifier {
   // Track roll sign (true => rollDeg > 0)
   bool? _activeRollPositive;
 
-  // EMA smoothing for angles
+  // EMA smoothing for angles (yaw/pitch siguen igual)
   static const double _emaTauMs = 250.0;
   DateTime? _lastSampleAt;
   double? _emaYawDeg;
   double? _emaPitchDeg;
-  double? _emaRollDeg;
+  double? _emaRollDeg; // mantenida por compatibilidad si la usa el onframe
+
+  // ── Dinámica de ROLL (unwrap + suavizado propio + velocidad) ─────────
+  static const double _rollMaxDpsDuringDwell = 15.0; // umbral sugerido
+  double? _rollSmoothedDeg;  // señal de roll suavizada y "unwrapped"
+  DateTime? _rollSmoothedAt; // timestamp de la muestra suavizada
+  double? _lastRollDps;      // velocidad angular estimada (deg/s)
+
+  /// Envuelve ángulos a (-180, 180]
+  double _wrapDeg180(double x) => ((x + 180.0) % 360.0) - 180.0;
+
+  /// Distancia mínima a 180° (0 = perfecto; 2° = 178° o 182°)
+  double _distTo180(double deg) => _wrapDeg180(deg - 180.0).abs();
+
+  /// Actualiza cinemática de roll: *unwrap*, EMA propio, dps y error a 180°.
+  /// Si se está en dwell y hay demasiada velocidad, reinicia el intento.
+  _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
+    // Inicialización
+    if (_rollSmoothedDeg == null || _rollSmoothedAt == null) {
+      _rollSmoothedDeg = rawRollDeg;
+      _rollSmoothedAt = now;
+      _lastRollDps = 0.0;
+      final err0 = _distTo180(_rollSmoothedDeg!);
+      return _RollMetrics(err0, _lastRollDps!);
+    }
+
+    // Unwrap local alrededor del último valor suavizado
+    final prev = _rollSmoothedDeg!;
+    double cur = rawRollDeg;
+    double delta = cur - prev;
+    if (delta > 180.0) cur -= 360.0;
+    if (delta < -180.0) cur += 360.0;
+
+    final dtMs = now.difference(_rollSmoothedAt!).inMilliseconds.clamp(1, 1000);
+    final alpha = 1.0 - math.exp(-dtMs / _emaTauMs);
+
+    // EMA sobre señal "cur" (ya desenvuelta)
+    final next = prev + alpha * (cur - prev);
+
+    // Velocidad sobre la señal suavizada
+    final dps = ((next - prev) / dtMs) * 1000.0;
+
+    _rollSmoothedDeg = next;
+    _rollSmoothedAt = now;
+    _lastRollDps = dps;
+
+    final err = _distTo180(next);
+
+    // Si el usuario aún se mueve demasiado durante dwell, reinicia intento
+    if (_rollGate.isDwell && dps.abs() > _rollMaxDpsDuringDwell) {
+      _rollGate.resetTransient();
+    }
+
+    // (Opcional) sincronizar _emaRollDeg si tu onframe lo muestra en HUD
+    _emaRollDeg = next;
+
+    return _RollMetrics(err, dps);
+  }
 
   // Sequential flow stage
   _FlowStage _stage = _FlowStage.yaw;
@@ -305,12 +376,13 @@ class PoseCaptureController extends ChangeNotifier {
   }
 
   // Helper: does a confirmed axis still hold its stability?
-  bool _isHolding(_AxisGate g, double absDeg) {
+  // Recuerda: para roll se debe pasar el **error** a 180° como metricDeg.
+  bool _isHolding(_AxisGate g, double metricDeg) {
     final exit = g.exitBand;
     final relax = g.hasConfirmedOnce ? g.extraRelaxAfterFirst : 0.0;
     final bool inside = g.sense == _GateSense.insideIsOk;
-    // inside: ok si ≤ exit+relax; outside (roll): ok si ≥ exit-relax
-    return inside ? (absDeg <= exit + relax) : (absDeg >= exit - relax);
+    // inside: ok si ≤ exit+relax; outside: ok si ≥ exit-relax
+    return inside ? (metricDeg <= exit + relax) : (metricDeg >= exit - relax);
   }
 
   // ─────────────────────────────────────────────────────────────────────
