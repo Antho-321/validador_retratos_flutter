@@ -7,6 +7,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
   // - Backtrack to previous axes only after current axis finishes
   // - Hints decided by *current* metric vs band (not hasConfirmedOnce)
   // - Actionable hint promoted to primaryMessage
+  // - NEW: Shoulders stage with the same gating mechanics
   void _onFrameImpl() {
     // ── begin: original _onFrame body (with fixes) ───────────
     // While capturing OR while a photo is displayed, ignore frame/HUD updates.
@@ -63,19 +64,23 @@ extension _OnFrameLogicExt on PoseCaptureController {
     double? yawDegForAnim;
     double? pitchDegForAnim;
     double? rollDegForAnim; // smoothed, unwrapped roll (not the error)
+    double? shouldersDegForHint; // NEW: signed, to decide left/right hint
 
     // For hint decisions (current position vs thresholds)
     bool? yawInsideNow;
     bool? pitchInsideNow;
     bool? rollInsideNow;
+    bool? shouldersInsideNow; // NEW
 
     final faces = poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
+    // Pose landmarks (image-space). Adjust getter if your service differs.
+    final pose = poseService.latestPoseLandmarks;
 
     // Use current enter-bands so progress bars match what we are enforcing
     final double _yawDeadbandNow = _yawGate.enterBand;
     final double _pitchDeadbandNow = _pitchGate.enterBand;
-    final double _rollDeadbandNow = _rollGate.enterBand; // NOTE: roll uses error-to-180° deadband
+    final double _rollDeadbandNow = _rollGate.enterBand; // roll uses error-to-180° deadband
 
     if (faces != null && faces.isNotEmpty && canvas != null) {
       final report = _validator.evaluate(
@@ -94,11 +99,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
         pitchDeadbandDeg: _pitchDeadbandNow,
         pitchMaxOffDeg: PoseCaptureController._maxOffDeg,
 
-        // Para roll, el validador recibe el deadband que ahora representa la
-        // tolerancia de error respecto a 180°. El gating usa esta misma métrica.
+        // Para roll: deadband = tolerancia del error relativo a 180°
         enableRoll: true,
         rollDeadbandDeg: _rollDeadbandNow,
         rollMaxOffDeg: PoseCaptureController._maxOffDeg,
+
+        // NEW: Shoulders tilt rule
+        poseLandmarksImg: pose, // or pose?.first if your service returns multiple
+        enableShoulders: true,
+        shouldersDeadbandDeg: _shouldersGate.enterBand,
+        shouldersMaxOffDeg: PoseCaptureController._maxOffDeg,
       );
 
       faceOk = report.faceInOval;
@@ -132,9 +142,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
       // updateRollKinematics también sincroniza _emaRollDeg con la señal suavizada
 
       // Usar valores filtrados para gating + animaciones/mensajes
-      final double yawAbs   = _emaYawDeg!.abs();
-      final double pitchAbs = _emaPitchDeg!.abs();
-      final double rollErr  = rollM.errDeg; // métrica de roll para el gate (distancia a 180°)
+      final double yawAbs       = _emaYawDeg!.abs();
+      final double pitchAbs     = _emaPitchDeg!.abs();
+      final double rollErr      = rollM.errDeg;              // métrica de roll (distancia a 180°)
+      final double shouldersAbs = report.shouldersDeg.abs(); // NEW
+      shouldersDegForHint = report.shouldersDeg;             // NEW (signo para el mensaje)
 
       // Helper para saber si *ahora mismo* estoy dentro del umbral de entrada
       bool _insideEnter(_AxisGate g, double metric) {
@@ -143,27 +155,24 @@ extension _OnFrameLogicExt on PoseCaptureController {
         return inside ? (metric <= th) : (metric >= th);
       }
 
-      yawInsideNow   = _insideEnter(_yawGate, yawAbs);
-      pitchInsideNow = _insideEnter(_pitchGate, pitchAbs);
-      rollInsideNow  = _insideEnter(_rollGate, rollErr);
+      yawInsideNow        = _insideEnter(_yawGate, yawAbs);
+      pitchInsideNow      = _insideEnter(_pitchGate, pitchAbs);
+      rollInsideNow       = _insideEnter(_rollGate, rollErr);
+      shouldersInsideNow  = _insideEnter(_shouldersGate, shouldersAbs); // NEW
 
       // ── Máquina de estados con backtrack diferido ─────────────────────
       switch (_stage) {
         case _FlowStage.yaw: {
-          // Validar YAW normalmente (entra a dwell, espera dwell, confirma).
           final bool confirmedNow = faceOk && _yawGate.update(yawAbs, now);
 
           if (confirmedNow) {
             _stage = _FlowStage.pitch;
-            // No reseteamos yaw ni pitch completo; pitch comienza su intento fresco:
-            _pitchGate.resetTransient(); // mantiene knowledge del tighten post-primer-intento
+            _pitchGate.resetTransient();
           }
           break;
         }
 
         case _FlowStage.pitch: {
-          // Mientras pitch esté en searching/dwell, NO interrumpimos por YAW.
-          // Si pitch ya estaba confirmado y yaw dejó de sostenerse, retrocedemos.
           if (_pitchGate.isConfirmed && !_isHolding(_yawGate, yawAbs)) {
             _yawGate.resetTransient();
             _stage = _FlowStage.yaw;
@@ -173,7 +182,6 @@ extension _OnFrameLogicExt on PoseCaptureController {
           final bool confirmedNow = faceOk && _pitchGate.update(pitchAbs, now);
 
           if (confirmedNow) {
-            // Pitch terminó. AHORA exigimos que YAW siga sosteniéndose.
             if (!_isHolding(_yawGate, yawAbs)) {
               _yawGate.resetTransient();
               _stage = _FlowStage.yaw;
@@ -186,8 +194,6 @@ extension _OnFrameLogicExt on PoseCaptureController {
         }
 
         case _FlowStage.roll: {
-          // Mientras roll esté en searching/dwell, NO interrumpimos por YAW/PITCH.
-          // Si roll ya estaba confirmado y Y/P dejan de sostenerse, retrocedemos.
           if (_rollGate.isConfirmed) {
             if (!_isHolding(_yawGate, yawAbs)) {
               _yawGate.resetTransient();
@@ -204,13 +210,52 @@ extension _OnFrameLogicExt on PoseCaptureController {
           final bool confirmedNow = faceOk && _rollGate.update(rollErr, now);
 
           if (confirmedNow) {
-            // Roll terminó. AHORA exigimos sostener YAW y PITCH.
             if (!_isHolding(_yawGate, yawAbs)) {
               _yawGate.resetTransient();
               _stage = _FlowStage.yaw;
             } else if (!_isHolding(_pitchGate, pitchAbs)) {
               _pitchGate.resetTransient();
               _stage = _FlowStage.pitch;
+            } else {
+              _stage = _FlowStage.shoulders; // NEW
+              _shouldersGate.resetTransient();
+            }
+          }
+          break;
+        }
+
+        case _FlowStage.shoulders: {
+          if (_shouldersGate.isConfirmed) {
+            if (!_isHolding(_yawGate, yawAbs)) {
+              _yawGate.resetTransient();
+              _stage = _FlowStage.yaw;
+              break;
+            }
+            if (!_isHolding(_pitchGate, pitchAbs)) {
+              _pitchGate.resetTransient();
+              _stage = _FlowStage.pitch;
+              break;
+            }
+            if (!_isHolding(_rollGate, rollErr)) {
+              _rollGate.resetTransient();
+              _stage = _FlowStage.roll;
+              break;
+            }
+          }
+
+          final bool shouldersConfirmed =
+              faceOk && _shouldersGate.update(shouldersAbs, now);
+
+          if (shouldersConfirmed) {
+            if (!_isHolding(_yawGate, yawAbs)) {
+              _yawGate.resetTransient();
+              _stage = _FlowStage.yaw;
+            } else if (!_isHolding(_pitchGate, pitchAbs)) {
+              _pitchGate.resetTransient();
+              _stage = _FlowStage.pitch;
+            } else if (!_isHolding(_rollGate, rollErr)) {
+              _rollGate.resetTransient();
+              _stage = _FlowStage.roll;
             } else {
               _stage = _FlowStage.done;
             }
@@ -219,8 +264,6 @@ extension _OnFrameLogicExt on PoseCaptureController {
         }
 
         case _FlowStage.done: {
-          // Ya no hay “validación actual”; aquí sí se puede retroceder inmediatamente
-          // si algún eje deja de sostenerse (comportamiento esperado tras completar todo).
           if (!_isHolding(_yawGate, yawAbs)) {
             _yawGate.resetTransient();
             _stage = _FlowStage.yaw;
@@ -230,15 +273,18 @@ extension _OnFrameLogicExt on PoseCaptureController {
           } else if (!_isHolding(_rollGate, rollErr)) {
             _rollGate.resetTransient();
             _stage = _FlowStage.roll;
+          } else if (!_isHolding(_shouldersGate, shouldersAbs)) { // NEW
+            _shouldersGate.resetTransient();
+            _stage = _FlowStage.shoulders;
           }
           break;
         }
       }
 
-      // Valores para el selector de animaciones (signo usa _emaRollDeg suavizado)
+      // Valores para el selector de animaciones
       yawDegForAnim = _emaYawDeg;
       pitchDegForAnim = _emaPitchDeg;
-      rollDegForAnim = _emaRollDeg;
+      rollDegForAnim = _emaRollDeg; // suavizado/desenvuelto
     }
 
     // Choose axis animation/hint (suppress during dwell).
@@ -247,14 +293,28 @@ extension _OnFrameLogicExt on PoseCaptureController {
     String? finalHint;
 
     if (faceOk) {
-      if (_stage == _FlowStage.yaw &&
+      if (_stage == _FlowStage.shoulders &&
+          shouldersInsideNow == false &&
+          !_shouldersGate.isDwell) {
+        desiredAxis = _Axis.none;
+        if (shouldersDegForHint != null) {
+          // Convención: positivo ⇒ hombro izquierdo más bajo que el derecho.
+          finalHint = (shouldersDegForHint! > 0)
+              ? 'Baja el hombro derecho o sube el izquierdo, un poco.'
+              : 'Baja el hombro izquierdo o sube el derecho, un poco.';
+        } else {
+          finalHint = 'Nivela los hombros, mantenlos horizontales.';
+        }
+
+      } else if (_stage == _FlowStage.yaw &&
           yawDegForAnim != null &&
-          yawInsideNow == false && // actualmente fuera del umbral
+          yawInsideNow == false &&
           !_yawGate.isDwell) {
         desiredAxis = _Axis.yaw;
         finalHint = (_emaYawDeg! > 0)
             ? 'Gira ligeramente la cabeza a la izquierda'
             : 'Gira ligeramente la cabeza a la derecha';
+
       } else if (_stage == _FlowStage.pitch &&
           pitchDegForAnim != null &&
           pitchInsideNow == false &&
@@ -263,14 +323,23 @@ extension _OnFrameLogicExt on PoseCaptureController {
         finalHint = (_emaPitchDeg! > 0)
             ? 'Sube ligeramente la cabeza'
             : 'Baja ligeramente la cabeza';
+
       } else if (_stage == _FlowStage.roll &&
           rollDegForAnim != null &&
           rollInsideNow == false &&
           !_rollGate.isDwell) {
-        desiredAxis = _Axis.roll;
-        finalHint = (_emaRollDeg! > 0)
-            ? 'Rota ligeramente tu cabeza en sentido antihorario ⟲'
-            : 'Rota ligeramente tu cabeza en sentido horario ⟳';
+        // FIX: decide direction by shortest delta to nearest 180°, not by sign(roll)
+        final double delta = this._deltaToNearest180(rollDegForAnim!);
+        if (delta.abs() > PoseCaptureController._rollHintDeadzoneDeg) {
+          desiredAxis = _Axis.roll;
+          // Map to user-perceived (mirrored) rotation: true ⇒ CCW for user.
+          final bool ccwForUser = mirror ? (delta < 0) : (delta > 0);
+          finalHint = ccwForUser
+              ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
+              : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
+        } else {
+          desiredAxis = _Axis.none; // near-perfect → no flip-flop
+        }
       }
     }
 
@@ -356,25 +425,20 @@ extension _OnFrameLogicExt on PoseCaptureController {
       try { seq.play(); } catch (_) {}
 
     } else if (desiredAxis == _Axis.roll && rollDegForAnim != null) {
-      final bool desiredRollPositive = rollDegForAnim! > 0;
+      // Drive roll animation by required correction (delta) + mirror,
+      // not by the raw roll sign.
+      final double delta = _deltaToNearest180(rollDegForAnim!);
+      final bool wantCcwForUser = mirror ? (delta < 0) : (delta > 0);
 
       _activeTurn = _TurnDir.none;
       _activePitchUp = null;
 
-      if (_activeRollPositive != desiredRollPositive) {
-        _activeRollPositive = desiredRollPositive;
+      // Reuse _activeRollPositive to track "CCW-for-user" state.
+      if (_activeRollPositive != wantCcwForUser) {
+        _activeRollPositive = wantCcwForUser;
 
-        if (desiredRollPositive) {
-          // ignore: discarded_futures
-          seq.loadFromAssets(
-            directory: 'assets/frames',
-            pattern: 'frame_%04d.png',
-            startNumber: 14,
-            count: 22,
-            xStart: 512,
-            xEnd: 768,
-          );
-        } else {
+        if (wantCcwForUser) {
+          // CCW animation for the user (swap branches if your sprite is opposite)
           // ignore: discarded_futures
           seq.loadFromAssets(
             directory: 'assets/frames',
@@ -384,6 +448,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
             xStart: 512,
             xEnd: 768,
             reverseOrder: true,
+          );
+        } else {
+          // CW animation for the user
+          // ignore: discarded_futures
+          seq.loadFromAssets(
+            directory: 'assets/frames',
+            pattern: 'frame_%04d.png',
+            startNumber: 14,
+            count: 22,
+            xStart: 512,
+            xEnd: 768,
           );
         }
       }

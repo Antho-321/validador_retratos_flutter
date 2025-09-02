@@ -2,6 +2,7 @@
 import 'dart:ui' show Offset, Size;
 import 'package:flutter/widgets.dart' show BoxFit;
 
+import '../metrics/pose_geometry.dart' as geom;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 import 'yaw_pitch_roll.dart' show yawPitchRollFromFaceMesh;
 
@@ -55,6 +56,11 @@ class PortraitValidationReport {
     required this.rollDeg,
     required this.rollProgress,
 
+    // Shoulders (tilt)
+    required this.shouldersOk,
+    required this.shouldersDeg,
+    required this.shouldersProgress,
+
     // UI ring & overall
     required this.ovalProgress,
     required this.allChecksOk,
@@ -79,6 +85,11 @@ class PortraitValidationReport {
   final double rollDeg;       // signed degrees (mirror flips roll)
   final double rollProgress;  // 0..1
 
+  /// Shoulders tilt rule
+  final bool shouldersOk;
+  final double shouldersDeg;       // (-90..90]
+  final double shouldersProgress;  // 0..1
+
   /// UI ring progress:
   /// - while face isn't inside oval -> equals fractionInsideOval
   /// - once face is inside oval     -> equals combined head progress (yaw/pitch[/roll])
@@ -95,7 +106,7 @@ class PortraitValidator {
   /// Main entry point. Give it the raw *image-space* landmarks (px) plus the
   /// image size and the *current* canvas size/mirroring/fit used by your preview.
   PortraitValidationReport evaluate({
-    required List<Offset> landmarksImg, // image-space points (px)
+    required List<Offset> landmarksImg, // face landmarks in image-space (px)
     required Size imageSize,            // from your frame
     required Size canvasSize,           // from LayoutBuilder
     bool mirror = true,                 // must match RTCVideoView.mirror
@@ -119,6 +130,12 @@ class PortraitValidator {
     bool enableRoll = true,
     double rollDeadbandDeg = 175,       // caller can override (e.g., 2.2)
     double rollMaxOffDeg = 100.0,       // kept for API symmetry (unused in new rule)
+
+    // Shoulders tilt parameters (degrees)
+    List<Offset>? poseLandmarksImg,     // full-body/upper-body pose landmarks (image-space)
+    bool enableShoulders = false,
+    double shouldersDeadbandDeg = 5.0,  // allow up to ±5°
+    double shouldersMaxOffDeg = 20.0,   // where progress bottoms out
   }) {
     if (landmarksImg.isEmpty ||
         imageSize.width <= 0 ||
@@ -137,12 +154,15 @@ class PortraitValidator {
         rollOk: false,
         rollDeg: 0.0,
         rollProgress: 0.0,
+        shouldersOk: false,
+        shouldersDeg: 0.0,
+        shouldersProgress: 0.0,
         ovalProgress: 0.0,
         allChecksOk: false,
       );
     }
 
-    // ── Face-in-oval (in canvas space, respecting fit/mirror) ────────────────
+    // ── Face-in-oval (in canvas space, respecting fit/mirror) ────────────
     final mapped = _mapImagePointsToCanvas(
       points: landmarksImg,
       imageSize: imageSize,
@@ -169,12 +189,17 @@ class PortraitValidator {
     final fracInside = inside / mapped.length;
     final faceOk = fracInside >= (minFractionInside.clamp(0.0, 1.0));
 
-    // ── Head orientation (yaw & pitch & roll in image space) ────────────────
+    // ── Head orientation (yaw & pitch & roll in image space) ─────────────
     double yawDeg = 0.0, pitchDeg = 0.0, rollDeg = 0.0;
     bool yawOk = false, pitchOk = false, rollOk = false;
     double yawProgress = enableYaw ? 0.0 : 1.0;
     double pitchProgress = enablePitch ? 0.0 : 1.0;
     double rollProgress = enableRoll ? 0.0 : 1.0;
+
+    // ── Shoulders (tilt) ─────────────────────────────────────────────────
+    bool shouldersOk = false;
+    double shouldersDeg = 0.0;
+    double shouldersProgress = enableShoulders ? 0.0 : 1.0;
 
     if (faceOk && (enableYaw || enablePitch || enableRoll)) {
       // Use your estimator once; it expects H/W ints (as in your page).
@@ -225,7 +250,24 @@ class PortraitValidator {
       }
     }
 
+    // Shoulders tilt (independent from head ring; contributes to allChecksOk)
+    if (faceOk && enableShoulders && (poseLandmarksImg != null)) {
+      final ang = geom.calcularAnguloHombros(poseLandmarksImg);
+      if (ang != null) {
+        shouldersDeg = _normalizeTilt90(ang);
+        final res = checkAngle(
+          enabled: true,
+          deg: shouldersDeg,
+          deadbandDeg: shouldersDeadbandDeg,
+          maxOffDeg: shouldersMaxOffDeg,
+        );
+        shouldersOk = res.ok;
+        shouldersProgress = res.progress;
+      }
+    }
+
     // UI ring: face progress until it passes; then combine head progress.
+    // (Shoulders do NOT affect the visual ring; only the overall gate.)
     double headProgress = 1.0;
     final parts = <double>[];
     if (enableYaw) parts.add(yawProgress);
@@ -239,7 +281,8 @@ class PortraitValidator {
     final allOk = faceOk &&
         (!enableYaw || yawOk) &&
         (!enablePitch || pitchOk) &&
-        (!enableRoll || rollOk);
+        (!enableRoll || rollOk) &&
+        (!enableShoulders || shouldersOk);
 
     return PortraitValidationReport(
       faceInOval: faceOk,
@@ -253,6 +296,9 @@ class PortraitValidator {
       rollOk: rollOk,
       rollDeg: rollDeg,
       rollProgress: rollProgress,
+      shouldersOk: shouldersOk,
+      shouldersDeg: shouldersDeg,
+      shouldersProgress: shouldersProgress,
       ovalProgress: ringProgress,
       allChecksOk: allOk,
     );
@@ -312,6 +358,13 @@ class PortraitValidator {
       final xFit = mirror ? (sw - xScaled) : xScaled;
       return Offset(dx + xFit, dy + yScaled);
     }).toList();
+  }
+
+  double _normalizeTilt90(double a) {
+    double x = a;
+    if (x > 90.0) x -= 180.0;
+    if (x <= -90.0) x += 180.0;
+    return x; // (-90..90]
   }
 
   double _min(double a, double b) => (a < b) ? a : b;

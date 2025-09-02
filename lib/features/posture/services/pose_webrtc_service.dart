@@ -125,6 +125,16 @@ class PoseWebRTCService {
   /// Each entry is one face = List<Offset> (e.g., 468 points).
   List<List<Offset>>? get latestFaceLandmarks => _lastPosesPerTask['face'];
 
+  // ⬇️ ADD THIS BLOCK HERE
+  /// Latest primary pose landmarks (first person) — image-space.
+  /// Returns `null` if no 'pose' data has arrived yet.
+  List<Offset>? get latestPoseLandmarks {
+    final poses = _lastPosesPerTask['pose'];
+    if (poses == null || poses.isEmpty) return null;
+    return poses.first; // choose the first detected person
+  }
+  // ⬆️ ADD THIS BLOCK HERE
+
   // ─────── Parsers & state PER TASK ───────
   final Map<String, PoseBinaryParser> _parsers = {}; // task -> parser
   final Map<String, List<List<Offset>>> _lastPosesPerTask = {}; // task -> poses

@@ -30,8 +30,8 @@ enum _TurnDir { none, left, right }
 // Which overlay animation is currently active
 enum _Axis { none, yaw, pitch, roll }
 
-/// Sequential flow: enforce yaw → pitch → roll
-enum _FlowStage { yaw, pitch, roll, done }
+/// Sequential flow: enforce yaw → pitch → roll → shoulders
+enum _FlowStage { yaw, pitch, roll, shoulders, done }
 
 /// Axis stability gate with dwell + hysteresis + first-pass tightening.
 /// Implements Proposal 1 (+ touch of Proposal 2).
@@ -193,18 +193,24 @@ class PoseCaptureController extends ChangeNotifier {
   final PortraitUiController hud;
   final FrameSequenceController seq;
 
-  // Centralized validator for all portrait rules (oval + yaw/pitch/roll).
+  // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
   final PortraitValidator _validator = const PortraitValidator();
 
   // Angle thresholds (deg)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
+  // ⬇️ NEW: shoulders tilt (absolute degrees of shoulder-line slope)
+  static const double _shouldersDeadbandDeg = 1.8;
 
   // Para roll AHORA usamos **error a 180°** en grados (no 178.x).
   // Ej.: tolerar ±1.7° alrededor de 180° ⇒ error ≤ 1.7°
   static const double _rollErrorDeadbandDeg = 1.7;
 
   static const double _maxOffDeg = 20.0;
+
+  // 👇 Opcional (para usar en el onframe): zona muerta para no cambiar
+  // el texto cuando ya estás prácticamente en 180°.
+  static const double _rollHintDeadzoneDeg = 0.3;
 
   // Axis gates (Proposal 1 + adjustments)
   final _AxisGate _yawGate = _AxisGate(
@@ -230,6 +236,16 @@ class PoseCaptureController extends ChangeNotifier {
     hysteresis: 0.3,
     dwell: Duration(milliseconds: 0),
     extraRelaxAfterFirst: 0.4,
+  );
+
+  // ⬇️ NEW: Shoulders use same mechanics; keep a small dwell to avoid flicker.
+  final _AxisGate _shouldersGate = _AxisGate(
+    baseDeadband: _shouldersDeadbandDeg,
+    sense: _GateSense.insideIsOk,
+    tighten: 0.4,
+    hysteresis: 0.2,
+    dwell: Duration(milliseconds: 0),
+    extraRelaxAfterFirst: 0.2,
   );
 
   // Keep current canvas size to map image↔canvas consistently.
@@ -289,6 +305,14 @@ class PoseCaptureController extends ChangeNotifier {
 
   /// Distancia mínima a 180° (0 = perfecto; 2° = 178° o 182°)
   double _distTo180(double deg) => _wrapDeg180(deg - 180.0).abs();
+
+  /// 🔧 Dirección hacia el 180° más cercano (con wrap). Resultado en [-180, 180].
+  /// +delta ⇒ aumentar el ángulo; -delta ⇒ disminuirlo.
+  double _deltaToNearest180(double curDeg) {
+    final int k = ((curDeg - 180.0) / 360.0).round();
+    final double target = 180.0 + 360.0 * k;
+    return _wrapDeg180(target - curDeg);
+  }
 
   /// Actualiza cinemática de roll: *unwrap*, EMA propio, dps y error a 180°.
   /// Si se está en dwell y hay demasiada velocidad, reinicia el intento.
@@ -373,6 +397,7 @@ class PoseCaptureController extends ChangeNotifier {
     _yawGate.resetForNewStage();
     _pitchGate.resetForNewStage();
     _rollGate.resetForNewStage();
+    _shouldersGate.resetForNewStage(); // ⬅️ NEW
   }
 
   // Helper: does a confirmed axis still hold its stability?
