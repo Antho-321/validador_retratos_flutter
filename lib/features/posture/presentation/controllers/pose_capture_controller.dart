@@ -314,51 +314,6 @@ class PoseCaptureController extends ChangeNotifier {
     return _wrapDeg180(target - curDeg);
   }
 
-  /// Actualiza cinemática de roll: *unwrap*, EMA propio, dps y error a 180°.
-  /// Si se está en dwell y hay demasiada velocidad, reinicia el intento.
-  _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
-    // Inicialización
-    if (_rollSmoothedDeg == null || _rollSmoothedAt == null) {
-      _rollSmoothedDeg = rawRollDeg;
-      _rollSmoothedAt = now;
-      _lastRollDps = 0.0;
-      final err0 = _distTo180(_rollSmoothedDeg!);
-      return _RollMetrics(err0, _lastRollDps!);
-    }
-
-    // Unwrap local alrededor del último valor suavizado
-    final prev = _rollSmoothedDeg!;
-    double cur = rawRollDeg;
-    double delta = cur - prev;
-    if (delta > 180.0) cur -= 360.0;
-    if (delta < -180.0) cur += 360.0;
-
-    final dtMs = now.difference(_rollSmoothedAt!).inMilliseconds.clamp(1, 1000);
-    final alpha = 1.0 - math.exp(-dtMs / _emaTauMs);
-
-    // EMA sobre señal "cur" (ya desenvuelta)
-    final next = prev + alpha * (cur - prev);
-
-    // Velocidad sobre la señal suavizada
-    final dps = ((next - prev) / dtMs) * 1000.0;
-
-    _rollSmoothedDeg = next;
-    _rollSmoothedAt = now;
-    _lastRollDps = dps;
-
-    final err = _distTo180(next);
-
-    // Si el usuario aún se mueve demasiado durante dwell, reinicia intento
-    if (_rollGate.isDwell && dps.abs() > _rollMaxDpsDuringDwell) {
-      _rollGate.resetTransient();
-    }
-
-    // (Opcional) sincronizar _emaRollDeg si tu onframe lo muestra en HUD
-    _emaRollDeg = next;
-
-    return _RollMetrics(err, dps);
-  }
-
   // Sequential flow stage
   _FlowStage _stage = _FlowStage.yaw;
 
@@ -390,6 +345,15 @@ class PoseCaptureController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Keep the same name/signature used by addListener tear-off:
+  void _onFrame() => this._onFrameImpl(); // calls the extension method
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Modular helpers as extensions (same file, private)
+// ───────────────────────────────────────────────────────────────────────────
+
+extension _FlowHelpers on PoseCaptureController {
   // Reset sequential flow (use when face lost or to restart the process)
   void _resetFlow() {
     _stage = _FlowStage.yaw;
@@ -409,8 +373,86 @@ class PoseCaptureController extends ChangeNotifier {
     // inside: ok si ≤ exit+relax; outside: ok si ≥ exit-relax
     return inside ? (metricDeg <= exit + relax) : (metricDeg >= exit - relax);
   }
+}
 
-  // ─────────────────────────────────────────────────────────────────────
+extension _RollMathKinematics on PoseCaptureController {
+  /// Actualiza cinemática de roll: *unwrap*, EMA propio, dps y error a 180°.
+  /// Si se está en dwell y hay demasiada velocidad, reinicia el intento.
+  _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
+    // Inicialización
+    if (_rollSmoothedDeg == null || _rollSmoothedAt == null) {
+      _rollSmoothedDeg = rawRollDeg;
+      _rollSmoothedAt = now;
+      _lastRollDps = 0.0;
+      final err0 = _distTo180(_rollSmoothedDeg!);
+      return _RollMetrics(err0, _lastRollDps!);
+    }
+
+    // Unwrap local alrededor del último valor suavizado
+    final prev = _rollSmoothedDeg!;
+    double cur = rawRollDeg;
+    double delta = cur - prev;
+    if (delta > 180.0) cur -= 360.0;
+    if (delta < -180.0) cur += 360.0;
+
+    final dtMs = now.difference(_rollSmoothedAt!).inMilliseconds.clamp(1, 1000);
+    final alpha = 1.0 -
+        math.exp(-dtMs / PoseCaptureController._emaTauMs); // ⬅️ qualified
+
+    // EMA sobre señal "cur" (ya desenvuelta)
+    final next = prev + alpha * (cur - prev);
+
+    // Velocidad sobre la señal suavizada
+    final dps = ((next - prev) / dtMs) * 1000.0;
+
+    _rollSmoothedDeg = next;
+    _rollSmoothedAt = now;
+    _lastRollDps = dps;
+
+    final err = _distTo180(next);
+
+    // Si el usuario aún se mueve demasiado durante dwell, reinicia intento
+    if (_rollGate.isDwell &&
+        dps.abs() > PoseCaptureController._rollMaxDpsDuringDwell) { // ⬅️ qualified
+      _rollGate.resetTransient();
+    }
+
+    // (Opcional) sincronizar _emaRollDeg si tu onframe lo muestra en HUD
+    _emaRollDeg = next;
+
+    return _RollMetrics(err, dps);
+  }
+}
+
+extension _HudHelpers on PoseCaptureController {
+  void _setHud(PortraitUiModel next, {bool force = false}) {
+    final now = DateTime.now();
+    if (!force &&
+        now.difference(_lastHudPush) <
+            PoseCaptureController._hudMinInterval) return; // ⬅️ qualified
+
+    final cur = hud.value;
+    final same =
+        cur.statusLabel == next.statusLabel &&
+        cur.primaryMessage == next.primaryMessage &&
+        cur.secondaryMessage == next.secondaryMessage &&
+        cur.countdownSeconds == next.countdownSeconds &&
+        cur.countdownProgress == next.countdownProgress &&
+        cur.checkFraming == next.checkFraming &&
+        cur.checkHead == next.checkHead &&
+        cur.checkEyes == next.checkEyes &&
+        cur.checkLighting == next.checkLighting &&
+        cur.checkBackground == next.checkBackground &&
+        cur.ovalProgress == next.ovalProgress;
+
+    if (!same) {
+      hud.value = next;
+      _lastHudPush = now;
+    }
+  }
+}
+
+extension _CaptureHelpers on PoseCaptureController {
   Future<void> _captureFromWebRtcTrack() async {
     try {
       MediaStream? stream =
@@ -468,34 +510,9 @@ class PoseCaptureController extends ChangeNotifier {
     isCapturing = false;
     notifyListeners();
   }
+}
 
-  void _setHud(PortraitUiModel next, {bool force = false}) {
-    final now = DateTime.now();
-    if (!force && now.difference(_lastHudPush) < _hudMinInterval) return;
-
-    final cur = hud.value;
-    final same =
-        cur.statusLabel == next.statusLabel &&
-            cur.primaryMessage == next.primaryMessage &&
-            cur.secondaryMessage == next.secondaryMessage &&
-            cur.countdownSeconds == next.countdownSeconds &&
-            cur.countdownProgress == next.countdownProgress &&
-            cur.checkFraming == next.checkFraming &&
-            cur.checkHead == next.checkHead &&
-            cur.checkEyes == next.checkEyes &&
-            cur.checkLighting == next.checkLighting &&
-            cur.checkBackground == next.checkBackground &&
-            cur.ovalProgress == next.ovalProgress;
-
-    if (!same) {
-      hud.value = next;
-      _lastHudPush = now;
-    }
-  }
-
-  // Keep the same name/signature used by addListener tear-off:
-  void _onFrame() => this._onFrameImpl(); // calls the extension method
-
+extension _CountdownHelpers on PoseCaptureController {
   void _startCountdown() {
     _stopCountdown();
     _countdownProgress = 1.0;
@@ -521,7 +538,8 @@ class PoseCaptureController extends ChangeNotifier {
     _countdownTicker = Timer.periodic(Duration(milliseconds: tickMs), (_) {
       elapsedScaled += tickMs;
 
-      final int remainingScaledMs = (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
+      final int remainingScaledMs =
+          (totalScaledMs - elapsedScaled).clamp(0, totalScaledMs);
       _countdownProgress = remainingScaledMs / totalScaledMs;
 
       final int remainingLogicalMs =
