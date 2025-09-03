@@ -59,6 +59,9 @@ class _HintAnim {
   final String? hint;
 }
 
+// ── Bootstrap flag para forzar que el flujo inicie en TORSO ────────────
+bool _flowBootstrapped = false;
+
 // ── Extension with modular helpers ─────────────────────────────────────
 extension _OnFrameLogicExt on PoseCaptureController {
   // Public entry (kept same name/signature via class method calling this)
@@ -70,6 +73,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // ── NUEVO: modo sin validaciones ────────────────────────────────
     if (!validationsEnabled) {
+      // si las validaciones están OFF, la próxima vez que se enciendan
+      // volveremos a arrancar el flujo desde TORSO
+      _flowBootstrapped = false;
+
       if (frame == null) {
         _stopCountdown();
         final cur = hud.value;
@@ -117,6 +124,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
     if (frame == null) {
       _handleFaceLost();
       return;
+    }
+
+    // ── Bootstrap: forzar inicio del flujo en TORSO al (re)entrar ───
+    if (!_flowBootstrapped) {
+      _goToStage(_flowOrder.first); // _FlowStage.torso
+      _flowBootstrapped = true;
     }
 
     // 1) Gather inputs + compute metrics and “inside now” flags
@@ -178,6 +191,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _rollSmoothedDeg = null;
     _rollSmoothedAt = null;
     _lastRollDps = null;
+
+    // al perder rostro, rebootstrap del flujo para arrancar en TORSO
+    _flowBootstrapped = false;
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -230,7 +246,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // EMA for yaw/pitch
     final double dtMs = (_lastSampleAt == null)
         ? 16.0
-        : now.difference(_lastSampleAt!).inMilliseconds.toDouble().clamp(1.0, 1000.0);
+        : now
+            .difference(_lastSampleAt!)
+            .inMilliseconds
+            .toDouble()
+            .clamp(1.0, 1000.0);
     final double a = 1 - math.exp(-dtMs / PoseCaptureController._emaTauMs);
     _lastSampleAt ??= now;
 

@@ -45,57 +45,58 @@ enum _GateSense { insideIsOk, outsideIsOk }
 class _AxisGate {
   _AxisGate({
     required this.baseDeadband,
-    this.sense = _GateSense.insideIsOk, // default matches yaw/pitch behavior
+    this.sense = _GateSense.insideIsOk,
     this.tighten = 0.2,
     this.hysteresis = 0.2,
     this.dwell = const Duration(milliseconds: 500),
     this.extraRelaxAfterFirst = 0.2,
   });
 
-  final double baseDeadband; // p.ej., yaw/pitch: 2.2°, roll: error a 180° (p.ej., 1.7°)
+  final double baseDeadband;
   final _GateSense sense;
-  final double tighten; // e.g., 0.2° → first pass stricter
-  final double hysteresis; // inside: exit = enter + hys, outside: exit = enter - hys
-  final Duration dwell; // e.g., 500 ms
-  final double extraRelaxAfterFirst; // extra room after first confirm while confirmed
+  final double tighten;
+  final double hysteresis;
+  final Duration dwell;
+  final double extraRelaxAfterFirst;
 
   bool hasConfirmedOnce = false;
 
-  // Endurecer solo en el primer intento del eje; desde el segundo intento, deadband base.
+  /// Ya ocurrió el primer intento del eje (donde el band es estricto).
   bool _firstAttemptDone = false;
+
+  /// Modo de “apriete” dinámico:
+  /// - true  → usar deadband estricto (base ± tighten)
+  /// - false → usar deadband relajado (base)
+  bool _strictActive = true;
 
   _GateState _state = _GateState.searching;
   DateTime? _dwellStart;
 
-  // Exponer estado para UI/decisiones
   bool get isSearching => _state == _GateState.searching;
   bool get isDwell => _state == _GateState.dwell;
   bool get isConfirmed => _state == _GateState.confirmed;
 
-  /// Reinicia el intento actual (p. ej., por ruptura momentánea) pero mantiene
-  /// el conocimiento de si ya hubo primer intento.
   void resetTransient() {
     _state = _GateState.searching;
     _dwellStart = null;
+    // No tocamos _strictActive aquí: es “memoria” del modo actual.
   }
 
-  /// Reinicia totalmente el eje (nuevo “primer intento”).
   void resetForNewStage() {
     _state = _GateState.searching;
     _dwellStart = null;
     _firstAttemptDone = false;
     hasConfirmedOnce = false;
+    _strictActive = true; // primer intento estricto
   }
 
-  // tighten SOLO en primer intento.
-  // - insideIsOk (yaw/pitch y roll-error): primer intento más estricto = umbral más pequeño.
-  // - outsideIsOk (legado): primer intento más estricto = umbral más grande.
   double get enterBand {
-    final strict = !_firstAttemptDone; // solo primer intento
-    if (!strict) return baseDeadband;
-    return (sense == _GateSense.insideIsOk)
-        ? (baseDeadband - tighten)
-        : (baseDeadband + tighten);
+    final bool strict = _strictActive;
+    if (sense == _GateSense.insideIsOk) {
+      return strict ? (baseDeadband - tighten) : baseDeadband;
+    } else {
+      return strict ? (baseDeadband + tighten) : baseDeadband;
+    }
   }
 
   double get exitBand {
@@ -109,14 +110,30 @@ class _AxisGate {
   double _withRelax(double th, double relax) =>
       (sense == _GateSense.insideIsOk) ? (th + relax) : (th - relax);
 
-  /// Update with a metric in degrees and current time.
-  /// Para yaw/pitch, usa |ángulo|; para roll, usa **error a 180°**.
+  void _retighten() => _strictActive = true;
+  void _relax() => _strictActive = false;
+
+  /// Reglas:
+  /// 1) Primer intento: estricto. Si rompe, segundo intento arranca relajado.
+  /// 2) Si en intentos ≥2 rompe dwell/confirmed estando relajado → re-apretar.
+  /// 3) Mientras esté apretado en intentos ≥2, al volver a entrar al band estricto,
+  ///    volvemos a relajar (y el dwell comienza en el siguiente tick ya relajado).
   bool update(double metricDeg, DateTime now) {
     switch (_state) {
       case _GateState.searching:
+        // Si ya estamos en intentos ≥2 (_firstAttemptDone == true) y en modo estricto,
+        // cuando el usuario re-entra al band estricto, ampliamos a relajado
+        // y esperamos al próximo tick para iniciar dwell con band ampliado.
+        if (_firstAttemptDone && _strictActive && _isOk(metricDeg, enterBand)) {
+          _relax();
+          return false; // no iniciamos dwell en este mismo update
+        }
+
         if (_isOk(metricDeg, enterBand)) {
-          // Siempre inicia dwell; nunca confirmar de inmediato.
-          _firstAttemptDone = true; // a partir de ahora, intentos menos estrictos
+          if (!_firstAttemptDone) {
+            _firstAttemptDone = true; // a partir de ahora hay “segundo intento”
+            // mantenemos el modo actual (estricto) hasta que este intento termine
+          }
           _dwellStart = now;
           _state = _GateState.dwell;
         }
@@ -124,9 +141,14 @@ class _AxisGate {
 
       case _GateState.dwell:
         if (!_isOk(metricDeg, exitBand)) {
-          // Se rompió el dwell → reiniciar intento (sin endurecimiento adicional).
+          // Rompe dwell → volvemos a searching
           _state = _GateState.searching;
           _dwellStart = null;
+
+          // Si ya era segundo intento (o más) y estábamos relajados, re-apretar.
+          if (_firstAttemptDone && !_strictActive) {
+            _retighten();
+          }
           return false;
         }
         if (now.difference(_dwellStart!) >= dwell) {
@@ -140,8 +162,14 @@ class _AxisGate {
         final double relax = hasConfirmedOnce ? extraRelaxAfterFirst : 0.0;
         final double exitWithRelax = _withRelax(exitBand, relax);
         if (!_isOk(metricDeg, exitWithRelax)) {
+          // Pierde la confirmación → searching
           _state = _GateState.searching;
           _dwellStart = null;
+
+          // El siguiente intento comienza relajado (segundo intento).
+          if (_firstAttemptDone) {
+            _relax();
+          }
           return false;
         }
         return true;
