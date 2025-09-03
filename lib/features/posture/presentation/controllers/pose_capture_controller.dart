@@ -494,7 +494,7 @@ class PoseCaptureController extends ChangeNotifier {
   final _AxisGate _shouldersGate = _AxisGate(
     baseDeadband: _shouldersDeadbandDeg,
     sense: _GateSense.insideIsOk,
-    tighten: 0.6,
+    tighten: 1.4,
     hysteresis: 0.2,
     dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.2,
