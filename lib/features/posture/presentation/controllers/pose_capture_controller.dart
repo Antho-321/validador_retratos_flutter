@@ -476,7 +476,7 @@ class PoseCaptureController extends ChangeNotifier {
   static const double _rollHintDeadzoneDeg = 0.3;
 
   // ⬇️ NEW: Torso azimut (deadband específico)
-  static const double _azimutDeadbandDeg = 30;
+  static const double _azimutDeadbandDeg = 10;
 
   // Axis gates (Proposal 1 + adjustments)
   final _AxisGate _yawGate = _AxisGate(
@@ -518,7 +518,7 @@ class PoseCaptureController extends ChangeNotifier {
   final _AxisGate _azimutGate = _AxisGate(
     baseDeadband: _azimutDeadbandDeg,
     sense: _GateSense.insideIsOk,
-    tighten: 10,
+    tighten: 1.6,
     hysteresis: 0.25,
     dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.3,

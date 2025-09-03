@@ -291,7 +291,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
   // Orden configurable del flujo (sin incluir 'done'). Reordena como gustes.
   List<_FlowStage> get _flowOrder => <_FlowStage>[
-        _FlowStage.torso,      // ⬅️ ejemplo pedido: torso primero
+        _FlowStage.torso,      // ⬅️ torso primero
         _FlowStage.shoulders,
         _FlowStage.yaw,
         _FlowStage.pitch,
@@ -349,7 +349,40 @@ extension _OnFrameLogicExt on PoseCaptureController {
     return null;
   }
 
-  // ⬇️ UPDATED: “no retroceder” mientras el stage actual está en dwell
+  // Helper: no interrumpir mientras se valida shoulders o torso (azimut).
+  bool _noInterruptionWhileValidating(_FlowStage s) =>
+      s == _FlowStage.shoulders || s == _FlowStage.torso;
+
+  // NEW: Ignorar rupturas previas según el stage actual.
+  bool _shouldIgnorePrevBreak(_FlowStage cur, _FlowStage prev) {
+    // 1) Mientras validas shoulders o torso: no interrumpas por ningún previo.
+    if (cur == _FlowStage.shoulders || cur == _FlowStage.torso) return true;
+
+    // 2) Mientras validas yaw/pitch/roll: ignora rupturas de shoulders y torso.
+    if ((cur == _FlowStage.yaw || cur == _FlowStage.pitch || cur == _FlowStage.roll) &&
+        (prev == _FlowStage.shoulders || prev == _FlowStage.torso)) {
+      return true;
+    }
+    return false;
+  }
+
+  // NEW: Versión filtrada del "primer previo que no sostiene".
+  _FlowStage? _firstPrevNotHoldingFiltered(
+    int uptoExclusiveIndex,
+    _EvalCtx c,
+    bool Function(_FlowStage prev) shouldIgnore,
+  ) {
+    for (int i = 0; i < uptoExclusiveIndex; i++) {
+      final s = _flowOrder[i];
+      if (shouldIgnore(s)) continue; // saltar stages que decidimos ignorar
+      if (!_isHolding(_gateFor(s), _metricFor(s, c))) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  // ⬇️ UPDATED: backtracking con filtros para no interrumpir indebidamente
   void _advanceFlowAndBacktrack(_EvalCtx c) {
     // 1) Si estamos en DONE, verificar que todos los stages siguen “holding”.
     if (_stage == _FlowStage.done) {
@@ -363,17 +396,24 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // 2) Asegurar que el stage actual pertenece al _flowOrder
     int idx = _flowOrder.indexOf(_stage);
     if (idx == -1) {
-      // Si el stage actual ya no está (p.ej. orden cambiado en caliente),
-      // reubícate en el primer stage del flujo.
       _goToStage(_flowOrder.first);
       idx = 0;
     }
 
-    // 3) Backtracking CONDICIONAL: solo si el stage actual NO está en dwell.
+    // 3) Backtracking CONDICIONAL: solo si el stage actual NO está en dwell
+    //    y respetando reglas de no-interrupción y filtrado por tipo de stage.
     final _FlowStage cur = _flowOrder[idx];
     final _AxisGate curGate = _gateFor(cur);
-    if (!curGate.isDwell) {
-      final _FlowStage? prevBreak = _firstPrevNotHolding(idx, c);
+
+    final bool allowBacktrackNow =
+        !curGate.isDwell && !_noInterruptionWhileValidating(cur);
+
+    if (allowBacktrackNow) {
+      final _FlowStage? prevBreak = _firstPrevNotHoldingFiltered(
+        idx,
+        c,
+        (prev) => _shouldIgnorePrevBreak(cur, prev),
+      );
       if (prevBreak != null) {
         _goToStage(prevBreak);
         return;
@@ -390,9 +430,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
       return;
     }
 
-    // 5) Confirmado el actual: revalidar que los previos se mantienen.
-    final _FlowStage? prevBreakAfterConfirm = _firstPrevNotHolding(idx, c);
-    if (prevBreakAfterConfirm != null) {
+    // 5) Confirmado el actual: revalidar que los previos se mantienen (filtrado).
+    final _FlowStage? prevBreakAfterConfirm = _firstPrevNotHoldingFiltered(
+      idx,
+      c,
+      (prev) => _shouldIgnorePrevBreak(cur, prev),
+    );
+    if (prevBreakAfterConfirm != null && !_noInterruptionWhileValidating(cur)) {
       _goToStage(prevBreakAfterConfirm);
       return;
     }
@@ -439,8 +483,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
       String msg;
       if (c.azimutDegSigned != null) {
         msg = (c.azimutDegSigned! > 0)
-            ? 'Mueve ligeramente tu hombro derecho hacia atrás'
-            : 'Mueve ligeramente tu hombro izquierdo hacia atrás';
+            ? 'Gira ligeramente tu torso moviendo el hombro derecho hacia atrás'
+            : 'Gira ligeramente tu torso moviendo el hombro izquierdo hacia atrás';
       } else {
         msg = 'Alinea el torso al frente (cuadra los hombros con la cámara).';
       }
