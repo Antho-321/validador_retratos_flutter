@@ -616,7 +616,7 @@ class PoseCaptureController extends ChangeNotifier {
   }
 
   // Sequential flow stage
-  _FlowStage _stage = _FlowStage.yaw;
+  _FlowStage _stage = _FlowStage.torso;
 
   // ⬇️ NEW: factor para convertir z normalizada → píxeles (calibrable)
   double? _zToPxScale;
@@ -703,13 +703,12 @@ class PoseCaptureController extends ChangeNotifier {
 extension _FlowHelpers on PoseCaptureController {
   // Reset sequential flow (use when face lost or to restart the process)
   void _resetFlow() {
-    _stage = _FlowStage.yaw;
-
+    _goToStage(_flowOrder.first); // antes: _stage = _FlowStage.yaw;
     _yawGate.resetForNewStage();
     _pitchGate.resetForNewStage();
     _rollGate.resetForNewStage();
     _shouldersGate.resetForNewStage();
-    _azimutGate.resetForNewStage(); // ⬅️ NEW
+    _azimutGate.resetForNewStage();
   }
 
   // Helper: does a confirmed axis still hold its stability?
