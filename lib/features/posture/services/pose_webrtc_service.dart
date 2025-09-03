@@ -17,6 +17,7 @@ import 'package:http/http.dart' as http;
 import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
 import 'webrtc/rtc_video_encoder.dart'; // ← centralized encoder configuration
 import 'parsers/pose_binary_parser.dart'; // ← isolated PO/PD parser
+import 'models/pose_point.dart'; // new shared model
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
@@ -122,22 +123,34 @@ class PoseWebRTCService {
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
   /// NEW: latest face landmarks cache (requires 'face' in [requestedTasks]).
-  /// Each entry is one face = List<Offset> (e.g., 468 points).
-  List<List<Offset>>? get latestFaceLandmarks => _lastPosesPerTask['face'];
+  /// Exposed as 2D for overlay compatibility.
+  List<List<Offset>>? get latestFaceLandmarks {
+    final faces3d = _lastPosesPerTask['face'];
+    if (faces3d == null) return null;
+    return faces3d
+        .map((pose) =>
+            pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
+        .toList(growable: false);
+  }
 
-  // ⬇️ ADD THIS BLOCK HERE
-  /// Latest primary pose landmarks (first person) — image-space.
+  /// Latest primary pose landmarks (first person) — 3D (if available).
   /// Returns `null` if no 'pose' data has arrived yet.
-  List<Offset>? get latestPoseLandmarks {
+  List<PosePoint>? get latestPoseLandmarks3D {
     final poses = _lastPosesPerTask['pose'];
     if (poses == null || poses.isEmpty) return null;
     return poses.first; // choose the first detected person
   }
-  // ⬆️ ADD THIS BLOCK HERE
+
+  /// Latest primary pose landmarks (first person) — 2D view for overlays.
+  List<Offset>? get latestPoseLandmarks {
+    final ps = latestPoseLandmarks3D;
+    if (ps == null) return null;
+    return ps.map((p) => Offset(p.x, p.y)).toList(growable: false);
+  }
 
   // ─────── Parsers & state PER TASK ───────
   final Map<String, PoseBinaryParser> _parsers = {}; // task -> parser
-  final Map<String, List<List<Offset>>> _lastPosesPerTask = {}; // task -> poses
+  final Map<String, List<List<PosePoint>>> _lastPosesPerTask = {}; // task -> poses(3D)
   int? _lastW;
   int? _lastH;
 
@@ -145,8 +158,8 @@ class PoseWebRTCService {
   final Map<String, int> _lastSeqPerTask = {};
   bool _isNewer16(int seq, int? last) {
     if (last == null) return true;
-    final int d = (seq - last) & 0xFFFF;        // [0..65535]
-    return d != 0 && (d & 0x8000) == 0;         // 1..32767 → más nuevo
+    final int d = (seq - last) & 0xFFFF; // [0..65535]
+    return d != 0 && (d & 0x8000) == 0; // 1..32767 → más nuevo
   }
 
   // Simple logging helper that respects [logEverything]
@@ -654,7 +667,7 @@ class PoseWebRTCService {
     final res = parser.parse(b);
 
     if (res is PoseParseOk) {
-      final pkt = res.packet; // has kind, keyframe, seq, w, h, poses
+      final pkt = res.packet; // has kind, keyframe, seq, w, h, poses(List<List<PosePoint>>)
       final int? seq = pkt.seq;
 
       // ── DROP: PD no-KF re-ordenados (unordered/lossy DC) ─────────────
@@ -674,10 +687,10 @@ class PoseWebRTCService {
       // Save accepted packet state
       _lastW = pkt.w;
       _lastH = pkt.h;
-      _lastPosesPerTask[task] = pkt.poses;
+      _lastPosesPerTask[task] = pkt.poses; // ← poses are 3D now
       if (seq != null) _lastSeqPerTask[task] = seq;
 
-      // Fuse all tasks' poses into one list for the existing overlay
+      // Fuse all tasks' poses into one list (3D) for emission
       final fused = _lastPosesPerTask.values
           .expand((l) => l)
           .toList(growable: false);
@@ -710,20 +723,25 @@ class PoseWebRTCService {
   void _emitBinary(
     int w,
     int h,
-    List<List<Offset>> poses, {
+    List<List<PosePoint>> poses3d, {
     required String kind,
     int? seq,
   }) {
     if (_disposed) return;
 
+    // Map to 2D for the existing HUD/overlay
+    final poses2d = poses3d
+        .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
+        .toList(growable: false);
+
     final frame = PoseFrame(
       imageSize: Size(w.toDouble(), h.toDouble()),
-      posesPx: poses,
+      posesPx: poses2d,
     );
 
     _log(
       '[client] emit frame kind=$kind seq=${seq ?? '-'} '
-      'poses=${poses.length} size=${w}x$h',
+      'poses=${poses2d.length} size=${w}x$h',
     );
 
     latestFrame.value = frame;
@@ -983,7 +1001,7 @@ class PoseWebRTCService {
 
       if (inVideo && RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
         final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
-        if (m != null && !keepPts.contains(m.group(1)!)) continue;
+        if (m != null && !keepPts.contains(m.group(1))) continue;
       }
 
       out.add(l);

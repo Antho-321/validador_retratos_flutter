@@ -9,10 +9,13 @@ import 'features/posture/presentation/pages/pose_capture_page.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Optional: immersive full-screen (keep if you liked it)
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-  // Optional: lock portrait for portrait capture flows
-  // await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+
+  // ⇣ Nuevo: flag global (puedes cambiarlo por env var o hardcodear)
+  const bool validationsEnabled = bool.fromEnvironment(
+    'POSE_VALIDATIONS',
+    defaultValue: true, // pon false para desactivar validaciones
+  );
 
   final offerUrl = const String.fromEnvironment(
     'POSE_WEBRTC_URL',
@@ -25,18 +28,27 @@ Future<void> main() async {
     idealWidth: 640,
     idealHeight: 480,
     idealFps: 15,
-    logEverything: false, // keep logs quiet
+    logEverything: false,
   );
 
   await poseService.init();
   unawaited(poseService.connect());
 
-  runApp(PoseApp(poseService: poseService));
+  runApp(PoseApp(
+    poseService: poseService,
+    validationsEnabled: validationsEnabled, // ⇐ pásalo
+  ));
 }
 
 class PoseApp extends StatefulWidget {
-  const PoseApp({super.key, required this.poseService});
+  const PoseApp({
+    super.key,
+    required this.poseService,
+    required this.validationsEnabled,
+  });
+
   final PoseWebRTCService poseService;
+  final bool validationsEnabled; // ⇠ nuevo
 
   @override
   State<PoseApp> createState() => _PoseAppState();
@@ -45,7 +57,6 @@ class PoseApp extends StatefulWidget {
 class _PoseAppState extends State<PoseApp> {
   @override
   void dispose() {
-    // ensure we tear everything down
     widget.poseService.close();
     super.dispose();
   }
@@ -55,8 +66,10 @@ class _PoseAppState extends State<PoseApp> {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
-      // Hand off UI to the new page that includes camera, overlay, and HUD
-      home: PoseCapturePage(poseService: widget.poseService),
+      home: PoseCapturePage(
+        poseService: widget.poseService,
+        validationsEnabled: widget.validationsEnabled, // ⇐ pásalo a la página
+      ),
     );
   }
 }

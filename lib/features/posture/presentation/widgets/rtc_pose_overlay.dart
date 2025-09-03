@@ -140,7 +140,9 @@ class _PoseOverlayFastPainter extends CustomPainter {
   final bool mirror;
   final BoxFit fit;
 
-  static const int LS=11, RS=12, LE=13, RE=14, LW=15, RW=16, LH=23, RH=24, LK=25, RK=26, LA=27, RA=28;
+  // Landmark indices (MediaPipe Pose)
+  static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
+  static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
 
   static const List<List<int>> _edges = [
     [LS, RS],
@@ -150,6 +152,10 @@ class _PoseOverlayFastPainter extends CustomPainter {
     [LH, LK], [LK, LA],
     [RH, RK], [RK, RA],
   ];
+
+  // Reusable buffers
+  final Path _scratch = Path(); // (reservado por si alternas a Path)
+  final List<Offset> _linePts = <Offset>[]; // pares A,B,A,B,...
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -197,26 +203,28 @@ class _PoseOverlayFastPainter extends CustomPainter {
       canvas.scale(s, s);
     }
 
-    // Batch draw per pose: one path for all edges + one drawPoints call
+    // Batch draw per pose: one drawPoints for all edges + one drawPoints for all points
     for (final pose in f.posesPx) {
       if (pose.isEmpty) continue;
 
-      final path = Path();
+      _linePts.clear();
       for (final e in _edges) {
         if (pose.length <= e[0] || pose.length <= e[1]) continue;
-        final a = pose[e[0]], b = pose[e[1]];
-        path.moveTo(a.dx, a.dy);
-        path.lineTo(b.dx, b.dy);
+        _linePts..add(pose[e[0]])..add(pose[e[1]]);
       }
-      canvas.drawPath(path, line);
+      // One call for all edges
+      if (_linePts.isNotEmpty) {
+        canvas.drawPoints(PointMode.lines, _linePts, line);
+      }
 
-      // Points in a single call (round caps make them look like small circles)
+      // One call for all landmarks (round caps make them look like small circles)
       canvas.drawPoints(PointMode.points, pose, ptsPaint);
     }
 
     canvas.restore();
   }
 
+  // Repaint is entirely driven by the ValueListenable in the constructor.
   @override
-  bool shouldRepaint(covariant _PoseOverlayFastPainter old) => false; // repaint driven by ValueListenable
+  bool shouldRepaint(covariant _PoseOverlayFastPainter old) => false;
 }

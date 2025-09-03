@@ -1,5 +1,6 @@
 // lib/features/posture/presentation/widgets/overlays.dart
 import 'package:flutter/material.dart';
+import 'dart:ui' as ui show PointMode; // ⬅️ bring PointMode into scope
 
 /// ───────────────────────── Existing widgets (unchanged) ─────────────────────────
 
@@ -119,14 +120,15 @@ const List<List<int>> kPoseConnections = [
   [27,31],[28,32],
 ];
 
-/// ───────────────────────── Pose skeleton painter ─────────────────────────
+/// ───────────────────────── Pose skeleton painter (optimized) ─────────────────────────
 class SkeletonPainter extends CustomPainter {
   SkeletonPainter({
-    required this.frame,         // PoseFrame from the server
+    required this.frame,         // PoseFrame from the server (px coords)
     required this.color,
     this.strokeWidth = 2.0,
     this.drawPoints = true,
     this.mirror = false,         // set true if your preview is mirrored
+    this.fit = BoxFit.contain,   // match your preview (contain/cover)
   });
 
   final PoseFrame frame;
@@ -134,6 +136,10 @@ class SkeletonPainter extends CustomPainter {
   final double strokeWidth;
   final bool drawPoints;
   final bool mirror;
+  final BoxFit fit;
+
+  // Reusable buffer for edge pairs (A,B,A,B,...)
+  final List<Offset> _linePts = <Offset>[];
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -141,55 +147,76 @@ class SkeletonPainter extends CustomPainter {
     final imgH = frame.imageSize.height;
     if (imgW <= 0 || imgH <= 0) return;
 
-    // Scale server pixels (imgW,imgH) -> overlay size
-    final sx = size.width / imgW;
-    final sy = size.height / imgH;
+    // Compute BoxFit transform (same criterio que rtc_pose_overlay)
+    final scaleW = size.width / imgW;
+    final scaleH = size.height / imgH;
+    final s = (fit == BoxFit.cover)
+        ? (scaleW > scaleH ? scaleW : scaleH)
+        : (scaleW < scaleH ? scaleW : scaleH);
 
+    final drawW = imgW * s;
+    final drawH = imgH * s;
+    final offX = (size.width - drawW) / 2.0;
+    final offY = (size.height - drawH) / 2.0;
+
+    // Paints (sin antialias para rendimiento)
     final line = Paint()
       ..color = color
       ..strokeWidth = strokeWidth
       ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round;
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = false;
 
     final dot = Paint()
       ..color = color
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth + 1.0
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = false;
+
+    canvas.save();
+    // Aplicar transform: letterbox + escala + espejo (si procede)
+    if (mirror) {
+      canvas.translate(size.width - offX, offY);
+      canvas.scale(-s, s);
+    } else {
+      canvas.translate(offX, offY);
+      canvas.scale(s, s);
+    }
 
     for (final pose in frame.posesPx) {
       if (pose.isEmpty) continue;
 
-      // Map to overlay coords
-      final pts = List<Offset>.generate(pose.length, (i) {
-        var x = pose[i].dx * sx;
-        var y = pose[i].dy * sy;
-        if (mirror) x = size.width - x;
-        return Offset(x, y);
-      });
-
-      // Lines (connections)
+      // Líneas: construir pares A,B… y dibujar en un batch
+      _linePts.clear();
       for (final e in kPoseConnections) {
         final a = e[0], b = e[1];
-        if (a < pts.length && b < pts.length) {
-          canvas.drawLine(pts[a], pts[b], line);
+        if (a < pose.length && b < pose.length) {
+          _linePts..add(pose[a])..add(pose[b]);
         }
+      }
+      if (_linePts.isNotEmpty) {
+        canvas.drawPoints(ui.PointMode.lines, _linePts, line);
       }
 
-      // Dots
+      // Puntos: un único batch
       if (drawPoints) {
-        for (final p in pts) {
-          canvas.drawCircle(p, strokeWidth + 0.5, dot);
-        }
+        canvas.drawPoints(ui.PointMode.points, pose, dot);
       }
     }
+
+    canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant SkeletonPainter old) =>
+      // Repaint si cambia el frame (identidad/listas), color o configuración relevante
       old.frame != frame ||
       old.color != color ||
       old.strokeWidth != strokeWidth ||
       old.drawPoints != drawPoints ||
-      old.mirror != mirror;
+      old.mirror != mirror ||
+      old.fit != fit;
 }
 
 /// ───────────────────────── Overlay widget ─────────────────────────
@@ -202,6 +229,7 @@ class PoseSkeletonOverlay extends StatelessWidget {
     this.strokeWidth = 2.0,
     this.drawPoints = true,
     this.mirror = false,
+    this.fit = BoxFit.contain,
   });
 
   final PoseFrame? data;
@@ -209,6 +237,7 @@ class PoseSkeletonOverlay extends StatelessWidget {
   final double strokeWidth;
   final bool drawPoints;
   final bool mirror;
+  final BoxFit fit;
 
   @override
   Widget build(BuildContext context) {
@@ -220,7 +249,11 @@ class PoseSkeletonOverlay extends StatelessWidget {
         strokeWidth: strokeWidth,
         drawPoints: drawPoints,
         mirror: mirror,
+        fit: fit,
       ),
+      size: Size.infinite, // ocupa todo el overlay (importante en Stack/Positioned.fill)
+      isComplex: true,
+      willChange: true,
     );
   }
 }

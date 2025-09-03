@@ -13,18 +13,21 @@ class _EvalCtx {
     required this.pitchAbs,
     required this.rollErr,
     required this.shouldersAbs,
+    required this.azimutAbs,          // ⬅️ NEW
 
     // raw-for-UX directions
     this.yawDegForAnim,
     this.pitchDegForAnim,
     this.rollDegForAnim,
     this.shouldersDegSigned,
+    this.azimutDegSigned,             // ⬅️ NEW
 
     // “inside now” flags at current enter-band
     required this.yawInsideNow,
     required this.pitchInsideNow,
     required this.rollInsideNow,
     required this.shouldersInsideNow,
+    required this.azimutInsideNow,    // ⬅️ NEW
   });
 
   final DateTime now;
@@ -35,16 +38,19 @@ class _EvalCtx {
   final double pitchAbs;
   final double rollErr;          // error to 180°
   final double shouldersAbs;
+  final double azimutAbs;        // |azimut| torso (deg) ⬅️ NEW
 
   final double? yawDegForAnim;
   final double? pitchDegForAnim;
   final double? rollDegForAnim;  // smoothed + unwrapped
   final double? shouldersDegSigned;
+  final double? azimutDegSigned; // signo para hint direccional ⬅️ NEW
 
   final bool yawInsideNow;
   final bool pitchInsideNow;
   final bool rollInsideNow;
   final bool shouldersInsideNow;
+  final bool azimutInsideNow;    // ⬅️ NEW
 }
 
 class _HintAnim {
@@ -61,6 +67,53 @@ extension _OnFrameLogicExt on PoseCaptureController {
     if (isCapturing || capturedPng != null) return;
 
     final frame = poseService.latestFrame.value;
+
+    // ── NUEVO: modo sin validaciones ────────────────────────────────
+    if (!validationsEnabled) {
+      if (frame == null) {
+        _stopCountdown();
+        final cur = hud.value;
+        _setHud(
+          PortraitUiModel(
+            statusLabel: 'Searching',
+            privacyLabel: cur.privacyLabel,
+            primaryMessage: 'Vista previa (validaciones OFF)',
+            secondaryMessage: null,
+            checkFraming: Tri.pending,
+            checkHead: Tri.pending,
+            checkEyes: Tri.pending,
+            checkLighting: Tri.pending,
+            checkBackground: Tri.pending,
+            countdownSeconds: null,
+            countdownProgress: null,
+            ovalProgress: 0.0,
+          ),
+          force: true,
+        );
+      } else {
+        if (isCountingDown) _stopCountdown(); // no auto-countdown en modo OFF
+        final cur = hud.value;
+        _setHud(
+          PortraitUiModel(
+            statusLabel: 'Preview',
+            privacyLabel: cur.privacyLabel,
+            primaryMessage: 'Validaciones desactivadas',
+            secondaryMessage: null,
+            checkFraming: Tri.ok,
+            checkHead: Tri.almost,
+            checkEyes: cur.checkEyes ?? Tri.almost,
+            checkLighting: cur.checkLighting ?? Tri.almost,
+            checkBackground: cur.checkBackground ?? Tri.almost,
+            countdownSeconds: null,
+            countdownProgress: null,
+            ovalProgress: 1.0,
+          ),
+        );
+      }
+      return; // corte temprano: no evaluar nada más
+    }
+    // ── FIN modo sin validaciones ───────────────────────────────────
+
     if (frame == null) {
       _handleFaceLost();
       return;
@@ -74,7 +127,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       return;
     }
 
-    // 2) Advance state machine (with deferred backtracking)
+    // 2) Advance state machine (with deferred backtracking) — genérico
     _advanceFlowAndBacktrack(ctx);
 
     // 3) Decide hints + drive animations (suppressed during dwell)
@@ -134,13 +187,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final faces = poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
     final pose = poseService.latestPoseLandmarks; // image-space points
-
     if (faces == null || faces.isEmpty || canvas == null) return null;
 
     // Use *current* enter-bands so progress bars match what we enforce
     final double yawDeadbandNow = _yawGate.enterBand;
     final double pitchDeadbandNow = _pitchGate.enterBand;
     final double rollDeadbandNow = _rollGate.enterBand; // roll uses error-to-180°
+    final double shouldersDeadbandNow = _shouldersGate.enterBand;
 
     final report = _validator.evaluate(
       landmarksImg: faces.first,
@@ -163,10 +216,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
       rollDeadbandDeg: rollDeadbandNow,
       rollMaxOffDeg: PoseCaptureController._maxOffDeg,
 
-      // NEW shoulders
+      // shoulders (nivelación)
       poseLandmarksImg: pose,
       enableShoulders: true,
-      shouldersDeadbandDeg: _shouldersGate.enterBand,
+      shouldersDeadbandDeg: shouldersDeadbandNow,
       shouldersMaxOffDeg: PoseCaptureController._maxOffDeg,
     );
 
@@ -192,6 +245,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
     final _RollMetrics rollM = updateRollKinematics(report.rollDeg, now);
 
+    // Azimut biacromial (torsión torso)
+    final double? azimutDeg = _estimateAzimutBiacromial();
+    final double azimutAbs = azimutDeg?.abs() ?? 0.0;
+
     final double yawAbs       = _emaYawDeg!.abs();
     final double pitchAbs     = _emaPitchDeg!.abs();
     final double rollErr      = rollM.errDeg;              // metric = distance to 180°
@@ -212,116 +269,141 @@ extension _OnFrameLogicExt on PoseCaptureController {
       pitchAbs: pitchAbs,
       rollErr: rollErr,
       shouldersAbs: shouldersAbs,
+      azimutAbs: azimutAbs,                    // ⬅️ NEW
       yawDegForAnim: _emaYawDeg,
       pitchDegForAnim: _emaPitchDeg,
-      rollDegForAnim: _emaRollDeg,              // smoothed/unwrapped
-      shouldersDegSigned: report.shouldersDeg,  // for side-specific hint
+      rollDegForAnim: _emaRollDeg,             // smoothed/unwrapped
+      shouldersDegSigned: report.shouldersDeg,
+      azimutDegSigned: azimutDeg,              // ⬅️ NEW
       yawInsideNow: insideEnter(_yawGate, yawAbs),
       pitchInsideNow: insideEnter(_pitchGate, pitchAbs),
       rollInsideNow: insideEnter(_rollGate, rollErr),
       shouldersInsideNow: insideEnter(_shouldersGate, shouldersAbs),
+      azimutInsideNow: (azimutDeg == null)     // si no hay 3D, no bloqueamos
+          ? true
+          : insideEnter(_azimutGate, azimutAbs),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // (C) State machine: advance stage and deferred backtracking
+  // (C) Motor de estado genérico impulsado por _flowOrder
   // ─────────────────────────────────────────────────────────────────────
+
+  // Orden configurable del flujo (sin incluir 'done'). Reordena como gustes.
+  List<_FlowStage> get _flowOrder => <_FlowStage>[
+        _FlowStage.torso,      // ⬅️ ejemplo pedido: torso primero
+        _FlowStage.shoulders,
+        _FlowStage.yaw,
+        _FlowStage.pitch,
+        _FlowStage.roll,
+      ];
+
+  _AxisGate _gateFor(_FlowStage s) {
+    switch (s) {
+      case _FlowStage.yaw:       return _yawGate;
+      case _FlowStage.pitch:     return _pitchGate;
+      case _FlowStage.roll:      return _rollGate;
+      case _FlowStage.shoulders: return _shouldersGate;
+      case _FlowStage.torso:     return _azimutGate;   // azimut biacromial
+      case _FlowStage.done:
+        throw StateError('No gate for DONE');
+    }
+  }
+
+  double _metricFor(_FlowStage s, _EvalCtx c) {
+    switch (s) {
+      case _FlowStage.yaw:       return c.yawAbs;
+      case _FlowStage.pitch:     return c.pitchAbs;
+      case _FlowStage.roll:      return c.rollErr;       // error a 180°
+      case _FlowStage.shoulders: return c.shouldersAbs;
+      case _FlowStage.torso:     return c.azimutAbs;     // |azimut|
+      case _FlowStage.done:
+        throw StateError('No metric for DONE');
+    }
+  }
+
+  void _goToStage(_FlowStage s) {
+    if (s != _FlowStage.done) {
+      _gateFor(s).resetTransient(); // limpiamos dwell/transitorios al entrar
+    }
+    _stage = s;
+  }
+
+  bool _allHolding(_EvalCtx c) {
+    for (final s in _flowOrder) {
+      final g = _gateFor(s);
+      final m = _metricFor(s, c);
+      if (!_isHolding(g, m)) return false;
+    }
+    return true;
+  }
+
+  _FlowStage? _firstPrevNotHolding(int uptoExclusiveIndex, _EvalCtx c) {
+    // Busca de izquierda a derecha el primer stage previo que ya no “hold”.
+    for (int i = 0; i < uptoExclusiveIndex; i++) {
+      final s = _flowOrder[i];
+      if (!_isHolding(_gateFor(s), _metricFor(s, c))) {
+        return s;
+      }
+    }
+    return null;
+  }
+
+  // ⬇️ UPDATED: “no retroceder” mientras el stage actual está en dwell
   void _advanceFlowAndBacktrack(_EvalCtx c) {
-    switch (_stage) {
-      case _FlowStage.yaw: {
-        final bool confirmed = c.faceOk && _yawGate.update(c.yawAbs, c.now);
-        if (confirmed) {
-          _stage = _FlowStage.pitch;
-          _pitchGate.resetTransient();
-        }
-        break;
+    // 1) Si estamos en DONE, verificar que todos los stages siguen “holding”.
+    if (_stage == _FlowStage.done) {
+      if (!_allHolding(c)) {
+        final s = _firstPrevNotHolding(_flowOrder.length, c)!;
+        _goToStage(s);
       }
+      return;
+    }
 
-      case _FlowStage.pitch: {
-        if (_pitchGate.isConfirmed && !_isHolding(_yawGate, c.yawAbs)) {
-          _yawGate.resetTransient();
-          _stage = _FlowStage.yaw;
-          break;
-        }
-        final bool confirmed = c.faceOk && _pitchGate.update(c.pitchAbs, c.now);
-        if (confirmed) {
-          if (!_isHolding(_yawGate, c.yawAbs)) {
-            _yawGate.resetTransient();
-            _stage = _FlowStage.yaw;
-          } else {
-            _stage = _FlowStage.roll;
-            _rollGate.resetTransient();
-          }
-        }
-        break;
-      }
+    // 2) Asegurar que el stage actual pertenece al _flowOrder
+    int idx = _flowOrder.indexOf(_stage);
+    if (idx == -1) {
+      // Si el stage actual ya no está (p.ej. orden cambiado en caliente),
+      // reubícate en el primer stage del flujo.
+      _goToStage(_flowOrder.first);
+      idx = 0;
+    }
 
-      case _FlowStage.roll: {
-        if (_rollGate.isConfirmed) {
-          if (!_isHolding(_yawGate, c.yawAbs)) {
-            _yawGate.resetTransient();
-            _stage = _FlowStage.yaw; break;
-          }
-          if (!_isHolding(_pitchGate, c.pitchAbs)) {
-            _pitchGate.resetTransient();
-            _stage = _FlowStage.pitch; break;
-          }
-        }
-        final bool confirmed = c.faceOk && _rollGate.update(c.rollErr, c.now);
-        if (confirmed) {
-          if (!_isHolding(_yawGate, c.yawAbs)) {
-            _yawGate.resetTransient();
-            _stage = _FlowStage.yaw;
-          } else if (!_isHolding(_pitchGate, c.pitchAbs)) {
-            _pitchGate.resetTransient();
-            _stage = _FlowStage.pitch;
-          } else {
-            _stage = _FlowStage.shoulders;
-            _shouldersGate.resetTransient();
-          }
-        }
-        break;
+    // 3) Backtracking CONDICIONAL: solo si el stage actual NO está en dwell.
+    final _FlowStage cur = _flowOrder[idx];
+    final _AxisGate curGate = _gateFor(cur);
+    if (!curGate.isDwell) {
+      final _FlowStage? prevBreak = _firstPrevNotHolding(idx, c);
+      if (prevBreak != null) {
+        _goToStage(prevBreak);
+        return;
       }
+    }
 
-      case _FlowStage.shoulders: {
-        if (_shouldersGate.isConfirmed) {
-          if (!_isHolding(_yawGate, c.yawAbs)) {
-            _yawGate.resetTransient(); _stage = _FlowStage.yaw; break;
-          }
-          if (!_isHolding(_pitchGate, c.pitchAbs)) {
-            _pitchGate.resetTransient(); _stage = _FlowStage.pitch; break;
-          }
-          if (!_isHolding(_rollGate, c.rollErr)) {
-            _rollGate.resetTransient(); _stage = _FlowStage.roll; break;
-          }
-        }
-        final bool confirmed = c.faceOk && _shouldersGate.update(c.shouldersAbs, c.now);
-        if (confirmed) {
-          if (!_isHolding(_yawGate, c.yawAbs)) {
-            _yawGate.resetTransient(); _stage = _FlowStage.yaw;
-          } else if (!_isHolding(_pitchGate, c.pitchAbs)) {
-            _pitchGate.resetTransient(); _stage = _FlowStage.pitch;
-          } else if (!_isHolding(_rollGate, c.rollErr)) {
-            _rollGate.resetTransient(); _stage = _FlowStage.roll;
-          } else {
-            _stage = _FlowStage.done;
-          }
-        }
-        break;
-      }
+    // 4) Actualizar/confirmar el gate del stage actual.
+    final _AxisGate gate = curGate;
+    final double metric = _metricFor(cur, c);
 
-      case _FlowStage.done: {
-        if (!_isHolding(_yawGate, c.yawAbs)) {
-          _yawGate.resetTransient(); _stage = _FlowStage.yaw;
-        } else if (!_isHolding(_pitchGate, c.pitchAbs)) {
-          _pitchGate.resetTransient(); _stage = _FlowStage.pitch;
-        } else if (!_isHolding(_rollGate, c.rollErr)) {
-          _rollGate.resetTransient(); _stage = _FlowStage.roll;
-        } else if (!_isHolding(_shouldersGate, c.shouldersAbs)) {
-          _shouldersGate.resetTransient(); _stage = _FlowStage.shoulders;
-        }
-        break;
-      }
+    final bool confirmed = c.faceOk && gate.update(metric, c.now);
+    if (!confirmed) {
+      // Aún sin confirmar este stage: nos quedamos aquí.
+      return;
+    }
+
+    // 5) Confirmado el actual: revalidar que los previos se mantienen.
+    final _FlowStage? prevBreakAfterConfirm = _firstPrevNotHolding(idx, c);
+    if (prevBreakAfterConfirm != null) {
+      _goToStage(prevBreakAfterConfirm);
+      return;
+    }
+
+    // 6) Avanzar al siguiente o terminar en DONE si era el último.
+    final bool isLast = (idx == _flowOrder.length - 1);
+    if (isLast) {
+      _goToStage(_FlowStage.done);
+    } else {
+      final _FlowStage nextStage = _flowOrder[idx + 1];
+      _goToStage(nextStage);
     }
   }
 
@@ -345,6 +427,22 @@ extension _OnFrameLogicExt on PoseCaptureController {
             : 'Baja el hombro izquierdo o sube el derecho, un poco.';
       } else {
         msg = 'Nivela los hombros, mantenlos horizontales.';
+      }
+      return _HintAnim(_Axis.none, msg);
+    }
+
+    // ⬇️ NEW: Torso azimuth hints (texto; sin animación)
+    if (_stage == _FlowStage.torso &&
+        !c.azimutInsideNow &&
+        !_azimutGate.isDwell) {
+      _hideAnimationIfVisible();
+      String msg;
+      if (c.azimutDegSigned != null) {
+        msg = (c.azimutDegSigned! > 0)
+            ? 'Mueve ligeramente tu hombro derecho hacia atrás'
+            : 'Mueve ligeramente tu hombro izquierdo hacia atrás';
+      } else {
+        msg = 'Alinea el torso al frente (cuadra los hombros con la cámara).';
       }
       return _HintAnim(_Axis.none, msg);
     }
@@ -523,7 +621,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
   // (E) HUD + countdown coordination
   // ─────────────────────────────────────────────────────────────────────
   void _updateHudAndCountdown(_EvalCtx c, _HintAnim ha) {
-    final bool allChecksOk = c.faceOk && _stage == _FlowStage.done;
+    final bool allChecksOk =
+        c.faceOk &&
+        _stage == _FlowStage.done;
 
     // global stability window (no extra hold; gates already enforce dwell)
     if (allChecksOk) {
@@ -597,7 +697,4 @@ extension _OnFrameLogicExt on PoseCaptureController {
       ),
     );
   }
-
-  // (Optional) If you still want an extension-scoped _onFrame mirror:
-  // void _onFrame() => this._onFrameImpl();
 }

@@ -30,8 +30,8 @@ enum _TurnDir { none, left, right }
 // Which overlay animation is currently active
 enum _Axis { none, yaw, pitch, roll }
 
-/// Sequential flow: enforce yaw → pitch → roll → shoulders
-enum _FlowStage { yaw, pitch, roll, shoulders, done }
+/// Sequential flow
+enum _FlowStage { torso, shoulders, yaw, pitch, roll, done }
 
 /// Axis stability gate with dwell + hysteresis + first-pass tightening.
 /// Implements Proposal 1 (+ touch of Proposal 2).
@@ -369,6 +369,7 @@ class PoseCaptureController extends ChangeNotifier {
     required this.countdownFps,
     required this.countdownSpeed,
     this.mirror = true,
+    this.validationsEnabled = true, // ⇠ NEW
     _Tuning? tuning, // opcional para ajustar parámetros en tests
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
@@ -387,12 +388,18 @@ class PoseCaptureController extends ChangeNotifier {
           loop: true,
           autoplay: true,
         ) {
+    // fija la misma referencia del tear-off para add/removeListener
+    _frameListener = _onFrame;
+
     // Configura countdown con callbacks → HUD y captura integrados
     _countdown = _Countdown(
       duration: countdownDuration,
       fps: countdownFps,
       speed: countdownSpeed,
-      isOkNow: () => poseService.latestFrame.value != null && _stage == _FlowStage.done,
+      // ⇣ Si validationsEnabled está OFF, permite countdown/captura sin gates.
+      isOkNow: () => validationsEnabled
+          ? (poseService.latestFrame.value != null && _stage == _FlowStage.done)
+          : true,
       onTick: (seconds, progress) {
         _setHud(
           hud.value.copyWith(
@@ -446,6 +453,10 @@ class PoseCaptureController extends ChangeNotifier {
   final int countdownFps;
   final double countdownSpeed;
   final bool mirror; // front camera UX
+
+  /// NEW: switch global de validaciones
+  final bool validationsEnabled;
+
   final _Tuning _tuning;
 
   // ── Controllers owned by this class ───────────────────────────────────
@@ -463,6 +474,9 @@ class PoseCaptureController extends ChangeNotifier {
   static const double _rollErrorDeadbandDeg = 1.7;
   static const double _maxOffDeg = 20.0;
   static const double _rollHintDeadzoneDeg = 0.3;
+
+  // ⬇️ NEW: Torso azimut (deadband específico)
+  static const double _azimutDeadbandDeg = 30;
 
   // Axis gates (Proposal 1 + adjustments)
   final _AxisGate _yawGate = _AxisGate(
@@ -490,7 +504,7 @@ class PoseCaptureController extends ChangeNotifier {
     extraRelaxAfterFirst: 0.4,
   );
 
-  // ⬇️ NEW: Shoulders use same mechanics; keep a small dwell to avoid flicker.
+  // ⬇️ NEW: Shoulders
   final _AxisGate _shouldersGate = _AxisGate(
     baseDeadband: _shouldersDeadbandDeg,
     sense: _GateSense.insideIsOk,
@@ -498,6 +512,16 @@ class PoseCaptureController extends ChangeNotifier {
     hysteresis: 0.2,
     dwell: Duration(milliseconds: 1000),
     extraRelaxAfterFirst: 0.2,
+  );
+
+  // ⬇️ NEW: Azimut (torso) gate
+  final _AxisGate _azimutGate = _AxisGate(
+    baseDeadband: _azimutDeadbandDeg,
+    sense: _GateSense.insideIsOk,
+    tighten: 10,
+    hysteresis: 0.25,
+    dwell: Duration(milliseconds: 1000),
+    extraRelaxAfterFirst: 0.3,
   );
 
   // Keep current canvas size to map image↔canvas consistently.
@@ -566,20 +590,66 @@ class PoseCaptureController extends ChangeNotifier {
   // Sequential flow stage
   _FlowStage _stage = _FlowStage.yaw;
 
+  // ⬇️ NEW: factor para convertir z normalizada → píxeles (calibrable)
+  double? _zToPxScale;
+  void setZtoPxScale(double s) => _zToPxScale = s;
+
+  /// ⬇️ NEW: Estimación de azimut biacromial (torso yaw) en grados.
+  /// Usa hombros 3D (índices 11, 12). Devuelve null si no hay 3D.
+  double? _estimateAzimutBiacromial() {
+    final lms3d = poseService.latestPoseLandmarks3D;
+    if (lms3d == null || lms3d.length <= 12) return null;
+
+    final ls = lms3d[11]; // left shoulder
+    final rs = lms3d[12]; // right shoulder
+
+    // z is nullable → guard it
+    final double? rz = rs.z;
+    final double? lz = ls.z;
+    if (rz == null || lz == null) return null; // no depth this frame
+
+    final double dx = (rs.x - ls.x);
+    final double dxPx = dx.abs();
+    if (dxPx <= 1e-6) return 0.0;
+
+    // ensure this is double, not num
+    final double imgW =
+        poseService.latestFrame.value?.imageSize.width ??
+        _canvasSize?.width ??
+        640.0;
+
+    final double zToPx = (_zToPxScale ?? imgW);
+
+    // now safe: rz/lz are non-null doubles
+    final double dzPx = (rz - lz) * zToPx;
+
+    double deg = math.atan2(dzPx, dxPx) * 180.0 / math.pi;
+    if (mirror) deg = -deg;
+    return deg;
+  }
+
   // Fallback snapshot closure (widget provides it)
   SnapshotFn? _fallbackSnapshot;
   void setFallbackSnapshot(SnapshotFn fn) {
     _fallbackSnapshot = fn;
   }
 
-  // Lifecycle wiring
+  // ── Suscripción de frames (por instancia) ─────────────────────────────
+  bool _attached = false;
+  late final VoidCallback _frameListener;
+
   void attach() {
-    poseService.latestFrame.addListener(_onFrame);
+    if (_attached) return;
+    _attached = true;
+    poseService.latestFrame.addListener(_frameListener);
   }
 
   @override
   void dispose() {
-    poseService.latestFrame.removeListener(_onFrame);
+    if (_attached) {
+      poseService.latestFrame.removeListener(_frameListener);
+      _attached = false;
+    }
     _countdown.stop();
     seq.dispose();
     hud.dispose();
@@ -610,7 +680,8 @@ extension _FlowHelpers on PoseCaptureController {
     _yawGate.resetForNewStage();
     _pitchGate.resetForNewStage();
     _rollGate.resetForNewStage();
-    _shouldersGate.resetForNewStage(); // ⬅️ NEW
+    _shouldersGate.resetForNewStage();
+    _azimutGate.resetForNewStage(); // ⬅️ NEW
   }
 
   // Helper: does a confirmed axis still hold its stability?
@@ -646,7 +717,6 @@ extension _RollMathKinematics on PoseCaptureController {
     return _RollMetrics(m.errDeg, m.dps);
   }
 }
-
 
 extension _HudHelpers on PoseCaptureController {
   void _setHud(PortraitUiModel next, {bool force = false}) {

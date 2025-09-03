@@ -29,12 +29,18 @@ class PoseCapturePage extends StatefulWidget {
 
     /// Speed multiplier: 1.0 = normal; 2.0 = twice as fast (finishes in half the time).
     this.countdownSpeed = 1.6,
+
+    /// NEW: enables/disables pose validations logic entirely.
+    this.validationsEnabled = true,
   });
 
   final PoseWebRTCService poseService;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;
+
+  /// NEW: global switch to disable all validations (yaw/pitch/roll/shoulders/azimut).
+  final bool validationsEnabled;
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
@@ -54,6 +60,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       countdownFps: widget.countdownFps,
       countdownSpeed: widget.countdownSpeed,
       mirror: true,
+      validationsEnabled: widget.validationsEnabled, // NEW: pass the flag
     );
     // Provide fallback snapshot closure (uses this widget's context & key)
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
