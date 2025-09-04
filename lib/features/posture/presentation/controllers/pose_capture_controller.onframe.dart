@@ -13,21 +13,21 @@ class _EvalCtx {
     required this.pitchAbs,
     required this.rollErr,
     required this.shouldersAbs,
-    required this.azimutAbs,          // ⬅️ NEW
+    required this.azimutAbs, // ⬅️ NEW
 
     // raw-for-UX directions
     this.yawDegForAnim,
     this.pitchDegForAnim,
     this.rollDegForAnim,
     this.shouldersDegSigned,
-    this.azimutDegSigned,             // ⬅️ NEW
+    this.azimutDegSigned, // ⬅️ NEW
 
     // “inside now” flags at current enter-band
     required this.yawInsideNow,
     required this.pitchInsideNow,
     required this.rollInsideNow,
     required this.shouldersInsideNow,
-    required this.azimutInsideNow,    // ⬅️ NEW
+    required this.azimutInsideNow, // ⬅️ NEW
   });
 
   final DateTime now;
@@ -36,13 +36,13 @@ class _EvalCtx {
 
   final double yawAbs;
   final double pitchAbs;
-  final double rollErr;          // error to 180°
+  final double rollErr; // error to 180°
   final double shouldersAbs;
-  final double azimutAbs;        // |azimut| torso (deg) ⬅️ NEW
+  final double azimutAbs; // |azimut| torso (deg) ⬅️ NEW
 
   final double? yawDegForAnim;
   final double? pitchDegForAnim;
-  final double? rollDegForAnim;  // smoothed + unwrapped
+  final double? rollDegForAnim; // smoothed + unwrapped
   final double? shouldersDegSigned;
   final double? azimutDegSigned; // signo para hint direccional ⬅️ NEW
 
@@ -50,7 +50,7 @@ class _EvalCtx {
   final bool pitchInsideNow;
   final bool rollInsideNow;
   final bool shouldersInsideNow;
-  final bool azimutInsideNow;    // ⬅️ NEW
+  final bool azimutInsideNow; // ⬅️ NEW
 }
 
 class _HintAnim {
@@ -59,8 +59,188 @@ class _HintAnim {
   final String? hint;
 }
 
-// ── Bootstrap flag para forzar que el flujo inicie en TORSO ────────────
-bool _flowBootstrapped = false;
+// ───────────────────────────────────────────────────────────────────────
+// Reglas plug-in (arquitectura data-driven para añadir validaciones fácil)
+// ───────────────────────────────────────────────────────────────────────
+
+abstract class _ValidationRule {
+  _ValidationRule({
+    required this.id,
+    required this.gate,
+    this.ignorePrevBreakOf = const <String>{},
+    this.blockInterruptionDuringValidation = false,
+  });
+
+  /// Identificador estable de la regla (p.ej., 'torso', 'shoulders', 'yaw'...)
+  final String id;
+
+  /// Gate de estabilidad (deadband, hysteresis, dwell, tighten…)
+  final _AxisGate gate;
+
+  /// Si una ruptura previa proviene de un ID en este set, se ignora.
+  final Set<String> ignorePrevBreakOf;
+
+  /// Si true, mientras esta regla valida/dwell no permitas retroceder.
+  final bool blockInterruptionDuringValidation;
+
+  /// Métrica escalar evaluada por la regla. `null` = no bloquear (sin datos).
+  double? metric(_EvalCtx c);
+
+  /// Hint/animación cuando aún no está “inside” (puede usar `ctrl`).
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c);
+
+  /// Conveniencia: ¿está dentro del enter-band actual?
+  bool insideNow(_EvalCtx c) {
+    final m = metric(c);
+    if (m == null) return true;
+    final th = gate.enterBand;
+    final inside = gate.sense == _GateSense.insideIsOk;
+    return inside ? (m <= th) : (m >= th);
+  }
+}
+
+// ── Reglas concretas ───────────────────────────────────────────────────
+
+class _TorsoRule extends _ValidationRule {
+  _TorsoRule(_AxisGate gate)
+      : super(
+          id: 'torso',
+          gate: gate,
+          blockInterruptionDuringValidation: true,
+        );
+
+  @override
+  double? metric(_EvalCtx c) => c.azimutAbs;
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
+    if (c.azimutInsideNow || gate.isDwell) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    ctrl._hideAnimationIfVisible();
+    if (c.azimutDegSigned != null) {
+      final msg = (c.azimutDegSigned! > 0)
+          ? 'Gira ligeramente tu torso moviendo el hombro derecho hacia atrás'
+          : 'Gira ligeramente tu torso moviendo el hombro izquierdo hacia atrás';
+      return _HintAnim(_Axis.none, msg);
+    }
+    return const _HintAnim(_Axis.none, 'Alinea el torso al frente (cuadra los hombros).');
+  }
+}
+
+class _ShouldersRule extends _ValidationRule {
+  _ShouldersRule(_AxisGate gate)
+      : super(
+          id: 'shoulders',
+          gate: gate,
+          blockInterruptionDuringValidation: true,
+        );
+
+  @override
+  double? metric(_EvalCtx c) => c.shouldersAbs;
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
+    if (c.shouldersInsideNow || gate.isDwell) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    ctrl._hideAnimationIfVisible();
+    String msg;
+    if (c.shouldersDegSigned != null) {
+      msg = (c.shouldersDegSigned! > 0)
+          ? 'Baja un poco el hombro derecho o sube el izquierdo'
+          : 'Baja un poco el hombro izquierdo o sube el derecho';
+    } else {
+      msg = 'Nivela los hombros, mantenlos horizontales.';
+    }
+    return _HintAnim(_Axis.none, msg);
+  }
+}
+
+class _YawRule extends _ValidationRule {
+  _YawRule(_AxisGate gate)
+      : super(
+          id: 'yaw',
+          gate: gate,
+          ignorePrevBreakOf: const {'torso', 'shoulders'},
+        );
+
+  @override
+  double? metric(_EvalCtx c) => c.yawAbs;
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
+    if (c.yawInsideNow || gate.isDwell || c.yawDegForAnim == null) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    ctrl._driveYawAnimation(c.yawDegForAnim!);
+    final hint = (c.yawDegForAnim! > 0)
+        ? 'Gira ligeramente la cabeza a la izquierda'
+        : 'Gira ligeramente la cabeza a la derecha';
+    return _HintAnim(_Axis.yaw, hint);
+  }
+}
+
+class _PitchRule extends _ValidationRule {
+  _PitchRule(_AxisGate gate)
+      : super(
+          id: 'pitch',
+          gate: gate,
+          ignorePrevBreakOf: const {'torso', 'shoulders'},
+        );
+
+  @override
+  double? metric(_EvalCtx c) => c.pitchAbs;
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
+    if (c.pitchInsideNow || gate.isDwell || c.pitchDegForAnim == null) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    ctrl._drivePitchAnimation(c.pitchDegForAnim!);
+    final hint =
+        (c.pitchDegForAnim! > 0) ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
+    return _HintAnim(_Axis.pitch, hint);
+  }
+}
+
+class _RollRule extends _ValidationRule {
+  _RollRule(_AxisGate gate)
+      : super(
+          id: 'roll',
+          gate: gate,
+          ignorePrevBreakOf: const {'torso', 'shoulders'},
+        );
+
+  @override
+  double? metric(_EvalCtx c) => c.rollErr; // distancia a 180° (≤ umbral = OK)
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
+    if (c.rollInsideNow || gate.isDwell || c.rollDegForAnim == null) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    final delta = ctrl._deltaToNearest180(c.rollDegForAnim!);
+    if (delta.abs() <= PoseCaptureController._rollHintDeadzoneDeg) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, null);
+    }
+    ctrl._driveRollAnimation(delta);
+    final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
+    final hint =
+        ccwForUser ? 'Rota ligeramente tu cabeza en sentido horario ⟳' : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
+    return _HintAnim(_Axis.roll, hint);
+  }
+}
+
+// ── Estado por instancia para reglas usando Expando (sin tocar la clase) ──
+final Expando<List<_ValidationRule>> _rulesExp = Expando('_rules');
+final Expando<int> _idxExp = Expando('_idx');
 
 // ── Extension with modular helpers ─────────────────────────────────────
 extension _OnFrameLogicExt on PoseCaptureController {
@@ -71,12 +251,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     final frame = poseService.latestFrame.value;
 
-    // ── NUEVO: modo sin validaciones ────────────────────────────────
+    // ── Modo sin validaciones ──────────────────────────────────────────
     if (!validationsEnabled) {
-      // si las validaciones están OFF, la próxima vez que se enciendan
-      // volveremos a arrancar el flujo desde TORSO
-      _flowBootstrapped = false;
-
       if (frame == null) {
         _stopCountdown();
         final cur = hud.value;
@@ -117,37 +293,109 @@ extension _OnFrameLogicExt on PoseCaptureController {
           ),
         );
       }
-      return; // corte temprano: no evaluar nada más
+      return; // corte temprano
     }
-    // ── FIN modo sin validaciones ───────────────────────────────────
+    // ── FIN modo sin validaciones ──────────────────────────────────────
 
     if (frame == null) {
       _handleFaceLost();
       return;
     }
 
-    // ── Bootstrap: forzar inicio del flujo en TORSO al (re)entrar ───
-    if (!_flowBootstrapped) {
-      _goToStage(_flowOrder.first); // _FlowStage.torso
-      _flowBootstrapped = true;
-    }
+    // Asegura reglas inicializadas
+    _ensureRules();
 
     // 1) Gather inputs + compute metrics and “inside now” flags
     final _EvalCtx? ctx = _evaluateCurrentFrame(frame);
     if (ctx == null) {
-      // cannot evaluate due to missing deps (canvas/landmarks)
       _pushHudAdjusting(faceOk: false, arcProgress: 0.0, finalHint: null);
       return;
     }
 
-    // 2) Advance state machine (with deferred backtracking) — genérico
+    // 2) Motor genérico (avanzar / retroceder)
     _advanceFlowAndBacktrack(ctx);
 
-    // 3) Decide hints + drive animations (suppressed during dwell)
-    final _HintAnim ha = _chooseHintAndUpdateAnimations(ctx);
+    // 3) Hint/animación de la regla actual
+    final _HintAnim ha = _isDone
+        ? const _HintAnim(_Axis.none, null)
+        : _currentRule.buildHint(this, ctx);
 
-    // 4) Update HUD and countdown orchestration
+    // 4) HUD + countdown
     _updateHudAndCountdown(ctx, ha);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // Estado/registro de reglas
+  // ─────────────────────────────────────────────────────────────────────
+  List<_ValidationRule> get _rules {
+    final got = _rulesExp[this];
+    if (got != null) return got;
+
+    final list = <_ValidationRule>[
+      _TorsoRule(_AxisGate(
+        baseDeadband: PoseCaptureController._azimutDeadbandDeg,
+        sense: _GateSense.insideIsOk,
+        tighten: 1.6,
+        hysteresis: 0.25,
+        dwell: const Duration(milliseconds: 1000),
+        extraRelaxAfterFirst: 0.3,
+      )),
+      _ShouldersRule(_AxisGate(
+        baseDeadband: PoseCaptureController._shouldersDeadbandDeg,
+        sense: _GateSense.insideIsOk,
+        tighten: 1.6,
+        hysteresis: 0.2,
+        dwell: const Duration(milliseconds: 1000),
+        extraRelaxAfterFirst: 0.2,
+      )),
+      _YawRule(_AxisGate(
+        baseDeadband: PoseCaptureController._yawDeadbandDeg,
+        tighten: 1.4,
+        hysteresis: 0.2,
+        dwell: const Duration(milliseconds: 1000),
+        extraRelaxAfterFirst: 0.2,
+      )),
+      _PitchRule(_AxisGate(
+        baseDeadband: PoseCaptureController._pitchDeadbandDeg,
+        tighten: 1.4,
+        hysteresis: 0.2,
+        dwell: const Duration(milliseconds: 1000),
+        extraRelaxAfterFirst: 0.2,
+      )),
+      _RollRule(_AxisGate(
+        baseDeadband: PoseCaptureController._rollErrorDeadbandDeg,
+        sense: _GateSense.insideIsOk,
+        tighten: 0.4,
+        hysteresis: 0.3,
+        dwell: const Duration(milliseconds: 1000),
+        extraRelaxAfterFirst: 0.4,
+      )),
+    ];
+
+    _rulesExp[this] = list;
+    _idxExp[this] = 0;
+    return list;
+  }
+
+  void _ensureRules() {
+    // fuerza inicialización perezosa
+    // ignore: unused_local_variable
+    final _ = _rules;
+    _idxExp[this] ??= 0;
+  }
+
+  int get _curIdx => _idxExp[this] ?? 0;
+  set _curIdx(int v) => _idxExp[this] = v;
+
+  bool get _isDone => _curIdx >= _rules.length;
+
+  _ValidationRule get _currentRule => _rules[_curIdx];
+
+  _ValidationRule? _findRule(String id) {
+    for (final r in _rules) {
+      if (r.id == id) return r;
+    }
+    return null;
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -178,12 +426,15 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     if (showTurnRightSeq) {
       showTurnRightSeq = false;
-      try { seq.pause(); } catch (_) {}
+      try {
+        seq.pause();
+      } catch (_) {}
       notifyListeners();
     }
 
-    // Reset sequential flow + filters when face disappears.
-    _resetFlow(); // from mixin
+    // Reset flujo + filtros
+    _resetFlow();
+
     _emaYawDeg = _emaPitchDeg = _emaRollDeg = null;
     _lastSampleAt = null;
 
@@ -191,9 +442,15 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _rollSmoothedDeg = null;
     _rollSmoothedAt = null;
     _lastRollDps = null;
+  }
 
-    // al perder rostro, rebootstrap del flujo para arrancar en TORSO
-    _flowBootstrapped = false;
+  // Reset del flujo basado en reglas
+  void _resetFlow() {
+    _ensureRules();
+    _curIdx = 0;
+    for (final r in _rules) {
+      r.gate.resetForNewStage();
+    }
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -205,11 +462,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final pose = poseService.latestPoseLandmarks; // image-space points
     if (faces == null || faces.isEmpty || canvas == null) return null;
 
-    // Use *current* enter-bands so progress bars match what we enforce
-    final double yawDeadbandNow = _yawGate.enterBand;
-    final double pitchDeadbandNow = _pitchGate.enterBand;
-    final double rollDeadbandNow = _rollGate.enterBand; // roll uses error-to-180°
-    final double shouldersDeadbandNow = _shouldersGate.enterBand;
+    // Deadbands actuales (usar gates de las reglas)
+    final yawDeadbandNow = (_findRule('yaw')?.gate.enterBand) ?? 2.2;
+    final pitchDeadbandNow = (_findRule('pitch')?.gate.enterBand) ?? 2.2;
+    final rollDeadbandNow = (_findRule('roll')?.gate.enterBand) ?? 1.7;
+    final shouldersDeadbandNow = (_findRule('shoulders')?.gate.enterBand) ?? 1.8;
 
     final report = _validator.evaluate(
       landmarksImg: faces.first,
@@ -227,7 +484,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       pitchDeadbandDeg: pitchDeadbandNow,
       pitchMaxOffDeg: PoseCaptureController._maxOffDeg,
 
-      // roll: deadband is tolerance of error to 180°
+      // roll: deadband es tolerancia de error a 180°
       enableRoll: true,
       rollDeadbandDeg: rollDeadbandNow,
       rollMaxOffDeg: PoseCaptureController._maxOffDeg,
@@ -243,23 +500,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final bool faceOk = report.faceInOval;
     final double arcProgress = report.ovalProgress;
 
-    // EMA for yaw/pitch
+    // EMA para yaw/pitch
     final double dtMs = (_lastSampleAt == null)
         ? 16.0
-        : now
-            .difference(_lastSampleAt!)
-            .inMilliseconds
-            .toDouble()
-            .clamp(1.0, 1000.0);
+        : now.difference(_lastSampleAt!).inMilliseconds.toDouble().clamp(1.0, 1000.0);
     final double a = 1 - math.exp(-dtMs / PoseCaptureController._emaTauMs);
     _lastSampleAt ??= now;
 
-    _emaYawDeg = (_emaYawDeg == null)
-        ? report.yawDeg
-        : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
-    _emaPitchDeg = (_emaPitchDeg == null)
-        ? report.pitchDeg
-        : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
+    _emaYawDeg = (_emaYawDeg == null) ? report.yawDeg : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
+    _emaPitchDeg =
+        (_emaPitchDeg == null) ? report.pitchDeg : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
     _lastSampleAt = now;
 
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
@@ -269,9 +519,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double? azimutDeg = _estimateAzimutBiacromial();
     final double azimutAbs = azimutDeg?.abs() ?? 0.0;
 
-    final double yawAbs       = _emaYawDeg!.abs();
-    final double pitchAbs     = _emaPitchDeg!.abs();
-    final double rollErr      = rollM.errDeg;              // metric = distance to 180°
+    final double yawAbs = _emaYawDeg!.abs();
+    final double pitchAbs = _emaPitchDeg!.abs();
+    final double rollErr = rollM.errDeg; // metric = distance to 180°
     final double shouldersAbs = report.shouldersDeg.abs();
 
     // Helper: inside *enter* band now
@@ -281,6 +531,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
       return inside ? (metric <= th) : (metric >= th);
     }
 
+    // Gates de las reglas para "inside now"
+    final yawGateNow = _findRule('yaw')!.gate;
+    final pitchGateNow = _findRule('pitch')!.gate;
+    final rollGateNow = _findRule('roll')!.gate;
+    final shouldersGateNow = _findRule('shoulders')!.gate;
+    final azimutGateNow = _findRule('torso')!.gate;
+
     return _EvalCtx(
       now: now,
       faceOk: faceOk,
@@ -289,272 +546,105 @@ extension _OnFrameLogicExt on PoseCaptureController {
       pitchAbs: pitchAbs,
       rollErr: rollErr,
       shouldersAbs: shouldersAbs,
-      azimutAbs: azimutAbs,                    // ⬅️ NEW
+      azimutAbs: azimutAbs, // ⬅️ NEW
       yawDegForAnim: _emaYawDeg,
       pitchDegForAnim: _emaPitchDeg,
-      rollDegForAnim: _emaRollDeg,             // smoothed/unwrapped
+      rollDegForAnim: _emaRollDeg, // smoothed/unwrapped
       shouldersDegSigned: report.shouldersDeg,
-      azimutDegSigned: azimutDeg,              // ⬅️ NEW
-      yawInsideNow: insideEnter(_yawGate, yawAbs),
-      pitchInsideNow: insideEnter(_pitchGate, pitchAbs),
-      rollInsideNow: insideEnter(_rollGate, rollErr),
-      shouldersInsideNow: insideEnter(_shouldersGate, shouldersAbs),
-      azimutInsideNow: (azimutDeg == null)     // si no hay 3D, no bloqueamos
-          ? true
-          : insideEnter(_azimutGate, azimutAbs),
+      azimutDegSigned: azimutDeg, // ⬅️ NEW
+      yawInsideNow: insideEnter(yawGateNow, yawAbs),
+      pitchInsideNow: insideEnter(pitchGateNow, pitchAbs),
+      rollInsideNow: insideEnter(rollGateNow, rollErr),
+      shouldersInsideNow: insideEnter(shouldersGateNow, shouldersAbs),
+      azimutInsideNow: (azimutDeg == null) ? true : insideEnter(azimutGateNow, azimutAbs),
     );
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // (C) Motor de estado genérico impulsado por _flowOrder
+  // (C) Motor de estado genérico impulsado por reglas
   // ─────────────────────────────────────────────────────────────────────
 
-  // Orden configurable del flujo (sin incluir 'done'). Reordena como gustes.
-  List<_FlowStage> get _flowOrder => <_FlowStage>[
-        _FlowStage.torso,      // ⬅️ torso primero
-        _FlowStage.shoulders,
-        _FlowStage.yaw,
-        _FlowStage.pitch,
-        _FlowStage.roll,
-      ];
-
-  _AxisGate _gateFor(_FlowStage s) {
-    switch (s) {
-      case _FlowStage.yaw:       return _yawGate;
-      case _FlowStage.pitch:     return _pitchGate;
-      case _FlowStage.roll:      return _rollGate;
-      case _FlowStage.shoulders: return _shouldersGate;
-      case _FlowStage.torso:     return _azimutGate;   // azimut biacromial
-      case _FlowStage.done:
-        throw StateError('No gate for DONE');
-    }
+  bool _ruleHolds(_ValidationRule r, _EvalCtx c) {
+    final m = r.metric(c);
+    if (m == null) return true;
+    final exit = r.gate.exitBand;
+    final relax = r.gate.hasConfirmedOnce ? r.gate.extraRelaxAfterFirst : 0.0;
+    final inside = r.gate.sense == _GateSense.insideIsOk;
+    return inside ? (m <= exit + relax) : (m >= exit - relax);
   }
 
-  double _metricFor(_FlowStage s, _EvalCtx c) {
-    switch (s) {
-      case _FlowStage.yaw:       return c.yawAbs;
-      case _FlowStage.pitch:     return c.pitchAbs;
-      case _FlowStage.roll:      return c.rollErr;       // error a 180°
-      case _FlowStage.shoulders: return c.shouldersAbs;
-      case _FlowStage.torso:     return c.azimutAbs;     // |azimut|
-      case _FlowStage.done:
-        throw StateError('No metric for DONE');
-    }
-  }
-
-  void _goToStage(_FlowStage s) {
-    if (s != _FlowStage.done) {
-      _gateFor(s).resetTransient(); // limpiamos dwell/transitorios al entrar
-    }
-    _stage = s;
-  }
-
-  bool _allHolding(_EvalCtx c) {
-    for (final s in _flowOrder) {
-      final g = _gateFor(s);
-      final m = _metricFor(s, c);
-      if (!_isHolding(g, m)) return false;
-    }
-    return true;
-  }
-
-  _FlowStage? _firstPrevNotHolding(int uptoExclusiveIndex, _EvalCtx c) {
-    // Busca de izquierda a derecha el primer stage previo que ya no “hold”.
-    for (int i = 0; i < uptoExclusiveIndex; i++) {
-      final s = _flowOrder[i];
-      if (!_isHolding(_gateFor(s), _metricFor(s, c))) {
-        return s;
-      }
-    }
-    return null;
-  }
-
-  // Helper: no interrumpir mientras se valida shoulders o torso (azimut).
-  bool _noInterruptionWhileValidating(_FlowStage s) =>
-      s == _FlowStage.shoulders || s == _FlowStage.torso;
-
-  // NEW: Ignorar rupturas previas según el stage actual.
-  bool _shouldIgnorePrevBreak(_FlowStage cur, _FlowStage prev) {
-    // 1) Mientras validas shoulders o torso: no interrumpas por ningún previo.
-    if (cur == _FlowStage.shoulders || cur == _FlowStage.torso) return true;
-
-    // 2) Mientras validas yaw/pitch/roll: ignora rupturas de shoulders y torso.
-    if ((cur == _FlowStage.yaw || cur == _FlowStage.pitch || cur == _FlowStage.roll) &&
-        (prev == _FlowStage.shoulders || prev == _FlowStage.torso)) {
-      return true;
-    }
-    return false;
-  }
-
-  // NEW: Versión filtrada del "primer previo que no sostiene".
-  _FlowStage? _firstPrevNotHoldingFiltered(
-    int uptoExclusiveIndex,
+  _ValidationRule? _firstPrevNotHoldingFiltered(
+    int uptoExclusive,
     _EvalCtx c,
-    bool Function(_FlowStage prev) shouldIgnore,
+    _ValidationRule cur,
   ) {
-    for (int i = 0; i < uptoExclusiveIndex; i++) {
-      final s = _flowOrder[i];
-      if (shouldIgnore(s)) continue; // saltar stages que decidimos ignorar
-      if (!_isHolding(_gateFor(s), _metricFor(s, c))) {
-        return s;
-      }
+    for (int i = 0; i < uptoExclusive; i++) {
+      final prev = _rules[i];
+      if (cur.ignorePrevBreakOf.contains(prev.id)) continue;
+      if (!_ruleHolds(prev, c)) return prev;
     }
     return null;
   }
 
-  // ⬇️ UPDATED: backtracking con filtros para no interrumpir indebidamente
   void _advanceFlowAndBacktrack(_EvalCtx c) {
-    // 1) Si estamos en DONE, verificar que todos los stages siguen “holding”.
-    if (_stage == _FlowStage.done) {
-      if (!_allHolding(c)) {
-        final s = _firstPrevNotHolding(_flowOrder.length, c)!;
-        _goToStage(s);
+    if (_isDone) {
+      // En DONE, mantener que todo “hold”; si algo cae, retrocede al primero
+      for (int i = 0; i < _rules.length; i++) {
+        if (!_ruleHolds(_rules[i], c)) {
+          _curIdx = i;
+          return;
+        }
       }
       return;
     }
 
-    // 2) Asegurar que el stage actual pertenece al _flowOrder
-    int idx = _flowOrder.indexOf(_stage);
-    if (idx == -1) {
-      _goToStage(_flowOrder.first);
-      idx = 0;
-    }
+    if (_curIdx < 0 || _curIdx >= _rules.length) _curIdx = 0;
 
-    // 3) Backtracking CONDICIONAL: solo si el stage actual NO está en dwell
-    //    y respetando reglas de no-interrupción y filtrado por tipo de stage.
-    final _FlowStage cur = _flowOrder[idx];
-    final _AxisGate curGate = _gateFor(cur);
+    final current = _rules[_curIdx];
 
-    final bool allowBacktrackNow =
-        !curGate.isDwell && !_noInterruptionWhileValidating(cur);
-
-    if (allowBacktrackNow) {
-      final _FlowStage? prevBreak = _firstPrevNotHoldingFiltered(
-        idx,
-        c,
-        (prev) => _shouldIgnorePrevBreak(cur, prev),
-      );
+    // Backtracking condicional: no si está en dwell ni si bloquea interrupción
+    final allowBacktrack = !current.gate.isDwell && !current.blockInterruptionDuringValidation;
+    if (allowBacktrack) {
+      final prevBreak = _firstPrevNotHoldingFiltered(_curIdx, c, current);
       if (prevBreak != null) {
-        _goToStage(prevBreak);
+        _curIdx = _rules.indexOf(prevBreak);
         return;
       }
     }
 
-    // 4) Actualizar/confirmar el gate del stage actual.
-    final _AxisGate gate = curGate;
-    final double metric = _metricFor(cur, c);
+    // Actualiza/Confirma el gate de la regla actual
+    final m = current.metric(c);
+    final confirmed = c.faceOk && (m != null) && current.gate.update(m, c.now);
+    if (!confirmed) return;
 
-    final bool confirmed = c.faceOk && gate.update(metric, c.now);
-    if (!confirmed) {
-      // Aún sin confirmar este stage: nos quedamos aquí.
+    // Revisa rupturas previas tras confirmar
+    final prevBreakAfter = _firstPrevNotHoldingFiltered(_curIdx, c, current);
+    if (prevBreakAfter != null && !current.blockInterruptionDuringValidation) {
+      _curIdx = _rules.indexOf(prevBreakAfter);
       return;
     }
 
-    // 5) Confirmado el actual: revalidar que los previos se mantienen (filtrado).
-    final _FlowStage? prevBreakAfterConfirm = _firstPrevNotHoldingFiltered(
-      idx,
-      c,
-      (prev) => _shouldIgnorePrevBreak(cur, prev),
-    );
-    if (prevBreakAfterConfirm != null && !_noInterruptionWhileValidating(cur)) {
-      _goToStage(prevBreakAfterConfirm);
-      return;
-    }
-
-    // 6) Avanzar al siguiente o terminar en DONE si era el último.
-    final bool isLast = (idx == _flowOrder.length - 1);
-    if (isLast) {
-      _goToStage(_FlowStage.done);
+    // Avanza o termina
+    if (_curIdx == _rules.length - 1) {
+      _curIdx = _rules.length; // DONE
     } else {
-      final _FlowStage nextStage = _flowOrder[idx + 1];
-      _goToStage(nextStage);
+      _curIdx++;
     }
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // (D) Choose hint + drive animation (suppressed during dwell)
+  // (D) Hint + animación
   // ─────────────────────────────────────────────────────────────────────
   _HintAnim _chooseHintAndUpdateAnimations(_EvalCtx c) {
     if (!c.faceOk) {
       _hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, null);
     }
-
-    // Shoulders take priority in shoulders stage
-    if (_stage == _FlowStage.shoulders && !c.shouldersInsideNow && !_shouldersGate.isDwell) {
+    if (_isDone) {
       _hideAnimationIfVisible();
-      String msg;
-      if (c.shouldersDegSigned != null) {
-        // positive ⇒ left shoulder lower than right
-        msg = (c.shouldersDegSigned! > 0)
-            ? 'Baja el hombro derecho o sube el izquierdo, un poco.'
-            : 'Baja el hombro izquierdo o sube el derecho, un poco.';
-      } else {
-        msg = 'Nivela los hombros, mantenlos horizontales.';
-      }
-      return _HintAnim(_Axis.none, msg);
+      return const _HintAnim(_Axis.none, null);
     }
-
-    // ⬇️ NEW: Torso azimuth hints (texto; sin animación)
-    if (_stage == _FlowStage.torso &&
-        !c.azimutInsideNow &&
-        !_azimutGate.isDwell) {
-      _hideAnimationIfVisible();
-      String msg;
-      if (c.azimutDegSigned != null) {
-        msg = (c.azimutDegSigned! > 0)
-            ? 'Gira ligeramente tu torso moviendo el hombro derecho hacia atrás'
-            : 'Gira ligeramente tu torso moviendo el hombro izquierdo hacia atrás';
-      } else {
-        msg = 'Alinea el torso al frente (cuadra los hombros con la cámara).';
-      }
-      return _HintAnim(_Axis.none, msg);
-    }
-
-    // Yaw
-    if (_stage == _FlowStage.yaw &&
-        c.yawDegForAnim != null &&
-        !c.yawInsideNow &&
-        !_yawGate.isDwell) {
-      _driveYawAnimation(c.yawDegForAnim!);
-      final hint = (c.yawDegForAnim! > 0)
-          ? 'Gira ligeramente la cabeza a la izquierda'
-          : 'Gira ligeramente la cabeza a la derecha';
-      return _HintAnim(_Axis.yaw, hint);
-    }
-
-    // Pitch
-    if (_stage == _FlowStage.pitch &&
-        c.pitchDegForAnim != null &&
-        !c.pitchInsideNow &&
-        !_pitchGate.isDwell) {
-      _drivePitchAnimation(c.pitchDegForAnim!);
-      final hint = (c.pitchDegForAnim! > 0)
-          ? 'Sube ligeramente la cabeza'
-          : 'Baja ligeramente la cabeza';
-      return _HintAnim(_Axis.pitch, hint);
-    }
-
-    // Roll (use delta to nearest 180°; honor deadzone)
-    if (_stage == _FlowStage.roll &&
-        c.rollDegForAnim != null &&
-        !c.rollInsideNow &&
-        !_rollGate.isDwell) {
-      final double delta = this._deltaToNearest180(c.rollDegForAnim!);
-      if (delta.abs() <= PoseCaptureController._rollHintDeadzoneDeg) {
-        _hideAnimationIfVisible();
-        return const _HintAnim(_Axis.none, null);
-      }
-      _driveRollAnimation(delta); // will mirror internally
-      final bool ccwForUser = mirror ? (delta < 0) : (delta > 0);
-      final hint = ccwForUser
-          ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
-          : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
-      return _HintAnim(_Axis.roll, hint);
-    }
-
-    _hideAnimationIfVisible();
-    return const _HintAnim(_Axis.none, null);
+    return _currentRule.buildHint(this, c);
   }
 
   void _driveYawAnimation(double yawDeg) {
@@ -667,12 +757,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
       showTurnRightSeq = true;
       notifyListeners();
     }
-    try { seq.play(); } catch (_) {}
+    try {
+      seq.play();
+    } catch (_) {}
   }
 
   void _hideAnimationIfVisible() {
     if (showTurnRightSeq) {
-      try { seq.pause(); } catch (_) {}
+      try {
+        seq.pause();
+      } catch (_) {}
       showTurnRightSeq = false;
       notifyListeners();
     }
@@ -685,9 +779,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
   // (E) HUD + countdown coordination
   // ─────────────────────────────────────────────────────────────────────
   void _updateHudAndCountdown(_EvalCtx c, _HintAnim ha) {
-    final bool allChecksOk =
-        c.faceOk &&
-        _stage == _FlowStage.done;
+    final bool allChecksOk = c.faceOk && _isDone;
 
     // global stability window (no extra hold; gates already enforce dwell)
     if (allChecksOk) {
@@ -746,12 +838,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
       PortraitUiModel(
         statusLabel: 'Adjusting',
         privacyLabel: cur.privacyLabel,
-        primaryMessage: faceOk
-            ? (_nullIfBlank(finalHint) ?? 'Mantén la cabeza recta')
-            : 'Ubica tu rostro dentro del óvalo',
+        primaryMessage: faceOk ? (_nullIfBlank(finalHint) ?? 'Mantén la cabeza recta') : 'Ubica tu rostro dentro del óvalo',
         secondaryMessage: null, // el mensaje accionable es primario
         checkFraming: faceOk ? Tri.ok : Tri.almost,
-        checkHead: faceOk ? (_stage == _FlowStage.done ? Tri.ok : Tri.almost) : Tri.pending,
+        checkHead: faceOk ? (_isDone ? Tri.ok : Tri.almost) : Tri.pending,
         checkEyes: Tri.almost,
         checkLighting: Tri.almost,
         checkBackground: Tri.almost,
@@ -760,5 +850,35 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ovalProgress: arcProgress,
       ),
     );
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// (F) Cinemática de ROLL (mantener compatibilidad con HUD/velocidades)
+// ───────────────────────────────────────────────────────────────────────
+extension _RollMathKinematics on PoseCaptureController {
+  /// Actualiza cinemática de roll usando el filtro modular (unwrap + EMA + dps)
+  /// y mantiene sincronizados los campos legados usados por HUD/onframe.
+  _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
+    final m = _rollFilter.update(rawRollDeg, now);
+
+    // Mantener compatibilidad
+    _rollSmoothedDeg = m.smoothedDeg;
+    _rollSmoothedAt = now;
+    _lastRollDps = m.dps;
+
+    // Si el usuario se mueve demasiado durante dwell, reinicia intento
+    final rollMax = _tuning.rollMaxDpsDuringDwell;
+    // Nota: si el _rollGate antiguo no se usa, este guard se mantiene
+    // porque la nueva regla de roll usa el mismo AxisGate internamente.
+    final rule = _findRule('roll');
+    if (rule != null && rule.gate.isDwell && m.dps.abs() > rollMax) {
+      rule.gate.resetTransient();
+    }
+
+    // (Opcional) sincronizar _emaRollDeg si tu HUD lo muestra
+    _emaRollDeg = m.smoothedDeg;
+
+    return _RollMetrics(m.errDeg, m.dps);
   }
 }

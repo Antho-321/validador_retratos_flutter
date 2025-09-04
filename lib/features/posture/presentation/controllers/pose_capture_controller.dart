@@ -30,11 +30,7 @@ enum _TurnDir { none, left, right }
 // Which overlay animation is currently active
 enum _Axis { none, yaw, pitch, roll }
 
-/// Sequential flow
-enum _FlowStage { torso, shoulders, yaw, pitch, roll, done }
-
 /// Axis stability gate with dwell + hysteresis + first-pass tightening.
-/// Implements Proposal 1 (+ touch of Proposal 2).
 enum _GateState { searching, dwell, confirmed }
 
 /// How to interpret the threshold comparison.
@@ -121,9 +117,6 @@ class _AxisGate {
   bool update(double metricDeg, DateTime now) {
     switch (_state) {
       case _GateState.searching:
-        // Si ya estamos en intentos ≥2 (_firstAttemptDone == true) y en modo estricto,
-        // cuando el usuario re-entra al band estricto, ampliamos a relajado
-        // y esperamos al próximo tick para iniciar dwell con band ampliado.
         if (_firstAttemptDone && _strictActive && _isOk(metricDeg, enterBand)) {
           _relax();
           return false; // no iniciamos dwell en este mismo update
@@ -132,7 +125,6 @@ class _AxisGate {
         if (_isOk(metricDeg, enterBand)) {
           if (!_firstAttemptDone) {
             _firstAttemptDone = true; // a partir de ahora hay “segundo intento”
-            // mantenemos el modo actual (estricto) hasta que este intento termine
           }
           _dwellStart = now;
           _state = _GateState.dwell;
@@ -141,11 +133,9 @@ class _AxisGate {
 
       case _GateState.dwell:
         if (!_isOk(metricDeg, exitBand)) {
-          // Rompe dwell → volvemos a searching
           _state = _GateState.searching;
           _dwellStart = null;
 
-          // Si ya era segundo intento (o más) y estábamos relajados, re-apretar.
           if (_firstAttemptDone && !_strictActive) {
             _retighten();
           }
@@ -162,11 +152,9 @@ class _AxisGate {
         final double relax = hasConfirmedOnce ? extraRelaxAfterFirst : 0.0;
         final double exitWithRelax = _withRelax(exitBand, relax);
         if (!_isOk(metricDeg, exitWithRelax)) {
-          // Pierde la confirmación → searching
           _state = _GateState.searching;
           _dwellStart = null;
 
-          // El siguiente intento comienza relajado (segundo intento).
           if (_firstAttemptDone) {
             _relax();
           }
@@ -426,7 +414,7 @@ class PoseCaptureController extends ChangeNotifier {
       speed: countdownSpeed,
       // ⇣ Si validationsEnabled está OFF, permite countdown/captura sin gates.
       isOkNow: () => validationsEnabled
-          ? (poseService.latestFrame.value != null && _stage == _FlowStage.done)
+          ? (poseService.latestFrame.value != null && this._isDone)
           : true,
       onTick: (seconds, progress) {
         _setHud(
@@ -495,7 +483,7 @@ class PoseCaptureController extends ChangeNotifier {
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
   final PortraitValidator _validator = const PortraitValidator();
 
-  // Angle thresholds (deg) — mantenidas por compatibilidad con ext onframe
+  // Angle thresholds (deg) — usados al registrar reglas (en el part file)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
   static const double _shouldersDeadbandDeg = 1.8;
@@ -505,52 +493,6 @@ class PoseCaptureController extends ChangeNotifier {
 
   // ⬇️ NEW: Torso azimut (deadband específico)
   static const double _azimutDeadbandDeg = 10;
-
-  // Axis gates (Proposal 1 + adjustments)
-  final _AxisGate _yawGate = _AxisGate(
-    baseDeadband: _yawDeadbandDeg,
-    tighten: 1.4,
-    hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1000),
-    extraRelaxAfterFirst: 0.2,
-  );
-  final _AxisGate _pitchGate = _AxisGate(
-    baseDeadband: _pitchDeadbandDeg,
-    tighten: 1.4,
-    hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1000),
-    extraRelaxAfterFirst: 0.2,
-  );
-
-  // ROLL: métrica unificada = **distancia a 180°** → insideIsOk (≤ umbral)
-  final _AxisGate _rollGate = _AxisGate(
-    baseDeadband: _rollErrorDeadbandDeg,
-    sense: _GateSense.insideIsOk, // unificado
-    tighten: 0.4,
-    hysteresis: 0.3,
-    dwell: Duration(milliseconds: 1000),
-    extraRelaxAfterFirst: 0.4,
-  );
-
-  // ⬇️ NEW: Shoulders
-  final _AxisGate _shouldersGate = _AxisGate(
-    baseDeadband: _shouldersDeadbandDeg,
-    sense: _GateSense.insideIsOk,
-    tighten: 1.6,
-    hysteresis: 0.2,
-    dwell: Duration(milliseconds: 1000),
-    extraRelaxAfterFirst: 0.2,
-  );
-
-  // ⬇️ NEW: Azimut (torso) gate
-  final _AxisGate _azimutGate = _AxisGate(
-    baseDeadband: _azimutDeadbandDeg,
-    sense: _GateSense.insideIsOk,
-    tighten: 1.6,
-    hysteresis: 0.25,
-    dwell: Duration(milliseconds: 1000),
-    extraRelaxAfterFirst: 0.3,
-  );
 
   // Keep current canvas size to map image↔canvas consistently.
   Size? _canvasSize;
@@ -614,9 +556,6 @@ class PoseCaptureController extends ChangeNotifier {
     final double target = 180.0 + 360.0 * k;
     return _wrapDeg180(target - curDeg);
   }
-
-  // Sequential flow stage
-  _FlowStage _stage = _FlowStage.torso;
 
   // ⬇️ NEW: factor para convertir z normalizada → píxeles (calibrable)
   double? _zToPxScale;
@@ -699,51 +638,6 @@ class PoseCaptureController extends ChangeNotifier {
 // ───────────────────────────────────────────────────────────────────────────
 // Modular helpers as extensions (same file, private)
 // ───────────────────────────────────────────────────────────────────────────
-
-extension _FlowHelpers on PoseCaptureController {
-  // Reset sequential flow (use when face lost or to restart the process)
-  void _resetFlow() {
-    _goToStage(_flowOrder.first); // antes: _stage = _FlowStage.yaw;
-    _yawGate.resetForNewStage();
-    _pitchGate.resetForNewStage();
-    _rollGate.resetForNewStage();
-    _shouldersGate.resetForNewStage();
-    _azimutGate.resetForNewStage();
-  }
-
-  // Helper: does a confirmed axis still hold its stability?
-  // Recuerda: para roll se debe pasar el **error** a 180° como metricDeg.
-  bool _isHolding(_AxisGate g, double metricDeg) {
-    final exit = g.exitBand;
-    final relax = g.hasConfirmedOnce ? g.extraRelaxAfterFirst : 0.0;
-    final bool inside = g.sense == _GateSense.insideIsOk;
-    // inside: ok si ≤ exit+relax; outside: ok si ≥ exit-relax
-    return inside ? (metricDeg <= exit + relax) : (metricDeg >= exit - relax);
-  }
-}
-
-extension _RollMathKinematics on PoseCaptureController {
-  /// Actualiza cinemática de roll usando el filtro modular (unwrap + EMA + dps)
-  /// y mantiene sincronizados los campos legados usados por onframe.
-  _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
-    final m = _rollFilter.update(rawRollDeg, now);
-
-    // ✅ Mantener compatibilidad con el onframe existente
-    _rollSmoothedDeg = m.smoothedDeg;
-    _rollSmoothedAt = now;
-    _lastRollDps = m.dps;
-
-    // Si el usuario se mueve demasiado durante dwell, reinicia intento
-    if (_rollGate.isDwell && m.dps.abs() > _tuning.rollMaxDpsDuringDwell) {
-      _rollGate.resetTransient();
-    }
-
-    // (Opcional) sincronizar _emaRollDeg si tu HUD lo muestra
-    _emaRollDeg = m.smoothedDeg;
-
-    return _RollMetrics(m.errDeg, m.dps);
-  }
-}
 
 extension _HudHelpers on PoseCaptureController {
   void _setHud(PortraitUiModel next, {bool force = false}) {
