@@ -72,6 +72,9 @@ class _AxisGate {
   bool get isDwell => _state == _GateState.dwell;
   bool get isConfirmed => _state == _GateState.confirmed;
 
+  bool get firstAttemptDone => _firstAttemptDone;
+  bool get isStrictActive => _strictActive;
+
   void resetTransient() {
     _state = _GateState.searching;
     _dwellStart = null;
@@ -491,8 +494,21 @@ class PoseCaptureController extends ChangeNotifier {
   static const double _maxOffDeg = 20.0;
   static const double _rollHintDeadzoneDeg = 0.3;
 
-  // ⬇️ NEW: Torso azimut (deadband específico)
-  static const double _azimutDeadbandDeg = 10;
+  static const double _azimutBandLoDeg = 4.5;
+  static const double _azimutBandHiDeg = 11;
+
+  // Distancia firmada a un rango [lo, hi]:
+  //   < 0  → dentro del rango (más negativo = más centrado)
+  //   = 0  → en el borde
+  //   > 0  → fuera (cuánto se sale)
+  static double _signedDistanceToBand(double deg, double lo, double hi) {
+    final l = math.min(lo, hi);
+    final h = math.max(lo, hi);
+    if (deg < l) return l - deg;            // por debajo del rango
+    if (deg > h) return deg - h;            // por encima del rango
+    final depth = math.min(deg - l, h - deg);
+    return -depth;                           // negativo = “adentro”
+  }
 
   // Keep current canvas size to map image↔canvas consistently.
   Size? _canvasSize;
@@ -592,6 +608,7 @@ class PoseCaptureController extends ChangeNotifier {
 
     double deg = math.atan2(dzPx, dxPx) * 180.0 / math.pi;
     if (mirror) deg = -deg;
+    //print('[AZIMUT] ${deg.toStringAsFixed(2)}°');
     return deg;
   }
 
