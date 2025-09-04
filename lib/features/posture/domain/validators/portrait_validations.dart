@@ -255,7 +255,6 @@ class PortraitValidator {
       final ang = geom.calcularAnguloHombros(poseLandmarksImg);
       if (ang != null) {
         shouldersDeg = _normalizeTilt90(ang);
-        //print('[SHOULDERS] ${shouldersDeg.toStringAsFixed(2)}°');
         final res = checkAngle(
           enabled: true,
           deg: shouldersDeg,
