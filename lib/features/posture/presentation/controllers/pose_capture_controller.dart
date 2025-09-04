@@ -489,7 +489,8 @@ class PoseCaptureController extends ChangeNotifier {
   // Angle thresholds (deg) — usados al registrar reglas (en el part file)
   static const double _yawDeadbandDeg = 2.2;
   static const double _pitchDeadbandDeg = 2.2;
-  static const double _shouldersDeadbandDeg = 1.8;
+  static const double _shouldersBandLoDeg = -2; // ⬅️ personaliza
+  static const double _shouldersBandHiDeg = 1.7; // ⬅️ personaliza
   static const double _rollErrorDeadbandDeg = 1.7;
   static const double _maxOffDeg = 20.0;
   static const double _rollHintDeadzoneDeg = 0.3;
@@ -608,7 +609,6 @@ class PoseCaptureController extends ChangeNotifier {
 
     double deg = math.atan2(dzPx, dxPx) * 180.0 / math.pi;
     if (mirror) deg = -deg;
-    //print('[AZIMUT] ${deg.toStringAsFixed(2)}°');
     return deg;
   }
 

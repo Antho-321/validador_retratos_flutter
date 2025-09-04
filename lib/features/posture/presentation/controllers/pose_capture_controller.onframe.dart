@@ -203,8 +203,25 @@ class _ShouldersRule extends _ValidationRule {
           blockInterruptionDuranteValidacion: true,
         );
 
+  /// Métrica firmada: distancia a [lo, hi] (negativa dentro, 0 en borde, positiva fuera).
   @override
-  double? metric(_EvalCtx c) => c.shouldersAbs;
+  double? metric(_EvalCtx c) {
+    final s = c.shouldersDegSigned;
+    if (s == null) return null;
+
+    final double delta = gate.hysteresis - gate.tighten;
+    final double expand = (delta > 0) ? delta : 0.0;
+
+    final double lo = gate.firstAttemptDone
+        ? (PoseCaptureController._shouldersBandLoDeg - expand)
+        : PoseCaptureController._shouldersBandLoDeg;
+
+    final double hi = gate.firstAttemptDone
+        ? (PoseCaptureController._shouldersBandHiDeg + expand)
+        : PoseCaptureController._shouldersBandHiDeg;
+
+    return PoseCaptureController._signedDistanceToBand(s, lo, hi);
+  }
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
@@ -412,11 +429,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
         dwell: const Duration(milliseconds: 1000),
         extraRelaxAfterFirst: 0.2,
       )),
+      // SHOULDERS: deadband personalizado asimétrico [lo, hi] + expansión post-estricto
       _ShouldersRule(_AxisGate(
-        baseDeadband: PoseCaptureController._shouldersDeadbandDeg,
+        baseDeadband: 0.0,                 // métrica = distancia firmada; 0 es el borde
         sense: _GateSense.insideIsOk,
-        tighten: 1.6,
-        hysteresis: 0.2,
+        tighten: 0.6,                      // profundidad extra en primer intento
+        hysteresis: 1.0,                   // si > tighten ⇒ expansión (expand = 0.4)
         dwell: const Duration(milliseconds: 1000),
         extraRelaxAfterFirst: 0.2,
       )),
@@ -537,11 +555,30 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final pose = poseService.latestPoseLandmarks; // image-space points
     if (faces == null || faces.isEmpty || canvas == null) return null;
 
-    // Deadbands actuales (usar gates de las reglas)
-    final yawDeadbandNow = (_findRule('yaw')?.gate.enterBand) ?? 2.2;
-    final pitchDeadbandNow = (_findRule('pitch')?.gate.enterBand) ?? 2.2;
-    final rollDeadbandNow = (_findRule('roll')?.gate.enterBand) ?? 1.7;
-    final shouldersDeadbandNow = (_findRule('shoulders')?.gate.enterBand) ?? 1.8;
+    // Gates actuales
+    final yawGateNow = _findRule('yaw')!.gate;
+    final pitchGateNow = _findRule('pitch')!.gate;
+    final rollGateNow = _findRule('roll')!.gate;
+    final shouldersGateNow = _findRule('shoulders')!.gate;
+    final azimutGateNow = _findRule('azimut')!.gate;
+
+    // Deadbands (enterBand) para yaw/pitch/roll
+    final double yawDeadbandNow = yawGateNow.enterBand;
+    final double pitchDeadbandNow = pitchGateNow.enterBand;
+    final double rollDeadbandNow = rollGateNow.enterBand;
+
+    // SHOULDERS: tolerancia SIMÉTRICA para el validador (para progreso/ok visual).
+    // Toma el lado más estrecho del rango asimétrico base y expande tras primer intento.
+    final double shouldersExpandNow =
+        math.max(0.0, shouldersGateNow.hysteresis - shouldersGateNow.tighten);
+
+    final double loDepth = (-PoseCaptureController._shouldersBandLoDeg).abs();
+    final double hiDepth = ( PoseCaptureController._shouldersBandHiDeg).abs();
+
+    double shouldersTolSymNow = math.min(loDepth, hiDepth);
+    if (shouldersGateNow.firstAttemptDone) {
+      shouldersTolSymNow += shouldersExpandNow;
+    }
 
     final report = _validator.evaluate(
       landmarksImg: faces.first,
@@ -567,7 +604,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       // shoulders (nivelación)
       poseLandmarksImg: pose,
       enableShoulders: true,
-      shouldersDeadbandDeg: shouldersDeadbandNow,
+      shouldersDeadbandDeg: shouldersTolSymNow, // ← dinámico simétrico para UI
       shouldersMaxOffDeg: PoseCaptureController._maxOffDeg,
     );
 
@@ -599,21 +636,14 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double rollErr = rollM.errDeg; // metric = distance to 180°
     final double shouldersAbs = report.shouldersDeg.abs();
 
-    // Helper: inside *enter* band now
+    // Helper: inside *enter* band now (con la métrica adecuada)
     bool insideEnter(_AxisGate g, double metric) {
       final th = g.enterBand;
       final inside = g.sense == _GateSense.insideIsOk;
       return inside ? (metric <= th) : (metric >= th);
     }
 
-    // Gates de las reglas para "inside now"
-    final yawGateNow = _findRule('yaw')!.gate;
-    final pitchGateNow = _findRule('pitch')!.gate;
-    final rollGateNow = _findRule('roll')!.gate;
-    final shouldersGateNow = _findRule('shoulders')!.gate;
-    final azimutGateNow = _findRule('azimut')!.gate;
-
-    // ✅ Azimut: usa la distancia firmada también para el flag "inside now".
+    // ✅ Azimut: usa distancia firmada a [lo,hi] para el flag "inside now".
     final double? azMetricSigned = (azimutDeg == null)
         ? null
         : PoseCaptureController._signedDistanceToBand(
@@ -625,6 +655,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final bool azInside = (azMetricSigned == null)
         ? true // sin Z ⇒ no bloquea
         : insideEnter(azimutGateNow, azMetricSigned);
+
+    // ✅ Shoulders: flag "inside now" con distancia firmada al rango BASE (sin expansión)
+    final double sMetricSignedBase =
+        PoseCaptureController._signedDistanceToBand(
+          report.shouldersDeg,
+          PoseCaptureController._shouldersBandLoDeg,
+          PoseCaptureController._shouldersBandHiDeg,
+        );
+
+    final bool shouldersInside = insideEnter(shouldersGateNow, sMetricSignedBase);
 
     return _EvalCtx(
       now: now,
@@ -643,7 +683,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       yawInsideNow: insideEnter(yawGateNow, yawAbs),
       pitchInsideNow: insideEnter(pitchGateNow, pitchAbs),
       rollInsideNow: insideEnter(rollGateNow, rollErr),
-      shouldersInsideNow: insideEnter(shouldersGateNow, shouldersAbs),
+      shouldersInsideNow: shouldersInside,
       azimutInsideNow: azInside,
     );
   }
