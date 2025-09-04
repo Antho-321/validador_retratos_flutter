@@ -38,7 +38,7 @@ class _EvalCtx {
   final double pitchAbs;
   final double rollErr; // error to 180°
   final double shouldersAbs;
-  final double azimutAbs; // |azimut| torso (deg) ⬅️ NEW
+  final double azimutAbs; // |azimut| azimut (deg) ⬅️ NEW
 
   final double? yawDegForAnim;
   final double? pitchDegForAnim;
@@ -71,7 +71,7 @@ abstract class _ValidationRule {
     this.blockInterruptionDuringValidation = false,
   });
 
-  /// Identificador estable de la regla (p.ej., 'torso', 'shoulders', 'yaw'...)
+  /// Identificador estable de la regla (p.ej., 'azimut', 'shoulders', 'yaw'...)
   final String id;
 
   /// Gate de estabilidad (deadband, hysteresis, dwell, tighten…)
@@ -101,10 +101,10 @@ abstract class _ValidationRule {
 
 // ── Reglas concretas ───────────────────────────────────────────────────
 
-class _TorsoRule extends _ValidationRule {
-  _TorsoRule(_AxisGate gate)
+class _AzimutRule extends _ValidationRule {
+  _AzimutRule(_AxisGate gate)
       : super(
-          id: 'torso',
+          id: 'azimut',
           gate: gate,
           blockInterruptionDuringValidation: true,
         );
@@ -121,8 +121,8 @@ class _TorsoRule extends _ValidationRule {
     ctrl._hideAnimationIfVisible();
     if (c.azimutDegSigned != null) {
       final msg = (c.azimutDegSigned! > 0)
-          ? 'Gira ligeramente tu torso moviendo el hombro derecho hacia atrás'
-          : 'Gira ligeramente tu torso moviendo el hombro izquierdo hacia atrás';
+          ? 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás'
+          : 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás';
       return _HintAnim(_Axis.none, msg);
     }
     return const _HintAnim(_Axis.none, 'Alinea el torso al frente (cuadra los hombros).');
@@ -164,7 +164,7 @@ class _YawRule extends _ValidationRule {
       : super(
           id: 'yaw',
           gate: gate,
-          ignorePrevBreakOf: const {'torso', 'shoulders'},
+          ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
 
   @override
@@ -189,7 +189,7 @@ class _PitchRule extends _ValidationRule {
       : super(
           id: 'pitch',
           gate: gate,
-          ignorePrevBreakOf: const {'torso', 'shoulders'},
+          ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
 
   @override
@@ -213,7 +213,7 @@ class _RollRule extends _ValidationRule {
       : super(
           id: 'roll',
           gate: gate,
-          ignorePrevBreakOf: const {'torso', 'shoulders'},
+          ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
 
   @override
@@ -332,7 +332,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     if (got != null) return got;
 
     final list = <_ValidationRule>[
-      _TorsoRule(_AxisGate(
+      _AzimutRule(_AxisGate(
         baseDeadband: PoseCaptureController._azimutDeadbandDeg,
         sense: _GateSense.insideIsOk,
         tighten: 1.6,
@@ -515,7 +515,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
     final _RollMetrics rollM = updateRollKinematics(report.rollDeg, now);
 
-    // Azimut biacromial (torsión torso)
+    // Azimut biacromial (torsión azimut)
     final double? azimutDeg = _estimateAzimutBiacromial();
     final double azimutAbs = azimutDeg?.abs() ?? 0.0;
 
@@ -536,7 +536,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final pitchGateNow = _findRule('pitch')!.gate;
     final rollGateNow = _findRule('roll')!.gate;
     final shouldersGateNow = _findRule('shoulders')!.gate;
-    final azimutGateNow = _findRule('torso')!.gate;
+    final azimutGateNow = _findRule('azimut')!.gate;
 
     return _EvalCtx(
       now: now,
