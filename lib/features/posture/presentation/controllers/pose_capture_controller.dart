@@ -20,7 +20,7 @@ import '../../domain/validators/portrait_validations.dart'
 // ⬇️ NEW: centralized, data-driven thresholds & bands
 import '../../domain/validation_profile.dart' show ValidationProfile, GateSense;
 
-// ⬇️ add this line:
+import '../../domain/metrics/pose_geometry.dart' as geom;  // ⬅️ NUEVO
 part 'pose_capture_controller.onframe.dart';
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
@@ -551,39 +551,7 @@ class PoseCaptureController extends ChangeNotifier {
   double? _zToPxScale;
   void setZtoPxScale(double s) => _zToPxScale = s;
 
-  /// ⬇️ NEW: Estimación de azimut biacromial (torso yaw) en grados.
-  /// Usa hombros 3D (índices 11, 12). Devuelve null si no hay 3D.
-  double? _estimateAzimutBiacromial() {
-    final lms3d = poseService.latestPoseLandmarks3D;
-    if (lms3d == null || lms3d.length <= 12) return null;
-
-    final ls = lms3d[11]; // left shoulder
-    final rs = lms3d[12]; // right shoulder
-
-    // z is nullable → guard it
-    final double? rz = rs.z;
-    final double? lz = ls.z;
-    if (rz == null || lz == null) return null; // no depth this frame
-
-    final double dx = (rs.x - ls.x);
-    final double dxPx = dx.abs();
-    if (dxPx <= 1e-6) return 0.0;
-
-    // ensure this is double, not num
-    final double imgW =
-        poseService.latestFrame.value?.imageSize.width ??
-        _canvasSize?.width ??
-        640.0;
-
-    final double zToPx = (_zToPxScale ?? imgW);
-
-    // now safe: rz/lz are non-null doubles
-    final double dzPx = (rz - lz) * zToPx;
-
-    double deg = math.atan2(dzPx, dxPx) * 180.0 / math.pi;
-    if (mirror) deg = -deg;
-    return deg;
-  }
+  
 
   // Fallback snapshot closure (widget provides it)
   SnapshotFn? _fallbackSnapshot;

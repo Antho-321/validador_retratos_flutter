@@ -660,8 +660,15 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
     final _RollMetrics rollM = updateRollKinematics(report.rollDeg, now);
 
-    // Azimut biacromial (torsión azimut)
-    final double? azimutDeg = _estimateAzimutBiacromial();
+    // Azimut biacromial (torsión azimut) – ahora desde geom (3D)
+    final lms3d = poseService.latestPoseLandmarks3D;
+    final double imgW = (frame.imageSize.width).toDouble();
+    final double zToPx = (_zToPxScale ?? imgW).toDouble();
+    final double? azimutDeg = geom.estimateAzimutBiacromial3D(
+      poseLandmarks3D: lms3d,
+      zToPx: zToPx,
+      mirror: mirror,
+    );
     final double azimutAbs = azimutDeg?.abs() ?? 0.0;
 
     final double yawAbs = _emaYawDeg!.abs();

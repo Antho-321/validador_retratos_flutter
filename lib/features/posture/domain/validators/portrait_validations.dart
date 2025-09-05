@@ -163,7 +163,7 @@ class PortraitValidator {
     }
 
     // ── Face-in-oval (in canvas space, respecting fit/mirror) ────────────
-    final mapped = _mapImagePointsToCanvas(
+    final mapped = geom.mapImagePointsToCanvas(
       points: landmarksImg,
       imageSize: imageSize,
       canvasSize: canvasSize,
@@ -302,62 +302,6 @@ class PortraitValidator {
       ovalProgress: ringProgress,
       allChecksOk: allOk,
     );
-  }
-
-  /// Map image-space (px) points to canvas-space, respecting BoxFit + mirror.
-  List<Offset> _mapImagePointsToCanvas({
-    required List<Offset> points,
-    required Size imageSize,
-    required Size canvasSize,
-    required bool mirror,
-    required BoxFit fit,
-  }) {
-    final iw = imageSize.width;
-    final ih = imageSize.height;
-    final cw = canvasSize.width;
-    final ch = canvasSize.height;
-
-    double scale, dx, dy, sw, sh;
-
-    switch (fit) {
-      case BoxFit.contain:
-        scale = _min(cw / iw, ch / ih);
-        sw = iw * scale;
-        sh = ih * scale;
-        dx = (cw - sw) / 2.0;
-        dy = (ch - sh) / 2.0;
-        break;
-      case BoxFit.cover:
-        scale = _max(cw / iw, ch / ih);
-        sw = iw * scale;
-        sh = ih * scale;
-        dx = (cw - sw) / 2.0;
-        dy = (ch - sh) / 2.0;
-        break;
-      case BoxFit.fill:
-        final sx = cw / iw;
-        final sy = ch / ih;
-        return points.map((p) {
-          final xScaled = p.dx * (mirror ? -sx : sx);
-          final xPos = mirror ? (cw + xScaled) : xScaled;
-          final yPos = p.dy * sy;
-          return Offset(xPos, yPos);
-        }).toList();
-      default:
-        scale = _min(cw / iw, ch / ih);
-        sw = iw * scale;
-        sh = ih * scale;
-        dx = (cw - sw) / 2.0;
-        dy = (ch - sh) / 2.0;
-        break;
-    }
-
-    return points.map((p) {
-      final xScaled = p.dx * scale;
-      final yScaled = p.dy * scale;
-      final xFit = mirror ? (sw - xScaled) : xScaled;
-      return Offset(dx + xFit, dy + yScaled);
-    }).toList();
   }
 
   double _normalizeTilt90(double a) {
