@@ -7,7 +7,7 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary; // kept for types
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'dart:ui' show Size;
+import 'dart:ui' show Size, Offset;
 import 'package:flutter/painting.dart' show BoxFit;
 
 import '../../services/pose_webrtc_service.dart';
@@ -21,6 +21,8 @@ import '../../domain/validators/portrait_validations.dart'
 import '../../domain/validation_profile.dart' show ValidationProfile, GateSense;
 
 import '../../domain/metrics/pose_geometry.dart' as geom;  // ⬅️ NUEVO
+import '../../domain/metrics/metrics.dart'
+    show MetricRegistry, FrameInputs, MetricKeys;
 part 'pose_capture_controller.onframe.dart';
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
@@ -441,6 +443,9 @@ class PoseCaptureController extends ChangeNotifier {
         _readySince = null;
       },
     );
+
+    // ⬇️ NEW: registra los providers de métricas (una sola vez)
+    _ensureMetricsRegisteredOnce();
   }
 
   // ── External deps/config ──────────────────────────────────────────────
@@ -551,12 +556,122 @@ class PoseCaptureController extends ChangeNotifier {
   double? _zToPxScale;
   void setZtoPxScale(double s) => _zToPxScale = s;
 
-  
-
   // Fallback snapshot closure (widget provides it)
   SnapshotFn? _fallbackSnapshot;
   void setFallbackSnapshot(SnapshotFn fn) {
     _fallbackSnapshot = fn;
+  }
+
+  // ── Métricas (registro y providers) ───────────────────────────────────
+  final MetricRegistry _metricRegistry = MetricRegistry();
+
+  bool _metricsReady = false;
+  void _ensureMetricsRegisteredOnce() {
+    if (_metricsReady) return;
+    _metricsReady = true;
+    _registerDefaultMetricProviders();
+  }
+
+  void _registerDefaultMetricProviders() {
+    final p = profile;
+
+    // |YAW|
+    _metricRegistry.register(MetricKeys.yawAbs, (i) {
+      if (i.landmarksImg == null) return null;
+      final r = _validator.evaluate(
+        landmarksImg: i.landmarksImg!,
+        imageSize: i.imageSize,
+        canvasSize: i.canvasSize,
+        mirror: i.mirror,
+        fit: i.fit,
+        minFractionInside: p.face.minFractionInside,
+        eps: p.face.eps,
+        enableYaw: true,
+        yawDeadbandDeg: p.yaw.baseDeadband,
+        yawMaxOffDeg: p.yaw.maxOffDeg,
+        enablePitch: false,
+        enableRoll: false,
+        enableShoulders: false,
+      );
+      return r.yawDeg.abs();
+    });
+
+    // |PITCH|
+    _metricRegistry.register(MetricKeys.pitchAbs, (i) {
+      if (i.landmarksImg == null) return null;
+      final r = _validator.evaluate(
+        landmarksImg: i.landmarksImg!,
+        imageSize: i.imageSize,
+        canvasSize: i.canvasSize,
+        mirror: i.mirror,
+        fit: i.fit,
+        minFractionInside: p.face.minFractionInside,
+        eps: p.face.eps,
+        enableYaw: false,
+        enablePitch: true,
+        pitchDeadbandDeg: p.pitch.baseDeadband,
+        pitchMaxOffDeg: p.pitch.maxOffDeg,
+        enableRoll: false,
+        enableShoulders: false,
+      );
+      return r.pitchDeg.abs();
+    });
+
+    // Roll → error a 180°
+    _metricRegistry.register(MetricKeys.rollErr, (i) {
+      if (i.landmarksImg == null) return null;
+      final r = _validator.evaluate(
+        landmarksImg: i.landmarksImg!,
+        imageSize: i.imageSize,
+        canvasSize: i.canvasSize,
+        mirror: i.mirror,
+        fit: i.fit,
+        minFractionInside: p.face.minFractionInside,
+        eps: p.face.eps,
+        enableYaw: false,
+        enablePitch: false,
+        enableRoll: true,
+        rollDeadbandDeg: p.roll.baseDeadband,
+        rollMaxOffDeg: p.roll.maxOffDeg,
+        enableShoulders: false,
+      );
+      final delta = _deltaToNearest180(r.rollDeg);
+      return delta.abs();
+    });
+
+    // Hombros firmados (2D)
+    _metricRegistry.register(MetricKeys.shouldersSigned, (i) {
+      if (i.poseLandmarksImg == null) return null;
+      final r = _validator.evaluate(
+        landmarksImg: i.landmarksImg ?? const <Offset>[], // cumplir firma no-null
+        imageSize: i.imageSize,
+        canvasSize: i.canvasSize,
+        mirror: i.mirror,
+        fit: i.fit,
+        enableYaw: false,
+        enablePitch: false,
+        enableRoll: false,
+        enableShoulders: true,
+        poseLandmarksImg: i.poseLandmarksImg,
+        shouldersDeadbandDeg:
+            math.min(p.shouldersBand.lo.abs(), p.shouldersBand.hi.abs()),
+        shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
+        minFractionInside: p.face.minFractionInside,
+        eps: p.face.eps,
+      );
+      return r.shouldersDeg; // firmado
+    });
+
+    // Azimut del torso (3D)
+    _metricRegistry.register(MetricKeys.azimutSigned, (i) {
+      if (i.poseLandmarks3D == null) return null;
+      final double zToPx = _zToPxScale ?? i.imageSize.width; // fallback
+      return geom.estimateAzimutBiacromial3D(
+        poseLandmarks3D: i.poseLandmarks3D,
+        zToPx: zToPx,
+        mirror: i.mirror,
+      );
+    });
   }
 
   // ── Suscripción de frames (por instancia) ─────────────────────────────

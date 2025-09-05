@@ -7,50 +7,27 @@ class _EvalCtx {
     required this.now,
     required this.faceOk,
     required this.arcProgress,
+    required this.inputs,
+    required this.metrics,
 
-    // filtered metrics for gating/UX
-    required this.yawAbs,
-    required this.pitchAbs,
-    required this.rollErr,
-    required this.shouldersAbs,
-    required this.azimutAbs, // |azimut| solo para UI/debug
-
-    // raw-for-UX directions
+    // Valores firmados (suavizados) SOLO para animaciones/HUD
     this.yawDegForAnim,
     this.pitchDegForAnim,
     this.rollDegForAnim,
-    this.shouldersDegSigned,
-    this.azimutDegSigned,
-
-    // “inside now” flags at current enter-band
-    required this.yawInsideNow,
-    required this.pitchInsideNow,
-    required this.rollInsideNow,
-    required this.shouldersInsideNow,
-    required this.azimutInsideNow,
   });
 
   final DateTime now;
   final bool faceOk;
   final double arcProgress;
 
-  final double yawAbs;
-  final double pitchAbs;
-  final double rollErr; // error to 180°
-  final double shouldersAbs;
-  final double azimutAbs; // |azimut| (deg) para UI/debug
+  /// Frame inputs + metric registry (pluggable)
+  final FrameInputs inputs;
+  final MetricRegistry metrics;
 
+  /// Valores suavizados para animaciones (no para gating)
   final double? yawDegForAnim;
   final double? pitchDegForAnim;
   final double? rollDegForAnim; // smoothed + unwrapped
-  final double? shouldersDegSigned;
-  final double? azimutDegSigned; // firmado para hints
-
-  final bool yawInsideNow;
-  final bool pitchInsideNow;
-  final bool rollInsideNow;
-  final bool shouldersInsideNow;
-  final bool azimutInsideNow;
 }
 
 class _HintAnim {
@@ -62,6 +39,26 @@ class _HintAnim {
 // Map domain GateSense → internal _GateSense
 _GateSense _mapSense(GateSense s) =>
     s == GateSense.insideIsOk ? _GateSense.insideIsOk : _GateSense.outsideIsOk;
+
+// ───────────────────────────────────────────────────────────────────────
+// Helpers para “inside now” (calculados on-demand por regla)
+// ───────────────────────────────────────────────────────────────────────
+
+bool _insideNowScalar(_AxisGate g, double value) {
+  final th = g.enterBand;
+  final inside = g.sense == _GateSense.insideIsOk;
+  return inside ? (value <= th) : (value >= th);
+}
+
+bool _insideNowSignedBand(
+  _AxisGate g, {
+  required double angleDeg,
+  required double lo,
+  required double hi,
+}) {
+  final dist = PoseCaptureController._signedDistanceToBand(angleDeg, lo, hi);
+  return _insideNowScalar(g, dist);
+}
 
 // ───────────────────────────────────────────────────────────────────────
 // Reglas plug-in (arquitectura data-driven para añadir validaciones fácil)
@@ -94,12 +91,9 @@ abstract class _ValidationRule {
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c);
 
   /// Conveniencia: ¿está dentro del enter-band actual?
-  bool insideNow(_EvalCtx c) {
-    final m = metric(c);
+  bool insideNowWith(double? m) {
     if (m == null) return true;
-    final th = gate.enterBand;
-    final inside = gate.sense == _GateSense.insideIsOk;
-    return inside ? (m <= th) : (m >= th);
+    return _insideNowScalar(gate, m);
   }
 }
 
@@ -118,34 +112,44 @@ class _AzimutRule extends _ValidationRule {
   // ✅ Métrica firmada: negativa dentro de [lo, hi], 0 en borde, positiva fuera.
   @override
   double? metric(_EvalCtx c) {
-    final d = c.azimutDegSigned;
-    if (d == null) return null;
+    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
+    if (a == null) return null;
 
-    // Δ de expansión derivado del gate
     final double delta = gate.hysteresis - gate.tighten;
     final double expand = (delta > 0) ? delta : 0.0;
 
-    final double lo = gate.firstAttemptDone
-        ? (profile.azimutBand.lo - expand)
-        : profile.azimutBand.lo;
+    final double lo = (gate.firstAttemptDone
+            ? (profile.azimutBand.lo - expand)
+            : profile.azimutBand.lo)
+        .toDouble();
 
-    final double hi = gate.firstAttemptDone
-        ? (profile.azimutBand.hi + expand)
-        : profile.azimutBand.hi;
+    final double hi = (gate.firstAttemptDone
+            ? (profile.azimutBand.hi + expand)
+            : profile.azimutBand.hi)
+        .toDouble();
 
-    return PoseCaptureController._signedDistanceToBand(d, lo, hi);
+    return PoseCaptureController._signedDistanceToBand(a, lo, hi);
   }
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    // Si ya estás en dwell o "inside now", muestra mantener
-    if (gate.isDwell || c.azimutInsideNow) {
+    // Si ya estás en dwell o “inside now”, muestra mantener
+    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
+    final bool insideNow = (a == null)
+        ? true
+        : _insideNowSignedBand(
+            gate,
+            angleDeg: a,
+            lo: profile.azimutBand.lo.toDouble(),
+            hi: profile.azimutBand.hi.toDouble(),
+          );
+
+    if (gate.isDwell || insideNow) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén el torso recto');
     }
     ctrl._hideAnimationIfVisible();
 
-    final a = c.azimutDegSigned;
     if (a == null) {
       return const _HintAnim(
         _Axis.none,
@@ -154,8 +158,8 @@ class _AzimutRule extends _ValidationRule {
     }
 
     // Límites del estricto: [lo+tighten ; hi-tighten]
-    final double strictLo = profile.azimutBand.lo + gate.tighten;
-    final double strictHi = profile.azimutBand.hi - gate.tighten;
+    final double strictLo = (profile.azimutBand.lo + gate.tighten).toDouble();
+    final double strictHi = (profile.azimutBand.hi - gate.tighten).toDouble();
 
     if (!gate.firstAttemptDone) {
       // Antes de tocar el estricto:
@@ -177,8 +181,10 @@ class _AzimutRule extends _ValidationRule {
 
     // Después de tocar el estricto: usamos el band expandido para hints
     final double expand2 = (gate.hysteresis - gate.tighten);
-    final double loExp = profile.azimutBand.lo - (expand2 > 0 ? expand2 : 0.0);
-    final double hiExp = profile.azimutBand.hi + (expand2 > 0 ? expand2 : 0.0);
+    final double loExp =
+        (profile.azimutBand.lo - (expand2 > 0 ? expand2 : 0.0)).toDouble();
+    final double hiExp =
+        (profile.azimutBand.hi + (expand2 > 0 ? expand2 : 0.0)).toDouble();
 
     if (a < loExp) {
       return const _HintAnim(
@@ -211,33 +217,43 @@ class _ShouldersRule extends _ValidationRule {
   /// Métrica firmada: distancia a [lo, hi] (negativa dentro, 0 en borde, positiva fuera).
   @override
   double? metric(_EvalCtx c) {
-    final s = c.shouldersDegSigned;
+    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
     if (s == null) return null;
 
     final double delta = gate.hysteresis - gate.tighten;
     final double expand = (delta > 0) ? delta : 0.0;
 
-    final double lo = gate.firstAttemptDone
-        ? (profile.shouldersBand.lo - expand)
-        : profile.shouldersBand.lo;
+    final double lo = (gate.firstAttemptDone
+            ? (profile.shouldersBand.lo - expand)
+            : profile.shouldersBand.lo)
+        .toDouble();
 
-    final double hi = gate.firstAttemptDone
-        ? (profile.shouldersBand.hi + expand)
-        : profile.shouldersBand.hi;
+    final double hi = (gate.firstAttemptDone
+            ? (profile.shouldersBand.hi + expand)
+            : profile.shouldersBand.hi)
+        .toDouble();
 
     return PoseCaptureController._signedDistanceToBand(s, lo, hi);
   }
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (c.shouldersInsideNow || gate.isDwell) {
+    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
+    final bool insideNow = (s == null)
+        ? true
+        : _insideNowSignedBand(
+            gate,
+            angleDeg: s,
+            lo: profile.shouldersBand.lo.toDouble(),
+            hi: profile.shouldersBand.hi.toDouble(),
+          );
+
+    if (insideNow || gate.isDwell) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén los hombros nivelados');
     }
     ctrl._hideAnimationIfVisible();
 
-    // ✔️ Usar SHOULDERS, no azimut
-    final s = c.shouldersDegSigned;
     if (s != null) {
       final msg = (s > 0)
           ? 'Baja un poco el hombro derecho o sube el izquierdo'
@@ -261,11 +277,14 @@ class _YawRule extends _ValidationRule {
         );
 
   @override
-  double? metric(_EvalCtx c) => c.yawAbs;
+  double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.yawAbs, c.inputs);
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (c.yawInsideNow || gate.isDwell || c.yawDegForAnim == null) {
+    final yawAbs = metric(c);
+    final insideNow = insideNowWith(yawAbs);
+
+    if (insideNow || gate.isDwell || c.yawDegForAnim == null) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, null);
     }
@@ -286,11 +305,14 @@ class _PitchRule extends _ValidationRule {
         );
 
   @override
-  double? metric(_EvalCtx c) => c.pitchAbs;
+  double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.pitchAbs, c.inputs);
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (c.pitchInsideNow || gate.isDwell || c.pitchDegForAnim == null) {
+    final pitchAbs = metric(c);
+    final insideNow = insideNowWith(pitchAbs);
+
+    if (insideNow || gate.isDwell || c.pitchDegForAnim == null) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, null);
     }
@@ -310,11 +332,15 @@ class _RollRule extends _ValidationRule {
         );
 
   @override
-  double? metric(_EvalCtx c) => c.rollErr; // distancia a 180° (≤ umbral = OK)
+  double? metric(_EvalCtx c) =>
+      c.metrics.get(MetricKeys.rollErr, c.inputs); // distancia a 180°
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (c.rollInsideNow || gate.isDwell || c.rollDegForAnim == null) {
+    final rollErr = metric(c);
+    final insideNow = insideNowWith(rollErr);
+
+    if (insideNow || gate.isDwell || c.rollDegForAnim == null) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, null);
     }
@@ -325,8 +351,9 @@ class _RollRule extends _ValidationRule {
     }
     ctrl._driveRollAnimation(delta);
     final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
-    final hint =
-        ccwForUser ? 'Rota ligeramente tu cabeza en sentido horario ⟳' : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
+    final hint = ccwForUser
+        ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
+        : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
     return _HintAnim(_Axis.roll, hint);
   }
 }
@@ -346,6 +373,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // ── Modo sin validaciones ──────────────────────────────────────────
     if (!validationsEnabled) {
+      _hideAnimationIfVisible(); 
       if (frame == null) {
         _stopCountdown();
         final cur = hud.value;
@@ -409,9 +437,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _advanceFlowAndBacktrack(ctx);
 
     // 3) Hint/animación de la regla actual
-    final _HintAnim ha = _isDone
-        ? const _HintAnim(_Axis.none, null)
-        : _currentRule.buildHint(this, ctx);
+    final _HintAnim ha = _chooseHintAndUpdateAnimations(ctx);
 
     // 4) HUD + countdown
     _updateHudAndCountdown(ctx, ha);
@@ -428,7 +454,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final p = profile;
 
     final list = <_ValidationRule>[
-      // AZIMUT: métrica firmada (negativa dentro) ⇒ baseDeadband = 0.0 con tighten
+      // AZIMUT
       _AzimutRule(
         p,
         _AxisGate(
@@ -441,7 +467,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ),
       ),
 
-      // SHOULDERS: deadband personalizado asimétrico [lo, hi] + expansión post-estricto
+      // SHOULDERS
       _ShouldersRule(
         p,
         _AxisGate(
@@ -573,47 +599,63 @@ extension _OnFrameLogicExt on PoseCaptureController {
   }
 
   // ─────────────────────────────────────────────────────────────────────
-  // (B) Evaluate current frame → compute metrics, enter-bands, EMA/unwrap
+  // (B) Evaluate current frame → build FrameInputs + HUD anim metrics
   // ─────────────────────────────────────────────────────────────────────
   _EvalCtx? _evaluateCurrentFrame(dynamic frame) {
     final faces = poseService.latestFaceLandmarks;
     final canvas = _canvasSize;
     final pose = poseService.latestPoseLandmarks; // image-space points
+    final lms3d = poseService.latestPoseLandmarks3D; // List<PosePoint>?
     if (faces == null || faces.isEmpty || canvas == null) return null;
 
-    // Gates actuales
+    final now = DateTime.now();
+
+    // Mapea PosePoint → records ({x,y,z}) para cumplir FrameInputs
+    final lms3dRec = lms3d?.map((p) => (x: p.x.toDouble(), y: p.y.toDouble(), z: (p.z ?? 0.0).toDouble())).toList();
+
+    // Construye Inputs UNA sola vez para este frame
+    final inputs = FrameInputs(
+      now: now,
+      landmarksImg: faces.first,
+      poseLandmarksImg: pose,
+      poseLandmarks3D: lms3dRec,
+      imageSize: frame.imageSize,
+      canvasSize: canvas,
+      mirror: mirror,
+      fit: BoxFit.cover,
+    );
+
+    // Limpia el registry (lazy cache por frame)
+    _metricRegistry.clear();
+
+    // Gates actuales (para pasar deadbands al validador HUD y suavizados)
     final yawGateNow = _findRule('yaw')!.gate;
     final pitchGateNow = _findRule('pitch')!.gate;
     final rollGateNow = _findRule('roll')!.gate;
     final shouldersGateNow = _findRule('shoulders')!.gate;
-    final azimutGateNow = _findRule('azimut')!.gate;
 
-    // Deadbands (enterBand) para yaw/pitch/roll
     final double yawDeadbandNow = yawGateNow.enterBand;
     final double pitchDeadbandNow = pitchGateNow.enterBand;
     final double rollDeadbandNow = rollGateNow.enterBand;
 
     // SHOULDERS: tolerancia SIMÉTRICA para el validador (para progreso/ok visual).
-    // Toma el lado más estrecho del rango asimétrico base y expande tras primer intento.
     final p = profile;
-
     final double shouldersExpandNow =
         math.max(0.0, shouldersGateNow.hysteresis - shouldersGateNow.tighten);
-
-    final double loDepth = p.shouldersBand.lo.abs();
-    final double hiDepth = p.shouldersBand.hi.abs();
-
+    final double loDepth = p.shouldersBand.lo.abs().toDouble();
+    final double hiDepth = p.shouldersBand.hi.abs().toDouble();
     double shouldersTolSymNow = math.min(loDepth, hiDepth);
     if (shouldersGateNow.firstAttemptDone) {
       shouldersTolSymNow += shouldersExpandNow;
     }
 
+    // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final report = _validator.evaluate(
-      landmarksImg: faces.first,
-      imageSize: frame.imageSize,
-      canvasSize: canvas,
-      mirror: mirror,
-      fit: BoxFit.cover,
+      landmarksImg: inputs.landmarksImg!, // ya comprobado arriba
+      imageSize: inputs.imageSize,
+      canvasSize: inputs.canvasSize,
+      mirror: inputs.mirror,
+      fit: inputs.fit,
 
       // Face-in-oval
       minFractionInside: p.face.minFractionInside,
@@ -632,99 +674,50 @@ extension _OnFrameLogicExt on PoseCaptureController {
       // Roll
       enableRoll: true,
       rollDeadbandDeg: rollDeadbandNow,
-      rollMaxOffDeg: p.roll.maxOffDeg, // opcional si no se usa
+      rollMaxOffDeg: p.roll.maxOffDeg,
 
       // Shoulders (nivelación)
-      poseLandmarksImg: pose,
+      poseLandmarksImg: inputs.poseLandmarksImg,
       enableShoulders: true,
       shouldersDeadbandDeg: shouldersTolSymNow, // ← dinámico simétrico para UI
       shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
     );
 
-    final now = DateTime.now();
     final bool faceOk = report.faceInOval;
     final double arcProgress = report.ovalProgress;
 
-    // EMA para yaw/pitch
+    // EMA para yaw/pitch (solo para animaciones)
     final double dtMs = (_lastSampleAt == null)
         ? 16.0
-        : now.difference(_lastSampleAt!).inMilliseconds.toDouble().clamp(1.0, 1000.0);
+        : now
+            .difference(_lastSampleAt!)
+            .inMilliseconds
+            .toDouble()
+            .clamp(1.0, 1000.0);
     final double a = 1 - math.exp(-dtMs / PoseCaptureController._emaTauMs);
     _lastSampleAt ??= now;
 
-    _emaYawDeg = (_emaYawDeg == null) ? report.yawDeg : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
-    _emaPitchDeg =
-        (_emaPitchDeg == null) ? report.pitchDeg : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
+    _emaYawDeg = (_emaYawDeg == null)
+        ? report.yawDeg
+        : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
+    _emaPitchDeg = (_emaPitchDeg == null)
+        ? report.pitchDeg
+        : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
     _lastSampleAt = now;
 
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
-    final _RollMetrics rollM = updateRollKinematics(report.rollDeg, now);
+    updateRollKinematics(report.rollDeg, now); // _emaRollDeg se sincroniza adentro
 
-    // Azimut biacromial (torsión azimut) – ahora desde geom (3D)
-    final lms3d = poseService.latestPoseLandmarks3D;
-    final double imgW = frame.imageSize.width; // ya es double
-    final double zToPx = _zToPxScale ?? imgW;
-    final double? azimutDeg = geom.estimateAzimutBiacromial3D(
-      poseLandmarks3D: lms3d,
-      zToPx: zToPx,
-      mirror: mirror,
-    );
-    final double azimutAbs = azimutDeg?.abs() ?? 0.0;
-
-    final double yawAbs = _emaYawDeg!.abs();
-    final double pitchAbs = _emaPitchDeg!.abs();
-    final double rollErr = rollM.errDeg; // metric = distance to 180°
-    final double shouldersAbs = report.shouldersDeg.abs();
-
-    // Helper: inside *enter* band now (con la métrica adecuada)
-    bool insideEnter(_AxisGate g, double metric) {
-      final th = g.enterBand;
-      final inside = g.sense == _GateSense.insideIsOk;
-      return inside ? (metric <= th) : (metric >= th);
-    }
-
-    // ✅ Azimut: usa distancia firmada a [lo,hi] para el flag "inside now".
-    final double? azMetricSigned = (azimutDeg == null)
-        ? null
-        : PoseCaptureController._signedDistanceToBand(
-            azimutDeg,
-            p.azimutBand.lo,
-            p.azimutBand.hi,
-          );
-
-    final bool azInside = (azMetricSigned == null)
-        ? true // sin Z ⇒ no bloquea
-        : insideEnter(azimutGateNow, azMetricSigned);
-
-    // ✅ Shoulders: flag "inside now" con distancia firmada al rango BASE (sin expansión)
-    final double sMetricSignedBase =
-        PoseCaptureController._signedDistanceToBand(
-          report.shouldersDeg,
-          p.shouldersBand.lo,
-          p.shouldersBand.hi,
-        );
-
-    final bool shouldersInside = insideEnter(shouldersGateNow, sMetricSignedBase);
-
+    // Devuelve contexto mínimo: inputs + registry + flags de HUD
     return _EvalCtx(
       now: now,
       faceOk: faceOk,
       arcProgress: arcProgress,
-      yawAbs: yawAbs,
-      pitchAbs: pitchAbs,
-      rollErr: rollErr,
-      shouldersAbs: shouldersAbs,
-      azimutAbs: azimutAbs, // solo UI/debug
+      inputs: inputs,
+      metrics: _metricRegistry,
       yawDegForAnim: _emaYawDeg,
       pitchDegForAnim: _emaPitchDeg,
       rollDegForAnim: _emaRollDeg, // smoothed/unwrapped
-      shouldersDegSigned: report.shouldersDeg,
-      azimutDegSigned: azimutDeg,
-      yawInsideNow: insideEnter(yawGateNow, yawAbs),
-      pitchInsideNow: insideEnter(pitchGateNow, pitchAbs),
-      rollInsideNow: insideEnter(rollGateNow, rollErr),
-      shouldersInsideNow: shouldersInside,
-      azimutInsideNow: azInside,
     );
   }
 
@@ -772,12 +765,14 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // ⬅️ NEW: bloquear retroceso durante el primer dwell de la regla actual si así lo pide
     final bool lockCurrentFirstDwell =
-        current.blockInterruptionDuranteValidacion && !current.gate.hasConfirmedOnce;
+        current.blockInterruptionDuranteValidacion &&
+            !current.gate.hasConfirmedOnce;
 
     // Backtracking condicional: no si está en dwell ni si bloquea interrupción (primer dwell)
     final allowBacktrack = !current.gate.isDwell && !lockCurrentFirstDwell;
     if (allowBacktrack) {
-      final prevBreak = _firstPrevNotHoldingFiltered(_curIdx, c, current);
+      final prevBreak =
+          _firstPrevNotHoldingFiltered(_curIdx, c, current);
       if (prevBreak != null) {
         _curIdx = _rules.indexOf(prevBreak);
         return;
@@ -786,11 +781,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // Actualiza/Confirma el gate de la regla actual
     final m = current.metric(c);
-    final confirmed = c.faceOk && (m != null) && current.gate.update(m, c.now);
+    final confirmed =
+        c.faceOk && (m != null) && current.gate.update(m, c.now);
     if (!confirmed) return;
 
     // Revisa rupturas previas tras confirmar (si aún aplica el lock del primer dwell, no retrocedas)
-    final prevBreakAfter = _firstPrevNotHoldingFiltered(_curIdx, c, current);
+    final prevBreakAfter =
+        _firstPrevNotHoldingFiltered(_curIdx, c, current);
     if (prevBreakAfter != null && !lockCurrentFirstDwell) {
       _curIdx = _rules.indexOf(prevBreakAfter);
       return;
@@ -889,7 +886,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
   void _driveRollAnimation(double deltaTo180) {
     // Map delta to user-perceived rotation with mirror
-    final bool wantCcwForUser = mirror ? (deltaTo180 < 0) : (deltaTo180 > 0);
+    final bool wantCcwForUser =
+        mirror ? (deltaTo180 < 0) : (deltaTo180 > 0);
 
     _activeTurn = _TurnDir.none;
     // reuse _activeRollPositive to track “CCW-for-user”
@@ -953,7 +951,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
   void _updateHudAndCountdown(_EvalCtx c, _HintAnim ha) {
     final bool allChecksOk = c.faceOk && _isDone;
 
-    // global stability window (no extra hold; gates already enforce dwell)
+    // global stability window (no extra hold; gates ya hacen dwell)
     if (allChecksOk) {
       _readySince ??= c.now;
     } else {
@@ -968,14 +966,18 @@ extension _OnFrameLogicExt on PoseCaptureController {
       if (allChecksOk) {
         _pushHudReady(arc: c.arcProgress);
       } else {
-        _pushHudAdjusting(faceOk: c.faceOk, arcProgress: c.arcProgress, finalHint: ha.hint);
+        _pushHudAdjusting(
+            faceOk: c.faceOk,
+            arcProgress: c.arcProgress,
+            finalHint: ha.hint);
       }
     }
 
     if (!isCountingDown &&
         allChecksOk &&
         _readySince != null &&
-        c.now.difference(_readySince!) >= PoseCaptureController._readyHold) {
+        c.now.difference(_readySince!) >=
+            PoseCaptureController._readyHold) {
       _startCountdown();
     }
   }
@@ -1008,9 +1010,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final cur = hud.value;
 
     // ⬇️ Fallback específico por regla actual (azimut vs. cabeza)
-    final defaultMsg = _isCurrentRule('azimut')
-        ? 'Mantén el torso recto'
-        : 'Mantén la cabeza recta';
+    final defaultMsg =
+        _isCurrentRule('azimut') ? 'Mantén el torso recto' : 'Mantén la cabeza recta';
 
     _setHud(
       PortraitUiModel(
