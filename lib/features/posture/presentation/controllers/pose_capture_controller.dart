@@ -17,6 +17,8 @@ import '../widgets/frame_sequence_overlay.dart'
     show FrameSequenceOverlay, FrameSequenceController, FramePlayMode;
 import '../../domain/validators/portrait_validations.dart'
     show PortraitValidator;
+// ⬇️ NEW: centralized, data-driven thresholds & bands
+import '../../domain/validation_profile.dart' show ValidationProfile, GateSense;
 
 // ⬇️ add this line:
 part 'pose_capture_controller.onframe.dart';
@@ -390,9 +392,11 @@ class PoseCaptureController extends ChangeNotifier {
     this.mirror = true,
     this.validationsEnabled = true, // ⇠ NEW
     _Tuning? tuning, // opcional para ajustar parámetros en tests
+    ValidationProfile? validationProfile, // ⇠ NEW: inject data-driven thresholds
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
         _tuning = tuning ?? const _Tuning(),
+        profile = validationProfile ?? ValidationProfile.defaultProfile, // ⇠ NEW
         hud = PortraitUiController(
           const PortraitUiModel(
             statusLabel: 'Adjusting',
@@ -478,6 +482,9 @@ class PoseCaptureController extends ChangeNotifier {
 
   final _Tuning _tuning;
 
+  /// ⇠ NEW: Perfil de validación inyectado (bandas y deadbands data-driven)
+  final ValidationProfile profile;
+
   // ── Controllers owned by this class ───────────────────────────────────
   final PortraitUiController hud;
   final FrameSequenceController seq;
@@ -486,18 +493,14 @@ class PoseCaptureController extends ChangeNotifier {
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
   final PortraitValidator _validator = const PortraitValidator();
 
-  // Angle thresholds (deg) — usados al registrar reglas (en el part file)
-  static const double _yawDeadbandDeg = 2.2;
-  static const double _pitchDeadbandDeg = 2.2;
-  static const double _shouldersBandLoDeg = -2; // ⬅️ personaliza
-  static const double _shouldersBandHiDeg = 1.7; // ⬅️ personaliza
-  static const double _rollErrorDeadbandDeg = 1.7;
+  // ─────────────────────────────────────────────────────────────────────
+  // Legacy static constants kept for backwards compatibility with the
+  // current onframe part. New code should read from [profile] instead.
+  // ─────────────────────────────────────────────────────────────────────
+  // Angle thresholds (deg) — USED ONLY BY LEGACY CALL SITES IN THE PART FILE.
   static const double _maxOffDeg = 20.0;
   static const double _rollHintDeadzoneDeg = 0.3;
-
-  static const double _azimutBandLoDeg = 4.5;
-  static const double _azimutBandHiDeg = 11;
-
+  
   // Distancia firmada a un rango [lo, hi]:
   //   < 0  → dentro del rango (más negativo = más centrado)
   //   = 0  → en el borde

@@ -59,6 +59,10 @@ class _HintAnim {
   final String? hint;
 }
 
+// Map domain GateSense → internal _GateSense
+_GateSense _mapSense(GateSense s) =>
+    s == GateSense.insideIsOk ? _GateSense.insideIsOk : _GateSense.outsideIsOk;
+
 // ───────────────────────────────────────────────────────────────────────
 // Reglas plug-in (arquitectura data-driven para añadir validaciones fácil)
 // ───────────────────────────────────────────────────────────────────────
@@ -99,15 +103,17 @@ abstract class _ValidationRule {
   }
 }
 
-// ── Reglas concretas ───────────────────────────────────────────────────
+// ── Reglas concretas (ahora leen bandas desde el profile inyectado) ────
 
 class _AzimutRule extends _ValidationRule {
-  _AzimutRule(_AxisGate gate)
+  _AzimutRule(this.profile, _AxisGate gate)
       : super(
           id: 'azimut',
           gate: gate,
           blockInterruptionDuranteValidacion: true,
         );
+
+  final ValidationProfile profile;
 
   // ✅ Métrica firmada: negativa dentro de [lo, hi], 0 en borde, positiva fuera.
   @override
@@ -119,15 +125,13 @@ class _AzimutRule extends _ValidationRule {
     final double delta = gate.hysteresis - gate.tighten;
     final double expand = (delta > 0) ? delta : 0.0;
 
-    // Antes de tocar el estricto → [3;10]
-    // Después (firstAttemptDone=true) → [3-expand; 10+expand]
     final double lo = gate.firstAttemptDone
-        ? PoseCaptureController._azimutBandLoDeg - expand
-        : PoseCaptureController._azimutBandLoDeg;
+        ? (profile.azimutBand.lo - expand)
+        : profile.azimutBand.lo;
 
     final double hi = gate.firstAttemptDone
-        ? PoseCaptureController._azimutBandHiDeg + expand
-        : PoseCaptureController._azimutBandHiDeg;
+        ? (profile.azimutBand.hi + expand)
+        : profile.azimutBand.hi;
 
     return PoseCaptureController._signedDistanceToBand(d, lo, hi);
   }
@@ -149,13 +153,12 @@ class _AzimutRule extends _ValidationRule {
       );
     }
 
-    // Límites del estricto: [5.5; 7.5] = [lo+tighten ; hi-tighten]
-    final double strictLo = PoseCaptureController._azimutBandLoDeg + gate.tighten;
-    final double strictHi = PoseCaptureController._azimutBandHiDeg - gate.tighten;
+    // Límites del estricto: [lo+tighten ; hi-tighten]
+    final double strictLo = profile.azimutBand.lo + gate.tighten;
+    final double strictHi = profile.azimutBand.hi - gate.tighten;
 
     if (!gate.firstAttemptDone) {
-      // ⬅️ Antes de tocar el estricto:
-      // dentro de [3;10] pero fuera de [5.5;7.5] → seguir mostrando "Gira..."
+      // Antes de tocar el estricto:
       if (a < strictLo) {
         return const _HintAnim(
           _Axis.none,
@@ -168,14 +171,14 @@ class _AzimutRule extends _ValidationRule {
           'Gira ligeramente el torso moviendo el hombro derecho hacia atrás',
         );
       }
-      // Ya entraste en [5.5;7.5] ⇒ calmamos a "Mantén..."
+      // Ya entraste en [strictLo; strictHi] ⇒ calmamos a "Mantén..."
       return const _HintAnim(_Axis.none, 'Mantén el torso recto');
     }
 
-    // ⬇️ Después de tocar el estricto: usamos el band expandido para hints
-    final double expand = (gate.hysteresis - gate.tighten);
-    final double loExp = PoseCaptureController._azimutBandLoDeg - (expand > 0 ? expand : 0.0);
-    final double hiExp = PoseCaptureController._azimutBandHiDeg + (expand > 0 ? expand : 0.0);
+    // Después de tocar el estricto: usamos el band expandido para hints
+    final double expand2 = (gate.hysteresis - gate.tighten);
+    final double loExp = profile.azimutBand.lo - (expand2 > 0 ? expand2 : 0.0);
+    final double hiExp = profile.azimutBand.hi + (expand2 > 0 ? expand2 : 0.0);
 
     if (a < loExp) {
       return const _HintAnim(
@@ -196,12 +199,14 @@ class _AzimutRule extends _ValidationRule {
 }
 
 class _ShouldersRule extends _ValidationRule {
-  _ShouldersRule(_AxisGate gate)
+  _ShouldersRule(this.profile, _AxisGate gate)
       : super(
           id: 'shoulders',
           gate: gate,
           blockInterruptionDuranteValidacion: true,
         );
+
+  final ValidationProfile profile;
 
   /// Métrica firmada: distancia a [lo, hi] (negativa dentro, 0 en borde, positiva fuera).
   @override
@@ -213,12 +218,12 @@ class _ShouldersRule extends _ValidationRule {
     final double expand = (delta > 0) ? delta : 0.0;
 
     final double lo = gate.firstAttemptDone
-        ? (PoseCaptureController._shouldersBandLoDeg - expand)
-        : PoseCaptureController._shouldersBandLoDeg;
+        ? (profile.shouldersBand.lo - expand)
+        : profile.shouldersBand.lo;
 
     final double hi = gate.firstAttemptDone
-        ? (PoseCaptureController._shouldersBandHiDeg + expand)
-        : PoseCaptureController._shouldersBandHiDeg;
+        ? (profile.shouldersBand.hi + expand)
+        : profile.shouldersBand.hi;
 
     return PoseCaptureController._signedDistanceToBand(s, lo, hi);
   }
@@ -419,47 +424,68 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final got = _rulesExp[this];
     if (got != null) return got;
 
+    // Usa el perfil inyectado para construir gates y reglas
+    final p = profile;
+
     final list = <_ValidationRule>[
       // AZIMUT: métrica firmada (negativa dentro) ⇒ baseDeadband = 0.0 con tighten
-      _AzimutRule(_AxisGate(
-        baseDeadband: 0.0,                 // 0 ⇒ borde (queremos < 0 en “estricto”)
-        sense: _GateSense.insideIsOk,      // métrica ≤ umbral pasa
-        tighten: 2.5,                      // primer intento más estricto
-        hysteresis: 3,
-        dwell: const Duration(milliseconds: 1000),
-        extraRelaxAfterFirst: 0.2,
-      )),
+      _AzimutRule(
+        p,
+        _AxisGate(
+          baseDeadband: p.azimutGate.baseDeadband,
+          sense: _mapSense(p.azimutGate.sense),
+          tighten: p.azimutGate.tighten,
+          hysteresis: p.azimutGate.hysteresis,
+          dwell: p.azimutGate.dwell,
+          extraRelaxAfterFirst: p.azimutGate.extraRelaxAfterFirst,
+        ),
+      ),
+
       // SHOULDERS: deadband personalizado asimétrico [lo, hi] + expansión post-estricto
-      _ShouldersRule(_AxisGate(
-        baseDeadband: 0.0,                 // métrica = distancia firmada; 0 es el borde
-        sense: _GateSense.insideIsOk,
-        tighten: 0.6,                      // profundidad extra en primer intento
-        hysteresis: 1.0,                   // si > tighten ⇒ expansión (expand = 0.4)
-        dwell: const Duration(milliseconds: 1000),
-        extraRelaxAfterFirst: 0.2,
-      )),
-      _YawRule(_AxisGate(
-        baseDeadband: PoseCaptureController._yawDeadbandDeg,
-        tighten: 1.4,
-        hysteresis: 0.2,
-        dwell: const Duration(milliseconds: 1000),
-        extraRelaxAfterFirst: 0.2,
-      )),
-      _PitchRule(_AxisGate(
-        baseDeadband: PoseCaptureController._pitchDeadbandDeg,
-        tighten: 1.4,
-        hysteresis: 0.2,
-        dwell: const Duration(milliseconds: 1000),
-        extraRelaxAfterFirst: 0.2,
-      )),
-      _RollRule(_AxisGate(
-        baseDeadband: PoseCaptureController._rollErrorDeadbandDeg,
-        sense: _GateSense.insideIsOk,
-        tighten: 0.4,
-        hysteresis: 0.3,
-        dwell: const Duration(milliseconds: 1000),
-        extraRelaxAfterFirst: 0.4,
-      )),
+      _ShouldersRule(
+        p,
+        _AxisGate(
+          baseDeadband: p.shouldersGate.baseDeadband,
+          sense: _mapSense(p.shouldersGate.sense),
+          tighten: p.shouldersGate.tighten,
+          hysteresis: p.shouldersGate.hysteresis,
+          dwell: p.shouldersGate.dwell,
+          extraRelaxAfterFirst: p.shouldersGate.extraRelaxAfterFirst,
+        ),
+      ),
+
+      _YawRule(
+        _AxisGate(
+          baseDeadband: p.yaw.baseDeadband,
+          sense: _mapSense(p.yaw.sense),
+          tighten: p.yaw.tighten,
+          hysteresis: p.yaw.hysteresis,
+          dwell: p.yaw.dwell,
+          extraRelaxAfterFirst: p.yaw.extraRelaxAfterFirst,
+        ),
+      ),
+
+      _PitchRule(
+        _AxisGate(
+          baseDeadband: p.pitch.baseDeadband,
+          sense: _mapSense(p.pitch.sense),
+          tighten: p.pitch.tighten,
+          hysteresis: p.pitch.hysteresis,
+          dwell: p.pitch.dwell,
+          extraRelaxAfterFirst: p.pitch.extraRelaxAfterFirst,
+        ),
+      ),
+
+      _RollRule(
+        _AxisGate(
+          baseDeadband: p.roll.baseDeadband,
+          sense: _mapSense(p.roll.sense),
+          tighten: p.roll.tighten,
+          hysteresis: p.roll.hysteresis,
+          dwell: p.roll.dwell,
+          extraRelaxAfterFirst: p.roll.extraRelaxAfterFirst,
+        ),
+      ),
     ];
 
     _rulesExp[this] = list;
@@ -572,8 +598,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double shouldersExpandNow =
         math.max(0.0, shouldersGateNow.hysteresis - shouldersGateNow.tighten);
 
-    final double loDepth = (-PoseCaptureController._shouldersBandLoDeg).abs();
-    final double hiDepth = ( PoseCaptureController._shouldersBandHiDeg).abs();
+    final double loDepth = profile.shouldersBand.lo.abs();
+    final double hiDepth = profile.shouldersBand.hi.abs();
 
     double shouldersTolSymNow = math.min(loDepth, hiDepth);
     if (shouldersGateNow.firstAttemptDone) {
@@ -648,8 +674,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ? null
         : PoseCaptureController._signedDistanceToBand(
             azimutDeg,
-            PoseCaptureController._azimutBandLoDeg,
-            PoseCaptureController._azimutBandHiDeg,
+            profile.azimutBand.lo,
+            profile.azimutBand.hi,
           );
 
     final bool azInside = (azMetricSigned == null)
@@ -660,8 +686,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double sMetricSignedBase =
         PoseCaptureController._signedDistanceToBand(
           report.shouldersDeg,
-          PoseCaptureController._shouldersBandLoDeg,
-          PoseCaptureController._shouldersBandHiDeg,
+          profile.shouldersBand.lo,
+          profile.shouldersBand.hi,
         );
 
     final bool shouldersInside = insideEnter(shouldersGateNow, sMetricSignedBase);
