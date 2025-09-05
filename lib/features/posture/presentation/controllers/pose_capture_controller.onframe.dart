@@ -662,8 +662,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // Azimut biacromial (torsión azimut) – ahora desde geom (3D)
     final lms3d = poseService.latestPoseLandmarks3D;
-    final double imgW = (frame.imageSize.width).toDouble();
-    final double zToPx = (_zToPxScale ?? imgW).toDouble();
+    final double imgW = frame.imageSize.width; // ya es double
+    final double zToPx = _zToPxScale ?? imgW;
     final double? azimutDeg = geom.estimateAzimutBiacromial3D(
       poseLandmarks3D: lms3d,
       zToPx: zToPx,
