@@ -3,6 +3,8 @@
 /// Public sense for gates in the domain layer (no underscores → not private).
 enum GateSense { insideIsOk, outsideIsOk }
 
+/// Configuración de gating por eje (enter/exit bands, dwell, etc.)
+/// Ahora también incluye `maxOffDeg` para mapear progreso en validadores tipo `checkAngle`.
 class GateConfig {
   final double baseDeadband;
   final double tighten;
@@ -11,6 +13,11 @@ class GateConfig {
   final double extraRelaxAfterFirst;
   final GateSense sense;
 
+  /// Límite de “exceso” (en grados) donde el progreso cae a 0 en `checkAngle`.
+  /// - Yaw/Pitch/Shoulders suelen usar ~20°.
+  /// - Roll puede usar 100° si mantienes tu regla especial (aunque no lo uses).
+  final double maxOffDeg;
+
   const GateConfig({
     required this.baseDeadband,
     this.tighten = 0.2,
@@ -18,6 +25,7 @@ class GateConfig {
     this.dwell = const Duration(milliseconds: 1000),
     this.extraRelaxAfterFirst = 0.2,
     this.sense = GateSense.insideIsOk,
+    this.maxOffDeg = 20.0, // ← default razonable para la mayoría
   });
 }
 
@@ -28,15 +36,48 @@ class Band {
   const Band(this.lo, this.hi);
 }
 
+/// Config específica de “rostro dentro del óvalo” (para el anillo UI).
+class FaceConfig {
+  /// Fracción mínima de puntos dentro del óvalo para considerar “OK”.
+  /// (0..1). 1.0 = todos los puntos dentro.
+  final double minFractionInside;
+
+  /// Tolerancia numérica para la prueba elíptica.
+  final double eps;
+
+  const FaceConfig({
+    this.minFractionInside = 1.0,
+    this.eps = 1e-6,
+  });
+}
+
+/// Ajustes de UX no críticos (no son umbrales de validación).
+class UiTuning {
+  final double rollMaxDpsDuringDwell; // velocidad máxima permitida durante dwell
+  final Duration hudMinInterval;      // throttle de actualizaciones de HUD
+
+  const UiTuning({
+    this.rollMaxDpsDuringDwell = 15.0,
+    this.hudMinInterval = const Duration(milliseconds: 66),
+  });
+}
+
 class ValidationProfile {
-  // Head
+  // Face-in-oval
+  final FaceConfig face;
+
+  // Head gates
   final GateConfig yaw, pitch, roll;
 
-  // Shoulders & torso (need ranges)
+  // Shoulders & torso (rangos + sus gates)
   final Band shouldersBand, azimutBand;
   final GateConfig shouldersGate, azimutGate;
 
+  // UX tuning (no cambia la lógica de validación)
+  final UiTuning ui;
+
   const ValidationProfile({
+    required this.face,
     required this.yaw,
     required this.pitch,
     required this.roll,
@@ -44,15 +85,57 @@ class ValidationProfile {
     required this.shouldersGate,
     required this.azimutBand,
     required this.azimutGate,
+    this.ui = const UiTuning(),
   });
 
   static const defaultProfile = ValidationProfile(
-    yaw: GateConfig(baseDeadband: 2.2, tighten: 1.4, hysteresis: 0.2),
-    pitch: GateConfig(baseDeadband: 2.2, tighten: 1.4, hysteresis: 0.2),
-    roll: GateConfig(baseDeadband: 1.7, tighten: 0.4, hysteresis: 0.3),
+    face: FaceConfig(
+      minFractionInside: 1.0,
+      eps: 1e-6,
+    ),
+
+    // Head
+    yaw: GateConfig(
+      baseDeadband: 2.2,
+      tighten: 1.4,
+      hysteresis: 0.2,
+      maxOffDeg: 20.0,
+    ),
+    pitch: GateConfig(
+      baseDeadband: 2.2,
+      tighten: 1.4,
+      hysteresis: 0.2,
+      maxOffDeg: 20.0,
+    ),
+    roll: GateConfig(
+      baseDeadband: 1.7,
+      tighten: 0.4,
+      hysteresis: 0.3,
+      maxOffDeg: 100.0, // no crítico si tu regla de roll no lo usa
+    ),
+
+    // Shoulders
     shouldersBand: Band(-2.0, 1.7),
-    shouldersGate: GateConfig(baseDeadband: 0.0, tighten: 0.6, hysteresis: 1.0),
+    shouldersGate: GateConfig(
+      baseDeadband: 0.0,
+      tighten: 0.6,
+      hysteresis: 1.0,
+      maxOffDeg: 20.0,
+    ),
+
+    // Torso azimut
     azimutBand: Band(4.5, 11.0),
-    azimutGate: GateConfig(baseDeadband: 0.0, tighten: 2.5, hysteresis: 3.0),
+    azimutGate: GateConfig(
+      baseDeadband: 0.0,
+      tighten: 2.5,
+      hysteresis: 3.0,
+      maxOffDeg: 20.0, // (no usado por ahora, pero queda centralizado)
+    ),
+
+    // UX
+    ui: UiTuning(
+      rollMaxDpsDuringDwell: 15.0,
+      hudMinInterval: Duration(milliseconds: 66),
+    ),
   );
 }

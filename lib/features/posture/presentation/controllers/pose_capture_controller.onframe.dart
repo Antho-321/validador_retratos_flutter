@@ -595,11 +595,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // SHOULDERS: tolerancia SIMÉTRICA para el validador (para progreso/ok visual).
     // Toma el lado más estrecho del rango asimétrico base y expande tras primer intento.
+    final p = profile;
+
     final double shouldersExpandNow =
         math.max(0.0, shouldersGateNow.hysteresis - shouldersGateNow.tighten);
 
-    final double loDepth = profile.shouldersBand.lo.abs();
-    final double hiDepth = profile.shouldersBand.hi.abs();
+    final double loDepth = p.shouldersBand.lo.abs();
+    final double hiDepth = p.shouldersBand.hi.abs();
 
     double shouldersTolSymNow = math.min(loDepth, hiDepth);
     if (shouldersGateNow.firstAttemptDone) {
@@ -612,26 +614,31 @@ extension _OnFrameLogicExt on PoseCaptureController {
       canvasSize: canvas,
       mirror: mirror,
       fit: BoxFit.cover,
-      minFractionInside: 1.0,
 
+      // Face-in-oval
+      minFractionInside: p.face.minFractionInside,
+      eps: p.face.eps,
+
+      // Yaw
       enableYaw: true,
       yawDeadbandDeg: yawDeadbandNow,
-      yawMaxOffDeg: PoseCaptureController._maxOffDeg,
+      yawMaxOffDeg: p.yaw.maxOffDeg,
 
+      // Pitch
       enablePitch: true,
       pitchDeadbandDeg: pitchDeadbandNow,
-      pitchMaxOffDeg: PoseCaptureController._maxOffDeg,
+      pitchMaxOffDeg: p.pitch.maxOffDeg,
 
-      // roll: deadband es tolerancia de error a 180°
+      // Roll
       enableRoll: true,
       rollDeadbandDeg: rollDeadbandNow,
-      rollMaxOffDeg: PoseCaptureController._maxOffDeg,
+      rollMaxOffDeg: p.roll.maxOffDeg, // opcional si no se usa
 
-      // shoulders (nivelación)
+      // Shoulders (nivelación)
       poseLandmarksImg: pose,
       enableShoulders: true,
       shouldersDeadbandDeg: shouldersTolSymNow, // ← dinámico simétrico para UI
-      shouldersMaxOffDeg: PoseCaptureController._maxOffDeg,
+      shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
     );
 
     final now = DateTime.now();
@@ -674,8 +681,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ? null
         : PoseCaptureController._signedDistanceToBand(
             azimutDeg,
-            profile.azimutBand.lo,
-            profile.azimutBand.hi,
+            p.azimutBand.lo,
+            p.azimutBand.hi,
           );
 
     final bool azInside = (azMetricSigned == null)
@@ -686,8 +693,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double sMetricSignedBase =
         PoseCaptureController._signedDistanceToBand(
           report.shouldersDeg,
-          profile.shouldersBand.lo,
-          profile.shouldersBand.hi,
+          p.shouldersBand.lo,
+          p.shouldersBand.hi,
         );
 
     final bool shouldersInside = insideEnter(shouldersGateNow, sMetricSignedBase);
@@ -1023,8 +1030,6 @@ extension _OnFrameLogicExt on PoseCaptureController {
 // (F) Cinemática de ROLL (mantener compatibilidad con HUD/velocidades)
 // ───────────────────────────────────────────────────────────────────────
 extension _RollMathKinematics on PoseCaptureController {
-  /// Actualiza cinemática de roll usando el filtro modular (unwrap + EMA + dps)
-  /// y mantiene sincronizados los campos legados usados por HUD/onframe.
   _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {
     final m = _rollFilter.update(rawRollDeg, now);
 
@@ -1033,8 +1038,8 @@ extension _RollMathKinematics on PoseCaptureController {
     _rollSmoothedAt = now;
     _lastRollDps = m.dps;
 
-    // Si el usuario se mueve demasiado durante dwell, reinicia intento
-    final rollMax = _tuning.rollMaxDpsDuringDwell;
+    // Usa el límite desde el ValidationProfile → UiTuning
+    final rollMax = profile.ui.rollMaxDpsDuringDwell;
     final rule = _findRule('roll');
     if (rule != null && rule.gate.isDwell && m.dps.abs() > rollMax) {
       rule.gate.resetTransient();

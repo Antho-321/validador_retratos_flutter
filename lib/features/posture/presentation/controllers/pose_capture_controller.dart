@@ -176,31 +176,6 @@ class _AxisGate {
 
 typedef SnapshotFn = Future<Uint8List?> Function();
 
-/// Tuning centralizado
-class _Tuning {
-  final double yawDeadbandDeg;
-  final double pitchDeadbandDeg;
-  final double shouldersDeadbandDeg;
-  final double rollErrorDeadbandDeg;
-  final double maxOffDeg;
-  final double rollHintDeadzoneDeg;
-  final double emaTauMs;
-  final double rollMaxDpsDuringDwell;
-  final Duration hudMinInterval;
-
-  const _Tuning({
-    this.yawDeadbandDeg = 2.2,
-    this.pitchDeadbandDeg = 2.2,
-    this.shouldersDeadbandDeg = 1.8,
-    this.rollErrorDeadbandDeg = 1.7,
-    this.maxOffDeg = 20.0,
-    this.rollHintDeadzoneDeg = 0.3,
-    this.emaTauMs = 150.0,
-    this.rollMaxDpsDuringDwell = 15.0,
-    this.hudMinInterval = const Duration(milliseconds: 66),
-  });
-}
-
 /// Métricas de roll tras filtrar/unwrap
 class _RollFilterMetrics {
   final double errDeg;       // distancia a 180° (0 = perfecto)
@@ -391,11 +366,9 @@ class PoseCaptureController extends ChangeNotifier {
     required this.countdownSpeed,
     this.mirror = true,
     this.validationsEnabled = true, // ⇠ NEW
-    _Tuning? tuning, // opcional para ajustar parámetros en tests
     ValidationProfile? validationProfile, // ⇠ NEW: inject data-driven thresholds
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
-        _tuning = tuning ?? const _Tuning(),
         profile = validationProfile ?? ValidationProfile.defaultProfile, // ⇠ NEW
         hud = PortraitUiController(
           const PortraitUiModel(
@@ -480,8 +453,6 @@ class PoseCaptureController extends ChangeNotifier {
   /// NEW: switch global de validaciones
   final bool validationsEnabled;
 
-  final _Tuning _tuning;
-
   /// ⇠ NEW: Perfil de validación inyectado (bandas y deadbands data-driven)
   final ValidationProfile profile;
 
@@ -500,7 +471,7 @@ class PoseCaptureController extends ChangeNotifier {
   // Angle thresholds (deg) — USED ONLY BY LEGACY CALL SITES IN THE PART FILE.
   static const double _maxOffDeg = 20.0;
   static const double _rollHintDeadzoneDeg = 0.3;
-  
+
   // Distancia firmada a un rango [lo, hi]:
   //   < 0  → dentro del rango (más negativo = más centrado)
   //   = 0  → en el borde
@@ -527,7 +498,7 @@ class PoseCaptureController extends ChangeNotifier {
 
   // Throttle HUD updates to ~15 Hz
   DateTime _lastHudPush = DateTime.fromMillisecondsSinceEpoch(0);
-  // (usaremos _tuning.hudMinInterval en _setHud)
+  // (usaremos profile.ui.hudMinInterval en _setHud)
 
   // Snapshot state (exposed)
   Uint8List? capturedPng; // captured bytes (from WebRTC track or boundary fallback)
@@ -560,7 +531,6 @@ class PoseCaptureController extends ChangeNotifier {
   double? _lastRollDps;      // last angular velocity estimate for roll
 
   // ── Dinámica de ROLL modular ──────────────────────────────────────────
-  static const double _rollMaxDpsDuringDwell = 15.0; // compatibilidad
   final _RollFilter _rollFilter = _RollFilter(tauMs: 150.0);
 
   /// Envuelve ángulos a (-180, 180]
@@ -662,7 +632,7 @@ class PoseCaptureController extends ChangeNotifier {
 extension _HudHelpers on PoseCaptureController {
   void _setHud(PortraitUiModel next, {bool force = false}) {
     final now = DateTime.now();
-    if (!force && now.difference(_lastHudPush) < _tuning.hudMinInterval) return;
+    if (!force && now.difference(_lastHudPush) < profile.ui.hudMinInterval) return;
 
     final cur = hud.value;
     final same =
