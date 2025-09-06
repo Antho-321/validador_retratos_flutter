@@ -36,12 +36,6 @@ class _HintAnim {
   final String? hint;
 }
 
-// Deadzones para evitar parpadeo cuando aún no hay dwell (mantener guía)
-const double _yawHintDeadzoneDeg = 0.15;
-const double _pitchHintDeadzoneDeg = 0.15;
-const double _shouldersHintDeadzoneDeg = 0.20;
-const double _azimutHintDeadzoneDeg = 0.30;
-
 // Map domain GateSense → internal _GateSense
 _GateSense _mapSense(GateSense s) =>
     s == GateSense.insideIsOk ? _GateSense.insideIsOk : _GateSense.outsideIsOk;
@@ -157,7 +151,7 @@ class _AzimutRule extends _ValidationRule {
     final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
     if (a != null) {
       final center = (profile.azimutBand.lo + profile.azimutBand.hi) / 2.0;
-      if ((a - center).abs() > _azimutHintDeadzoneDeg) {
+      if ((a - center).abs() > profile.ui.azimutHintDeadzoneDeg) {
         _lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
       }
     }
@@ -214,7 +208,7 @@ class _ShouldersRule extends _ValidationRule {
     }
 
     final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
-    if (s != null && s.abs() > _shouldersHintDeadzoneDeg) {
+    if (s != null && s.abs() > profile.ui.shouldersHintDeadzoneDeg) {
       _lastSign = s > 0 ? 1 : -1;
     }
 
@@ -228,12 +222,14 @@ class _ShouldersRule extends _ValidationRule {
 }
 
 class _YawRule extends _ValidationRule {
-  _YawRule(_AxisGate gate)
+  _YawRule(this.profile, _AxisGate gate)
       : super(
           id: 'yaw',
           gate: gate,
           ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
+
+  final ValidationProfile profile;
 
   @override
   double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.yawAbs, c.inputs);
@@ -249,7 +245,7 @@ class _YawRule extends _ValidationRule {
     final a = c.yawDegForAnim; // firmado
     _TurnDir dir;
 
-    if (a != null && a.abs() > _yawHintDeadzoneDeg) {
+    if (a != null && a.abs() > profile.ui.yawHintDeadzoneDeg) {
       dir = (a > 0) ? _TurnDir.left : _TurnDir.right;
       ctrl._driveYawAnimation(a);
     } else {
@@ -266,12 +262,14 @@ class _YawRule extends _ValidationRule {
 }
 
 class _PitchRule extends _ValidationRule {
-  _PitchRule(_AxisGate gate)
+  _PitchRule(this.profile, _AxisGate gate)
       : super(
           id: 'pitch',
           gate: gate,
           ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
+
+  final ValidationProfile profile;
 
   @override
   double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.pitchAbs, c.inputs);
@@ -287,7 +285,7 @@ class _PitchRule extends _ValidationRule {
     final a = c.pitchDegForAnim; // + arriba, - abajo
     bool up;
 
-    if (a != null && a.abs() > _pitchHintDeadzoneDeg) {
+    if (a != null && a.abs() > profile.ui.pitchHintDeadzoneDeg) {
       up = a > 0;
       ctrl._drivePitchAnimation(a);
     } else {
@@ -302,12 +300,14 @@ class _PitchRule extends _ValidationRule {
 }
 
 class _RollRule extends _ValidationRule {
-  _RollRule(_AxisGate gate)
+  _RollRule(this.profile, _AxisGate gate)
       : super(
           id: 'roll',
           gate: gate,
           ignorePrevBreakOf: const {'azimut', 'shoulders'},
         );
+
+  final ValidationProfile profile;
 
   @override
   double? metric(_EvalCtx c) =>
@@ -324,7 +324,7 @@ class _RollRule extends _ValidationRule {
     final a = c.rollDegForAnim;
     if (a != null) {
       final delta = ctrl._deltaToNearest180(a);
-      if (delta.abs() > PoseCaptureController._rollHintDeadzoneDeg) {
+      if (delta.abs() > profile.ui.rollHintDeadzoneDeg) {
         ctrl._driveRollAnimation(delta);
         final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
         final hint = ccwForUser
@@ -467,6 +467,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       ),
 
       _YawRule(
+        p,
         _AxisGate(
           baseDeadband: p.yaw.baseDeadband,
           sense: _mapSense(p.yaw.sense),
@@ -478,6 +479,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       ),
 
       _PitchRule(
+        p,
         _AxisGate(
           baseDeadband: p.pitch.baseDeadband,
           sense: _mapSense(p.pitch.sense),
@@ -489,6 +491,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       ),
 
       _RollRule(
+        p,
         _AxisGate(
           baseDeadband: p.roll.baseDeadband,
           sense: _mapSense(p.roll.sense),

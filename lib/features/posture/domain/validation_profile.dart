@@ -53,14 +53,27 @@ class FaceConfig {
 
 /// Ajustes de UX no críticos (no son umbrales de validación).
 class UiTuning {
-  final double rollMaxDpsDuringDwell; // velocidad máxima permitida durante dwell
-  final Duration hudMinInterval;      // throttle de actualizaciones de HUD
+  final double rollMaxDpsDuringDwell;
+  final Duration hudMinInterval;
+
+  // ⬇️ NUEVO: deadzones solo-UI para hints/animaciones
+  final double yawHintDeadzoneDeg;
+  final double pitchHintDeadzoneDeg;
+  final double rollHintDeadzoneDeg;
+  final double shouldersHintDeadzoneDeg;
+  final double azimutHintDeadzoneDeg;
 
   const UiTuning({
     this.rollMaxDpsDuringDwell = 15.0,
     this.hudMinInterval = const Duration(milliseconds: 66),
+    this.yawHintDeadzoneDeg = 0.15,
+    this.pitchHintDeadzoneDeg = 0.15,
+    this.rollHintDeadzoneDeg = 0.30,
+    this.shouldersHintDeadzoneDeg = 0.20,
+    this.azimutHintDeadzoneDeg = 0.30,
   });
 }
+
 
 class ValidationProfile {
   // Face-in-oval
@@ -115,11 +128,11 @@ class ValidationProfile {
     ),
 
     // Shoulders
-    shouldersBand: Band(-1.7, 1.7),
+    shouldersBand: Band(-0.9, 1.7),
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
-      tighten: 0.8,
-      hysteresis: 1.1,
+      tighten: 1.1,
+      hysteresis: 1.5,
       maxOffDeg: 20.0,
     ),
 

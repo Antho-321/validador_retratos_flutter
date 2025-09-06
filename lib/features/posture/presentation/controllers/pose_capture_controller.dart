@@ -483,14 +483,6 @@ class PoseCaptureController extends ChangeNotifier {
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
   final PortraitValidator _validator = const PortraitValidator();
 
-  // ─────────────────────────────────────────────────────────────────────
-  // Legacy static constants kept for backwards compatibility with the
-  // current onframe part. New code should read from [profile] instead.
-  // ─────────────────────────────────────────────────────────────────────
-  // Angle thresholds (deg) — USED ONLY BY LEGACY CALL SITES IN THE PART FILE.
-  static const double _maxOffDeg = 20.0;
-  static const double _rollHintDeadzoneDeg = 0.3;
-
   // Distancia firmada a un rango [lo, hi]:
   //   < 0  → dentro del rango (más negativo = más centrado)
   //   = 0  → en el borde
