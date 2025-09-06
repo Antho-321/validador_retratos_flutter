@@ -124,30 +124,35 @@ class _AxisGate {
   bool update(double metricDeg, DateTime now) {
     switch (_state) {
       case _GateState.searching:
-        if (_firstAttemptDone && _strictActive && _isOk(metricDeg, enterBand)) {
+        // ⬅️ NUEVO: si estamos en modo ESTRICTO y se toca el enterBand estricto,
+        // relajamos de inmediato y NO iniciamos dwell en este tick.
+        if (_strictActive && _isOk(metricDeg, enterBand)) {
+          if (!_firstAttemptDone) _firstAttemptDone = true;
           _relax();
-          return false; // no iniciamos dwell en este mismo update
+          // Inicio de dwell en el mismo tick si ya cumple el band relajado
+          if (_isOk(metricDeg, enterBand)) {
+            _dwellStart = now;
+            _state = _GateState.dwell;
+          }
+          return false;
         }
 
-        if (_isOk(metricDeg, enterBand)) {
-          if (!_firstAttemptDone) {
-            _firstAttemptDone = true; // a partir de ahora hay “segundo intento”
-          }
+        // Si estamos RELAJADOS y ya cumplimos el enterBand (base), iniciamos dwell.
+        if (!_strictActive && _isOk(metricDeg, enterBand)) {
           _dwellStart = now;
           _state = _GateState.dwell;
         }
         return false;
 
       case _GateState.dwell:
+        // Si nos salimos del band ampliado (exitBand), reapretar y volver a buscar.
         if (!_isOk(metricDeg, exitBand)) {
           _state = _GateState.searching;
           _dwellStart = null;
-
-          if (_firstAttemptDone && !_strictActive) {
-            _retighten();
-          }
+          _retighten(); // ⬅️ siempre reaprieta al perder el dwell ampliado
           return false;
         }
+        // Tiempo de dwell cumplido ⇒ confirmar.
         if (now.difference(_dwellStart!) >= dwell) {
           _state = _GateState.confirmed;
           hasConfirmedOnce = true;
@@ -156,15 +161,17 @@ class _AxisGate {
         return false;
 
       case _GateState.confirmed:
+        // Permite una pequeña relajación adicional si la configuraste.
         final double relax = hasConfirmedOnce ? extraRelaxAfterFirst : 0.0;
         final double exitWithRelax = _withRelax(exitBand, relax);
+
+        // Si se pierde la confirmación (fuera del band ampliado + relax),
+        // volvemos a SEARCHING y reapretamos. Para re-capturar:
+        // tocar estricto ⇒ relajarse ⇒ dwell otra vez en ampliado.
         if (!_isOk(metricDeg, exitWithRelax)) {
           _state = _GateState.searching;
           _dwellStart = null;
-
-          if (_firstAttemptDone) {
-            _relax();
-          }
+          _retighten(); // ⬅️ clave: reactivar estricto al perder confirmación
           return false;
         }
         return true;
@@ -399,11 +406,18 @@ class PoseCaptureController extends ChangeNotifier {
           ? (poseService.latestFrame.value != null && this._isDone)
           : true,
       onTick: (seconds, progress) {
+        // ⬇️ Garantiza mostrar “¡Perfecto! ¡Permanece así!” mientras todo siga OK
+        final cur = hud.value;
+        final primary = (validationsEnabled && _isDone)
+            ? '¡Perfecto! ¡Permanece así!'
+            : cur.primaryMessage;
         _setHud(
-          hud.value.copyWith(
+          cur.copyWith(
+            primaryMessage: primary,
             countdownSeconds: seconds,
             countdownProgress: progress,
           ),
+          // puedes mantener force:false aquí
         );
       },
       onFire: () async {

@@ -36,6 +36,12 @@ class _HintAnim {
   final String? hint;
 }
 
+// Deadzones para evitar parpadeo cuando aún no hay dwell (mantener guía)
+const double _yawHintDeadzoneDeg = 0.15;
+const double _pitchHintDeadzoneDeg = 0.15;
+const double _shouldersHintDeadzoneDeg = 0.20;
+const double _azimutHintDeadzoneDeg = 0.30;
+
 // Map domain GateSense → internal _GateSense
 _GateSense _mapSense(GateSense s) =>
     s == GateSense.insideIsOk ? _GateSense.insideIsOk : _GateSense.outsideIsOk;
@@ -97,7 +103,12 @@ abstract class _ValidationRule {
   }
 }
 
-// ── Reglas concretas (ahora leen bandas desde el profile inyectado) ────
+// Helper común: en este modelo, el dwell siempre ocurre en band ampliado.
+extension on _ValidationRule {
+  bool get _showMaintainNow => gate.isDwell;
+}
+
+// ── Reglas concretas (leen bandas desde el profile inyectado) ──────────
 
 class _AzimutRule extends _ValidationRule {
   _AzimutRule(this.profile, _AxisGate gate)
@@ -109,7 +120,10 @@ class _AzimutRule extends _ValidationRule {
 
   final ValidationProfile profile;
 
-  // ✅ Métrica firmada: negativa dentro de [lo, hi], 0 en borde, positiva fuera.
+  // Memoria de dirección (evita silencio antes de dwell)
+  _TurnDir _lastDir = _TurnDir.right;
+
+  // Métrica firmada: negativa dentro de [lo, hi], 0 en borde, positiva fuera.
   @override
   double? metric(_EvalCtx c) {
     final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
@@ -133,74 +147,27 @@ class _AzimutRule extends _ValidationRule {
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    // Si ya estás en dwell o “inside now”, muestra mantener
-    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
-    final bool insideNow = (a == null)
-        ? true
-        : _insideNowSignedBand(
-            gate,
-            angleDeg: a,
-            lo: profile.azimutBand.lo.toDouble(),
-            hi: profile.azimutBand.hi.toDouble(),
-          );
-
-    if (gate.isDwell || insideNow) {
+    // En dwell → mensaje neutral
+    if (_showMaintainNow) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén el torso recto');
     }
-    ctrl._hideAnimationIfVisible();
 
-    if (a == null) {
-      return const _HintAnim(
-        _Axis.none,
-        'Alinea el torso al frente (cuadra los hombros).',
-      );
-    }
-
-    // Límites del estricto: [lo+tighten ; hi-tighten]
-    final double strictLo = (profile.azimutBand.lo + gate.tighten).toDouble();
-    final double strictHi = (profile.azimutBand.hi - gate.tighten).toDouble();
-
-    if (!gate.firstAttemptDone) {
-      // Antes de tocar el estricto:
-      if (a < strictLo) {
-        return const _HintAnim(
-          _Axis.none,
-          'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás',
-        );
+    // Mantener guía direccional hasta dwell (con deadzone y último lado)
+    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
+    if (a != null) {
+      final center = (profile.azimutBand.lo + profile.azimutBand.hi) / 2.0;
+      if ((a - center).abs() > _azimutHintDeadzoneDeg) {
+        _lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
       }
-      if (a > strictHi) {
-        return const _HintAnim(
-          _Axis.none,
-          'Gira ligeramente el torso moviendo el hombro derecho hacia atrás',
-        );
-      }
-      // Ya entraste en [strictLo; strictHi] ⇒ calmamos a "Mantén..."
-      return const _HintAnim(_Axis.none, 'Mantén el torso recto');
     }
 
-    // Después de tocar el estricto: usamos el band expandido para hints
-    final double expand2 = (gate.hysteresis - gate.tighten);
-    final double loExp =
-        (profile.azimutBand.lo - (expand2 > 0 ? expand2 : 0.0)).toDouble();
-    final double hiExp =
-        (profile.azimutBand.hi + (expand2 > 0 ? expand2 : 0.0)).toDouble();
+    final hint = (_lastDir == _TurnDir.left)
+        ? 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás'
+        : 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás';
 
-    if (a < loExp) {
-      return const _HintAnim(
-        _Axis.none,
-        'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás',
-      );
-    }
-    if (a > hiExp) {
-      return const _HintAnim(
-        _Axis.none,
-        'Gira ligeramente el torso moviendo el hombro derecho hacia atrás',
-      );
-    }
-
-    // Dentro del band expandido ⇒ "Mantén..."
-    return const _HintAnim(_Axis.none, 'Mantén el torso recto');
+    ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
+    return _HintAnim(_Axis.none, hint);
   }
 }
 
@@ -213,6 +180,9 @@ class _ShouldersRule extends _ValidationRule {
         );
 
   final ValidationProfile profile;
+
+  // Memoria de signo para mantener guía
+  int _lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
 
   /// Métrica firmada: distancia a [lo, hi] (negativa dentro, 0 en borde, positiva fuera).
   @override
@@ -238,33 +208,22 @@ class _ShouldersRule extends _ValidationRule {
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
-    final bool insideNow = (s == null)
-        ? true
-        : _insideNowSignedBand(
-            gate,
-            angleDeg: s,
-            lo: profile.shouldersBand.lo.toDouble(),
-            hi: profile.shouldersBand.hi.toDouble(),
-          );
-
-    if (insideNow || gate.isDwell) {
+    if (_showMaintainNow) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén los hombros nivelados');
     }
-    ctrl._hideAnimationIfVisible();
 
-    if (s != null) {
-      final msg = (s > 0)
-          ? 'Baja un poco el hombro derecho o sube el izquierdo'
-          : 'Baja un poco el hombro izquierdo o sube el derecho';
-      return _HintAnim(_Axis.none, msg);
+    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
+    if (s != null && s.abs() > _shouldersHintDeadzoneDeg) {
+      _lastSign = s > 0 ? 1 : -1;
     }
 
-    return const _HintAnim(
-      _Axis.none,
-      'Nivela los hombros, mantenlos horizontales.',
-    );
+    final hint = (_lastSign > 0)
+        ? 'Baja un poco el hombro derecho o sube el izquierdo'
+        : 'Baja un poco el hombro izquierdo o sube el derecho';
+
+    ctrl._hideAnimationIfVisible();
+    return _HintAnim(_Axis.none, hint);
   }
 }
 
@@ -281,15 +240,25 @@ class _YawRule extends _ValidationRule {
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    final yawAbs = metric(c);
-    final insideNow = insideNowWith(yawAbs);
-
-    if (insideNow || gate.isDwell || c.yawDegForAnim == null) {
+    if (_showMaintainNow) {
       ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, null);
+      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
     }
-    ctrl._driveYawAnimation(c.yawDegForAnim!);
-    final hint = (c.yawDegForAnim! > 0)
+
+    // Mantener guía direccional hasta dwell
+    final a = c.yawDegForAnim; // firmado
+    _TurnDir dir;
+
+    if (a != null && a.abs() > _yawHintDeadzoneDeg) {
+      dir = (a > 0) ? _TurnDir.left : _TurnDir.right;
+      ctrl._driveYawAnimation(a);
+    } else {
+      // conserva último lado conocido (si no hay, default left)
+      dir = (ctrl._activeTurn != _TurnDir.none) ? ctrl._activeTurn : _TurnDir.left;
+      ctrl._hideAnimationIfVisible(); // opcional: mantener anim si prefieres
+    }
+
+    final hint = (dir == _TurnDir.left)
         ? 'Gira ligeramente la cabeza a la izquierda'
         : 'Gira ligeramente la cabeza a la derecha';
     return _HintAnim(_Axis.yaw, hint);
@@ -309,16 +278,25 @@ class _PitchRule extends _ValidationRule {
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    final pitchAbs = metric(c);
-    final insideNow = insideNowWith(pitchAbs);
-
-    if (insideNow || gate.isDwell || c.pitchDegForAnim == null) {
+    if (_showMaintainNow) {
       ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, null);
+      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
     }
-    ctrl._drivePitchAnimation(c.pitchDegForAnim!);
-    final hint =
-        (c.pitchDegForAnim! > 0) ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
+
+    // Mantener guía direccional hasta dwell
+    final a = c.pitchDegForAnim; // + arriba, - abajo
+    bool up;
+
+    if (a != null && a.abs() > _pitchHintDeadzoneDeg) {
+      up = a > 0;
+      ctrl._drivePitchAnimation(a);
+    } else {
+      // conserva último estado; si no hay, por defecto “arriba”
+      up = ctrl._activePitchUp ?? true;
+      ctrl._hideAnimationIfVisible();
+    }
+
+    final hint = up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
     return _HintAnim(_Axis.pitch, hint);
   }
 }
@@ -337,21 +315,29 @@ class _RollRule extends _ValidationRule {
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    final rollErr = metric(c);
-    final insideNow = insideNowWith(rollErr);
+    if (_showMaintainNow) {
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
+    }
 
-    if (insideNow || gate.isDwell || c.rollDegForAnim == null) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, null);
+    // Mantener guía direccional hasta dwell
+    final a = c.rollDegForAnim;
+    if (a != null) {
+      final delta = ctrl._deltaToNearest180(a);
+      if (delta.abs() > PoseCaptureController._rollHintDeadzoneDeg) {
+        ctrl._driveRollAnimation(delta);
+        final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
+        final hint = ccwForUser
+            ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
+            : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
+        return _HintAnim(_Axis.roll, hint);
+      }
     }
-    final delta = ctrl._deltaToNearest180(c.rollDegForAnim!);
-    if (delta.abs() <= PoseCaptureController._rollHintDeadzoneDeg) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, null);
-    }
-    ctrl._driveRollAnimation(delta);
-    final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
-    final hint = ccwForUser
+
+    // Sin señal suficiente: usa último estado recordado
+    final ccw = ctrl._activeRollPositive ?? true;
+    ctrl._hideAnimationIfVisible();
+    final hint = ccw
         ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
         : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
     return _HintAnim(_Axis.roll, hint);
@@ -373,7 +359,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // ── Modo sin validaciones ──────────────────────────────────────────
     if (!validationsEnabled) {
-      _hideAnimationIfVisible(); 
+      _hideAnimationIfVisible();
       if (frame == null) {
         _stopCountdown();
         final cur = hud.value;
@@ -763,7 +749,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     final current = _rules[_curIdx];
 
-    // ⬅️ NEW: bloquear retroceso durante el primer dwell de la regla actual si así lo pide
+    // Bloquear retroceso durante el primer dwell si la regla lo pide
     final bool lockCurrentFirstDwell =
         current.blockInterruptionDuranteValidacion &&
             !current.gate.hasConfirmedOnce;
@@ -967,9 +953,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
         _pushHudReady(arc: c.arcProgress);
       } else {
         _pushHudAdjusting(
-            faceOk: c.faceOk,
-            arcProgress: c.arcProgress,
-            finalHint: ha.hint);
+          faceOk: c.faceOk,
+          arcProgress: c.arcProgress,
+          finalHint: ha.hint,
+        );
       }
     }
 
@@ -1009,18 +996,29 @@ extension _OnFrameLogicExt on PoseCaptureController {
   }) {
     final cur = hud.value;
 
-    // ⬇️ Fallback específico por regla actual (azimut vs. cabeza)
-    final defaultMsg =
-        _isCurrentRule('azimut') ? 'Mantén el torso recto' : 'Mantén la cabeza recta';
+    final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
+
+    String? maintainMsg;
+    if (!_isDone) {
+      switch (_currentRule.id) {
+        case 'azimut':    maintainMsg = 'Mantén el torso recto'; break;
+        case 'shoulders': maintainMsg = 'Mantén los hombros nivelados'; break;
+        default:          maintainMsg = 'Mantén la cabeza recta';
+      }
+    }
+
+    // ⬇️ forzamos a String (no null). Usa '' para “no mostrar nada”.
+    final String effectiveMsg = faceOk
+        ? (_nullIfBlank(finalHint) ??
+            (maintainNow ? (maintainMsg ?? '') : '')) // ← nunca null
+        : 'Ubica tu rostro dentro del óvalo';
 
     _setHud(
       PortraitUiModel(
         statusLabel: 'Adjusting',
         privacyLabel: cur.privacyLabel,
-        primaryMessage: faceOk
-            ? (_nullIfBlank(finalHint) ?? defaultMsg)
-            : 'Ubica tu rostro dentro del óvalo',
-        secondaryMessage: null, // el mensaje accionable es primario
+        primaryMessage: effectiveMsg,        // ← ahora es String
+        secondaryMessage: null,
         checkFraming: faceOk ? Tri.ok : Tri.almost,
         checkHead: faceOk ? (_isDone ? Tri.ok : Tri.almost) : Tri.pending,
         checkEyes: Tri.almost,
