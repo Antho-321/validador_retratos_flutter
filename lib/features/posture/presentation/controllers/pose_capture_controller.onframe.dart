@@ -102,190 +102,224 @@ extension on _ValidationRule {
   bool get _showMaintainNow => gate.isDwell;
 }
 
-// ── Reglas concretas (leen bandas desde el profile inyectado) ──────────
+// ───────────────────────────────────────────────────────────────────────
+// Unified rule strategy: descriptors + single _BandRule implementation
+// ───────────────────────────────────────────────────────────────────────
 
-class _AzimutRule extends _ValidationRule {
-  _AzimutRule(this.profile, _AxisGate gate)
-      : super(
-          id: 'azimut',
-          gate: gate,
-          blockInterruptionDuranteValidacion: true,
-        );
+// Strategy typedefs
+typedef _MetricFn<S> = double? Function(
+  _EvalCtx c,
+  _AxisGate gate,
+  ValidationProfile p,
+  S state,
+);
+
+typedef _HintFn<S> = _HintAnim Function(
+  PoseCaptureController ctrl,
+  _EvalCtx c,
+  bool maintainNow,
+  ValidationProfile p,
+  S state,
+);
+
+// Descriptor that wires a rule together
+class _RuleDesc<S> {
+  const _RuleDesc({
+    required this.id,
+    required this.makeState,
+    required this.metric,
+    required this.hint,
+    this.ignorePrevBreakOf = const <String>{},
+    this.blockInterruptionDuranteValidacion = false,
+  });
+
+  final String id;
+  final S Function() makeState;
+  final _MetricFn<S> metric;
+  final _HintFn<S> hint;
+  final Set<String> ignorePrevBreakOf;
+  final bool blockInterruptionDuranteValidacion;
+}
+
+// Single unified rule that uses the descriptor
+class _BandRule<S> extends _ValidationRule {
+  _BandRule({
+    required this.profile,
+    required this.desc,
+    required _AxisGate gate,
+  }) : _state = desc.makeState(),
+       super(
+         id: desc.id,
+         gate: gate,
+         ignorePrevBreakOf: desc.ignorePrevBreakOf,
+         blockInterruptionDuranteValidacion:
+             desc.blockInterruptionDuranteValidacion,
+       );
 
   final ValidationProfile profile;
+  final _RuleDesc<S> desc;
+  final S _state;
 
-  // Memoria de dirección (evita silencio antes de dwell)
-  _TurnDir _lastDir = _TurnDir.right;
-
-  // Métrica firmada: negativa dentro de [lo, hi], 0 en borde, positiva fuera.
   @override
-  double? metric(_EvalCtx c) {
-    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
+  double? metric(_EvalCtx c) => desc.metric(c, gate, profile, _state);
+
+  @override
+  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) =>
+      desc.hint(ctrl, c, _showMaintainNow, profile, _state);
+}
+
+// ── Common metric helpers used by descriptors ──────────────────────────
+
+double _metricSignedBand(
+  double value,
+  _AxisGate gate,
+  double lo0,
+  double hi0,
+) {
+  final delta = gate.hysteresis - gate.tighten;
+  final expand = delta > 0 ? delta : 0.0;
+  final lo = gate.firstAttemptDone ? (lo0 - expand) : lo0;
+  final hi = gate.firstAttemptDone ? (hi0 + expand) : hi0;
+  return PoseCaptureController._signedDistanceToBand(value, lo, hi);
+}
+
+double? _metricFromKey(
+  MetricRegistry reg,
+  FrameInputs i,
+  MetricKey key,
+) {
+  return reg.get<double>(key, i); // <- pide double
+}
+
+// ── Rule descriptors (replace previous concrete classes) ───────────────
+
+// AZIMUT
+class _AzimutState {
+  _TurnDir lastDir = _TurnDir.right;
+}
+
+final _RuleDesc<_AzimutState> _azimutDesc = _RuleDesc<_AzimutState>(
+  id: 'azimut',
+  makeState: () => _AzimutState(),
+  blockInterruptionDuranteValidacion: true,
+  metric: (c, gate, p, s) {
+    final double? a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
     if (a == null) return null;
-
-    final double delta = gate.hysteresis - gate.tighten;
-    final double expand = (delta > 0) ? delta : 0.0;
-
-    final double lo = (gate.firstAttemptDone
-            ? (profile.azimutBand.lo - expand)
-            : profile.azimutBand.lo)
-        .toDouble();
-
-    final double hi = (gate.firstAttemptDone
-            ? (profile.azimutBand.hi + expand)
-            : profile.azimutBand.hi)
-        .toDouble();
-
-    return PoseCaptureController._signedDistanceToBand(a, lo, hi);
-  }
-
-  @override
-  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    // En dwell → mensaje neutral
-    if (_showMaintainNow) {
+    return _metricSignedBand(
+      a,
+      gate,
+      p.azimutBand.lo.toDouble(),
+      p.azimutBand.hi.toDouble(),
+    );
+  },
+  hint: (ctrl, c, maintain, p, s) {
+    if (maintain) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén el torso recto');
     }
 
     // Mantener guía direccional hasta dwell (con deadzone y último lado)
-    final double? a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
+    final a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
     if (a != null) {
-      final center = (profile.azimutBand.lo + profile.azimutBand.hi) / 2.0;
-      if ((a - center).abs() > profile.ui.azimutHintDeadzoneDeg) {
-        _lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
+      final center = (p.azimutBand.lo + p.azimutBand.hi) / 2.0;
+      if ((a - center).abs() > p.ui.azimutHintDeadzoneDeg) {
+        s.lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
       }
     }
 
-    final hint = (_lastDir == _TurnDir.left)
+    ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
+    final txt = (s.lastDir == _TurnDir.left)
         ? 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás'
         : 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás';
+    return _HintAnim(_Axis.none, txt);
+  },
+);
 
-    ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
-    return _HintAnim(_Axis.none, hint);
-  }
+// SHOULDERS
+class _ShouldersState {
+  int lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
 }
 
-class _ShouldersRule extends _ValidationRule {
-  _ShouldersRule(this.profile, _AxisGate gate)
-      : super(
-          id: 'shoulders',
-          gate: gate,
-          blockInterruptionDuranteValidacion: true,
-        );
-
-  final ValidationProfile profile;
-
-  // Memoria de signo para mantener guía
-  int _lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
-
-  /// Métrica firmada: distancia a [lo, hi] (negativa dentro, 0 en borde, positiva fuera).
-  @override
-  double? metric(_EvalCtx c) {
-    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
-    if (s == null) return null;
-
-    final double delta = gate.hysteresis - gate.tighten;
-    final double expand = (delta > 0) ? delta : 0.0;
-
-    final double lo = (gate.firstAttemptDone
-            ? (profile.shouldersBand.lo - expand)
-            : profile.shouldersBand.lo)
-        .toDouble();
-
-    final double hi = (gate.firstAttemptDone
-            ? (profile.shouldersBand.hi + expand)
-            : profile.shouldersBand.hi)
-        .toDouble();
-
-    return PoseCaptureController._signedDistanceToBand(s, lo, hi);
-  }
-
-  @override
-  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (_showMaintainNow) {
+final _RuleDesc<_ShouldersState> _shouldersDesc = _RuleDesc<_ShouldersState>(
+  id: 'shoulders',
+  makeState: () => _ShouldersState(),
+  blockInterruptionDuranteValidacion: true,
+  metric: (c, gate, p, s) {
+    final double? sv = c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
+    if (sv == null) return null;
+    return _metricSignedBand(
+      sv,
+      gate,
+      p.shouldersBand.lo.toDouble(),
+      p.shouldersBand.hi.toDouble(),
+    );
+  },
+  hint: (ctrl, c, maintain, p, s) {
+    if (maintain) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén los hombros nivelados');
     }
 
-    final double? s = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
-    if (s != null && s.abs() > profile.ui.shouldersHintDeadzoneDeg) {
-      _lastSign = s > 0 ? 1 : -1;
+    final sv = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
+    if (sv != null && sv.abs() > p.ui.shouldersHintDeadzoneDeg) {
+      s.lastSign = sv > 0 ? 1 : -1;
     }
 
-    final hint = (_lastSign > 0)
+    ctrl._hideAnimationIfVisible();
+    final txt = (s.lastSign > 0)
         ? 'Baja un poco el hombro derecho o sube el izquierdo'
         : 'Baja un poco el hombro izquierdo o sube el derecho';
+    return _HintAnim(_Axis.none, txt);
+  },
+);
 
-    ctrl._hideAnimationIfVisible();
-    return _HintAnim(_Axis.none, hint);
-  }
-}
-
-class _YawRule extends _ValidationRule {
-  _YawRule(this.profile, _AxisGate gate)
-      : super(
-          id: 'yaw',
-          gate: gate,
-          ignorePrevBreakOf: const {'azimut', 'shoulders'},
-        );
-
-  final ValidationProfile profile;
-
-  @override
-  double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.yawAbs, c.inputs);
-
-  @override
-  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (_showMaintainNow) {
+// YAW
+final _RuleDesc<void> _yawDesc = _RuleDesc<void>(
+  id: 'yaw',
+  makeState: () => null,
+  ignorePrevBreakOf: const {'azimut', 'shoulders'},
+  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.yawAbs),
+  hint: (ctrl, c, maintain, p, _) {
+    if (maintain) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
     }
 
-    // Mantener guía direccional hasta dwell
     final a = c.yawDegForAnim; // firmado
     _TurnDir dir;
 
-    if (a != null && a.abs() > profile.ui.yawHintDeadzoneDeg) {
+    if (a != null && a.abs() > p.ui.yawHintDeadzoneDeg) {
       dir = (a > 0) ? _TurnDir.left : _TurnDir.right;
       ctrl._driveYawAnimation(a);
     } else {
       // conserva último lado conocido (si no hay, default left)
       dir = (ctrl._activeTurn != _TurnDir.none) ? ctrl._activeTurn : _TurnDir.left;
-      ctrl._hideAnimationIfVisible(); // opcional: mantener anim si prefieres
+      ctrl._hideAnimationIfVisible();
     }
 
-    final hint = (dir == _TurnDir.left)
+    final txt = (dir == _TurnDir.left)
         ? 'Gira ligeramente la cabeza a la izquierda'
         : 'Gira ligeramente la cabeza a la derecha';
-    return _HintAnim(_Axis.yaw, hint);
-  }
-}
+    return _HintAnim(_Axis.yaw, txt);
+  },
+);
 
-class _PitchRule extends _ValidationRule {
-  _PitchRule(this.profile, _AxisGate gate)
-      : super(
-          id: 'pitch',
-          gate: gate,
-          ignorePrevBreakOf: const {'azimut', 'shoulders'},
-        );
-
-  final ValidationProfile profile;
-
-  @override
-  double? metric(_EvalCtx c) => c.metrics.get(MetricKeys.pitchAbs, c.inputs);
-
-  @override
-  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (_showMaintainNow) {
+// PITCH
+final _RuleDesc<void> _pitchDesc = _RuleDesc<void>(
+  id: 'pitch',
+  makeState: () => null,
+  ignorePrevBreakOf: const {'azimut', 'shoulders'},
+  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.pitchAbs),
+  hint: (ctrl, c, maintain, p, _) {
+    if (maintain) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
     }
 
-    // Mantener guía direccional hasta dwell
     final a = c.pitchDegForAnim; // + arriba, - abajo
     bool up;
 
-    if (a != null && a.abs() > profile.ui.pitchHintDeadzoneDeg) {
+    if (a != null && a.abs() > p.ui.pitchHintDeadzoneDeg) {
       up = a > 0;
       ctrl._drivePitchAnimation(a);
     } else {
@@ -294,28 +328,19 @@ class _PitchRule extends _ValidationRule {
       ctrl._hideAnimationIfVisible();
     }
 
-    final hint = up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
-    return _HintAnim(_Axis.pitch, hint);
-  }
-}
+    final txt = up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
+    return _HintAnim(_Axis.pitch, txt);
+  },
+);
 
-class _RollRule extends _ValidationRule {
-  _RollRule(this.profile, _AxisGate gate)
-      : super(
-          id: 'roll',
-          gate: gate,
-          ignorePrevBreakOf: const {'azimut', 'shoulders'},
-        );
-
-  final ValidationProfile profile;
-
-  @override
-  double? metric(_EvalCtx c) =>
-      c.metrics.get(MetricKeys.rollErr, c.inputs); // distancia a 180°
-
-  @override
-  _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) {
-    if (_showMaintainNow) {
+// ROLL
+final _RuleDesc<void> _rollDesc = _RuleDesc<void>(
+  id: 'roll',
+  makeState: () => null,
+  ignorePrevBreakOf: const {'azimut', 'shoulders'},
+  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.rollErr),
+  hint: (ctrl, c, maintain, p, _) {
+    if (maintain) {
       ctrl._hideAnimationIfVisible();
       return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
     }
@@ -324,25 +349,25 @@ class _RollRule extends _ValidationRule {
     final a = c.rollDegForAnim;
     if (a != null) {
       final delta = ctrl._deltaToNearest180(a);
-      if (delta.abs() > profile.ui.rollHintDeadzoneDeg) {
+      if (delta.abs() > p.ui.rollHintDeadzoneDeg) {
         ctrl._driveRollAnimation(delta);
         final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
-        final hint = ccwForUser
+        final txt = ccwForUser
             ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
             : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
-        return _HintAnim(_Axis.roll, hint);
+        return _HintAnim(_Axis.roll, txt);
       }
     }
 
     // Sin señal suficiente: usa último estado recordado
     final ccw = ctrl._activeRollPositive ?? true;
     ctrl._hideAnimationIfVisible();
-    final hint = ccw
+    final txt = ccw
         ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
         : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
-    return _HintAnim(_Axis.roll, hint);
-  }
-}
+    return _HintAnim(_Axis.roll, txt);
+  },
+);
 
 // ── Estado por instancia para reglas usando Expando (sin tocar la clase) ──
 final Expando<List<_ValidationRule>> _rulesExp = Expando('_rules');
@@ -362,18 +387,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
       _hideAnimationIfVisible();
       if (frame == null) {
         _stopCountdown();
-        final cur = hud.value;
         _setHud(
-          PortraitUiModel(
-            statusLabel: 'Searching',
-            privacyLabel: cur.privacyLabel,
+          const PortraitUiModel(
             primaryMessage: 'Vista previa (validaciones OFF)',
             secondaryMessage: null,
-            checkFraming: Tri.pending,
-            checkHead: Tri.pending,
-            checkEyes: Tri.pending,
-            checkLighting: Tri.pending,
-            checkBackground: Tri.pending,
             countdownSeconds: null,
             countdownProgress: null,
             ovalProgress: 0.0,
@@ -382,18 +399,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
         );
       } else {
         if (isCountingDown) _stopCountdown(); // no auto-countdown en modo OFF
-        final cur = hud.value;
         _setHud(
-          PortraitUiModel(
-            statusLabel: 'Preview',
-            privacyLabel: cur.privacyLabel,
+          const PortraitUiModel(
             primaryMessage: 'Validaciones desactivadas',
             secondaryMessage: null,
-            checkFraming: Tri.ok,
-            checkHead: Tri.almost,
-            checkEyes: cur.checkEyes ?? Tri.almost,
-            checkLighting: cur.checkLighting ?? Tri.almost,
-            checkBackground: cur.checkBackground ?? Tri.almost,
             countdownSeconds: null,
             countdownProgress: null,
             ovalProgress: 1.0,
@@ -441,9 +450,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     final list = <_ValidationRule>[
       // AZIMUT
-      _AzimutRule(
-        p,
-        _AxisGate(
+      _BandRule(
+        profile: p,
+        desc: _azimutDesc,
+        gate: _AxisGate(
           baseDeadband: p.azimutGate.baseDeadband,
           sense: _mapSense(p.azimutGate.sense),
           tighten: p.azimutGate.tighten,
@@ -454,9 +464,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
       ),
 
       // SHOULDERS
-      _ShouldersRule(
-        p,
-        _AxisGate(
+      _BandRule(
+        profile: p,
+        desc: _shouldersDesc,
+        gate: _AxisGate(
           baseDeadband: p.shouldersGate.baseDeadband,
           sense: _mapSense(p.shouldersGate.sense),
           tighten: p.shouldersGate.tighten,
@@ -466,9 +477,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ),
       ),
 
-      _YawRule(
-        p,
-        _AxisGate(
+      // YAW
+      _BandRule(
+        profile: p,
+        desc: _yawDesc,
+        gate: _AxisGate(
           baseDeadband: p.yaw.baseDeadband,
           sense: _mapSense(p.yaw.sense),
           tighten: p.yaw.tighten,
@@ -478,9 +491,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ),
       ),
 
-      _PitchRule(
-        p,
-        _AxisGate(
+      // PITCH
+      _BandRule(
+        profile: p,
+        desc: _pitchDesc,
+        gate: _AxisGate(
           baseDeadband: p.pitch.baseDeadband,
           sense: _mapSense(p.pitch.sense),
           tighten: p.pitch.tighten,
@@ -490,9 +505,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ),
       ),
 
-      _RollRule(
-        p,
-        _AxisGate(
+      // ROLL
+      _BandRule(
+        profile: p,
+        desc: _rollDesc,
+        gate: _AxisGate(
           baseDeadband: p.roll.baseDeadband,
           sense: _mapSense(p.roll.sense),
           tighten: p.roll.tighten,
@@ -529,7 +546,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     return null;
   }
 
-  // ⬇️ Helper para saber si una regla es la actual
+  // Helper para saber si una regla es la actual
   bool _isCurrentRule(String id) => !_isDone && _currentRule.id == id;
 
   // ─────────────────────────────────────────────────────────────────────
@@ -538,18 +555,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
   void _handleFaceLost() {
     _stopCountdown(); // from mixin
 
-    final cur = hud.value;
     _setHud(
-      PortraitUiModel(
-        statusLabel: 'Searching',
-        privacyLabel: cur.privacyLabel,
+      const PortraitUiModel(
         primaryMessage: 'Show your face in the oval',
         secondaryMessage: null,
-        checkFraming: Tri.pending,
-        checkHead: Tri.pending,
-        checkEyes: Tri.pending,
-        checkLighting: Tri.pending,
-        checkBackground: Tri.pending,
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: 0.0,
@@ -668,7 +677,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       // Shoulders (nivelación)
       poseLandmarksImg: inputs.poseLandmarksImg,
       enableShoulders: true,
-      shouldersDeadbandDeg: shouldersTolSymNow, // ← dinámico simétrico para UI
+      shouldersDeadbandDeg: shouldersTolSymNow, // dinámico simétrico para UI
       shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
     );
 
@@ -973,18 +982,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
   }
 
   void _pushHudReady({required double arc}) {
-    final cur = hud.value;
     _setHud(
       PortraitUiModel(
-        statusLabel: 'Ready',
-        privacyLabel: cur.privacyLabel,
         primaryMessage: '¡Perfecto! ¡Permanece así!',
         secondaryMessage: null,
-        checkFraming: Tri.ok,
-        checkHead: Tri.ok,
-        checkEyes: cur.checkEyes ?? Tri.almost,
-        checkLighting: cur.checkLighting ?? Tri.almost,
-        checkBackground: cur.checkBackground ?? Tri.almost,
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: arc,
@@ -997,8 +998,6 @@ extension _OnFrameLogicExt on PoseCaptureController {
     required double arcProgress,
     required String? finalHint,
   }) {
-    final cur = hud.value;
-
     final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
 
     String? maintainMsg;
@@ -1010,23 +1009,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
       }
     }
 
-    // ⬇️ forzamos a String (no null). Usa '' para “no mostrar nada”.
+    // Forzamos a String (no null). Usa '' para “no mostrar nada”.
     final String effectiveMsg = faceOk
         ? (_nullIfBlank(finalHint) ??
-            (maintainNow ? (maintainMsg ?? '') : '')) // ← nunca null
+            (maintainNow ? (maintainMsg ?? '') : '')) // nunca null
         : 'Ubica tu rostro dentro del óvalo';
 
     _setHud(
       PortraitUiModel(
-        statusLabel: 'Adjusting',
-        privacyLabel: cur.privacyLabel,
-        primaryMessage: effectiveMsg,        // ← ahora es String
+        primaryMessage: effectiveMsg,
         secondaryMessage: null,
-        checkFraming: faceOk ? Tri.ok : Tri.almost,
-        checkHead: faceOk ? (_isDone ? Tri.ok : Tri.almost) : Tri.pending,
-        checkEyes: Tri.almost,
-        checkLighting: Tri.almost,
-        checkBackground: Tri.almost,
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: arcProgress,
@@ -1036,7 +1028,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// (F) Cinemática de ROLL (mantener compatibilidad con HUD/velocidades)
+/* (F) Cinemática de ROLL (mantener compatibilidad con HUD/velocidades) */
 // ───────────────────────────────────────────────────────────────────────
 extension _RollMathKinematics on PoseCaptureController {
   _RollMetrics updateRollKinematics(double rawRollDeg, DateTime now) {

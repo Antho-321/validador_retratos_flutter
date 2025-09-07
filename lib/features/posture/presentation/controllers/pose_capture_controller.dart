@@ -21,8 +21,7 @@ import '../../domain/validators/portrait_validations.dart'
 import '../../domain/validation_profile.dart' show ValidationProfile, GateSense;
 
 import '../../domain/metrics/pose_geometry.dart' as geom;  // ⬅️ NUEVO
-import '../../domain/metrics/metrics.dart'
-    show MetricRegistry, FrameInputs, MetricKeys;
+import '../../domain/metrics/metrics.dart';
 part 'pose_capture_controller.onframe.dart';
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
@@ -381,8 +380,6 @@ class PoseCaptureController extends ChangeNotifier {
         profile = validationProfile ?? ValidationProfile.defaultProfile, // ⇠ NEW
         hud = PortraitUiController(
           const PortraitUiModel(
-            statusLabel: 'Adjusting',
-            privacyLabel: 'On-device',
             primaryMessage: 'Ubica tu rostro dentro del óvalo',
             ovalProgress: 0.0,
           ),
@@ -439,15 +436,8 @@ class PoseCaptureController extends ChangeNotifier {
         final cur = hud.value;
         _setHud(
           PortraitUiModel(
-            statusLabel: cur.statusLabel,
-            privacyLabel: cur.privacyLabel,
             primaryMessage: cur.primaryMessage,
             secondaryMessage: cur.secondaryMessage,
-            checkFraming: cur.checkFraming,
-            checkHead: cur.checkHead,
-            checkEyes: cur.checkEyes,
-            checkLighting: cur.checkLighting,
-            checkBackground: cur.checkBackground,
             countdownSeconds: null,
             countdownProgress: null,
             ovalProgress: cur.ovalProgress,
@@ -725,16 +715,10 @@ extension _HudHelpers on PoseCaptureController {
 
     final cur = hud.value;
     final same =
-        cur.statusLabel == next.statusLabel &&
         cur.primaryMessage == next.primaryMessage &&
         cur.secondaryMessage == next.secondaryMessage &&
         cur.countdownSeconds == next.countdownSeconds &&
         cur.countdownProgress == next.countdownProgress &&
-        cur.checkFraming == next.checkFraming &&
-        cur.checkHead == next.checkHead &&
-        cur.checkEyes == next.checkEyes &&
-        cur.checkLighting == next.checkLighting &&
-        cur.checkBackground == next.checkBackground &&
         cur.ovalProgress == next.ovalProgress;
 
     if (!same) {
@@ -757,15 +741,8 @@ extension _CountdownHelpers on PoseCaptureController {
     final cur = hud.value;
     _setHud(
       PortraitUiModel(
-        statusLabel: cur.statusLabel,
-        privacyLabel: cur.privacyLabel,
         primaryMessage: cur.primaryMessage,
         secondaryMessage: cur.secondaryMessage,
-        checkFraming: cur.checkFraming,
-        checkHead: cur.checkHead,
-        checkEyes: cur.checkEyes,
-        checkLighting: cur.checkLighting,
-        checkBackground: cur.checkBackground,
         countdownSeconds: null, // cleared for real
         countdownProgress: null, // cleared for real
         ovalProgress: cur.ovalProgress,
