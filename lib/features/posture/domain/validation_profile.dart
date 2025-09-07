@@ -111,13 +111,13 @@ class ValidationProfile {
     yaw: GateConfig(
       baseDeadband: 1.6,
       tighten: 1,
-      hysteresis: 1,
+      hysteresis: 1.1,
       maxOffDeg: 20.0,
     ),
     pitch: GateConfig(
       baseDeadband: 1.6,
       tighten: 1,
-      hysteresis: 1,
+      hysteresis: 1.1,
       maxOffDeg: 20.0,
     ),
     roll: GateConfig(
