@@ -13,6 +13,7 @@ import '../../services/pose_webrtc_service.dart';
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
+import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 
 import '../controllers/pose_capture_controller.dart';
 
@@ -137,6 +138,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                           fit: BoxFit.cover,
                           showSafeBox: false,
                           messageGap: 0.045,
+                          ovalRectFor: (sz) {
+                            final r   = faceOvalRectFor(sz);
+                            final newW = r.width  * 0.90;     // 10% más angosto
+                            final newH = r.height * 0.85;     // 15% más bajo
+                            final dx   = (r.width  - newW) / 2; // centrar horizontalmente
+                            final dy   = (r.height - newH) / 2; // centrar verticalmente
+                            return Rect.fromLTWH(r.left + dx, r.top + dy, newW, newH);
+                          },
                         ),
                       ),
                     ),

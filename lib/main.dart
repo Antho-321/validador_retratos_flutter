@@ -20,6 +20,7 @@ Future<void> main() async {
   final offerUrl = const String.fromEnvironment(
     'POSE_WEBRTC_URL',
     defaultValue: 'http://192.168.100.5:8000/webrtc/offer',
+    //defaultValue: 'http://192.168.1.103:8000/webrtc/offer',
   );
 
   final poseService = PoseWebRTCService(

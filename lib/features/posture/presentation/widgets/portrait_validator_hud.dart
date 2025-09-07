@@ -72,7 +72,10 @@ class PortraitValidatorHUD extends StatelessWidget {
     this.belowMessages,
     this.messageGap = 0.0125,
     this.keepAboveCountdownRing = true,
-  });
+
+    // NEW: permite personalizar el rect del óvalo
+    Rect Function(Size size)? ovalRectFor,
+  }) : ovalRectFor = ovalRectFor ?? faceOvalRectFor;
 
   final ValueListenable<PortraitUiModel> modelListenable;
 
@@ -87,6 +90,9 @@ class PortraitValidatorHUD extends StatelessWidget {
   final double messageGap;
   final bool keepAboveCountdownRing;
 
+  // NEW
+  final Rect Function(Size size) ovalRectFor;
+
   @override
   Widget build(BuildContext context) {
     final screen = MediaQuery.of(context).size;
@@ -99,10 +105,11 @@ class PortraitValidatorHUD extends StatelessWidget {
     return ValueListenableBuilder<PortraitUiModel>(
       valueListenable: modelListenable,
       builder: (context, model, _) {
-        final ovalRect = faceOvalRectFor(screen);
-        final double gapPx = screen.height * messageGap.clamp(0.0, 1.0).toDouble();
+        final Rect ovalRect = ovalRectFor(screen); // NEW
+        final double gapPx =
+            screen.height * messageGap.clamp(0.0, 1.0).toDouble();
 
-        final desiredTop = ovalRect.bottom + gapPx;
+        final desiredTop = ovalRect.bottom + gapPx; // usa el rect personalizado
         final ringTop = screen.height - (ringBottom + safe.bottom + ringSize);
         final messagesTop = keepAboveCountdownRing
             ? math.min(desiredTop, ringTop - 8)
@@ -114,6 +121,7 @@ class PortraitValidatorHUD extends StatelessWidget {
             Positioned.fill(
               child: CustomPaint(
                 painter: _GhostPainter(
+                  ovalRect: ovalRect,           // NEW
                   color: Colors.white,
                   opacity: 0.85,
                   strokeWidth: 2.0,
@@ -166,9 +174,10 @@ class PortraitValidatorHUD extends StatelessWidget {
   }
 }
 
-/// Pintor del óvalo/área segura (sin cambios sustanciales)
+/// Pintor del óvalo/área segura
 class _GhostPainter extends CustomPainter {
   _GhostPainter({
+    required this.ovalRect,        // NEW
     required this.color,
     required this.opacity,
     required this.strokeWidth,
@@ -179,6 +188,7 @@ class _GhostPainter extends CustomPainter {
     this.progress = 0.0,
   });
 
+  final Rect ovalRect;            // NEW
   final Color color;
   final double opacity;
   final double strokeWidth;
@@ -192,8 +202,6 @@ class _GhostPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     if (!showGhost) return;
-
-    final ovalRect = faceOvalRectFor(size);
 
     if (shadeOutsideOval) {
       final mask = Path()
@@ -209,6 +217,7 @@ class _GhostPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth
       ..isAntiAlias = true;
+
     canvas.drawOval(ovalRect, base);
 
     final p = progress.clamp(0.0, 1.0);
@@ -242,16 +251,16 @@ class _GhostPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _GhostPainter old) {
-    return old.opacity != opacity ||
-           old.strokeWidth != strokeWidth ||
-           old.color != color ||
-           old.showGhost != showGhost ||
-           old.showSafeBox != showSafeBox ||
-           old.shadeOutsideOval != shadeOutsideOval ||
-           old.shadeOpacity != shadeOpacity ||
-           old.progress != progress;
-  }
+  bool shouldRepaint(covariant _GhostPainter old) =>
+      old.ovalRect != ovalRect || // NEW
+      old.opacity != opacity ||
+      old.strokeWidth != strokeWidth ||
+      old.color != color ||
+      old.showGhost != showGhost ||
+      old.showSafeBox != showSafeBox ||
+      old.shadeOutsideOval != shadeOutsideOval ||
+      old.shadeOpacity != shadeOpacity ||
+      old.progress != progress;
 }
 
 /// Pastilla de guía (principal + opcional secundaria)
