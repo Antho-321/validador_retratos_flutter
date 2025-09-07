@@ -36,6 +36,13 @@ class _HintAnim {
   final String? hint;
 }
 
+// Mensajes estáticos de “mantener” por regla
+const Map<String, String> _maintainById = <String, String>{
+  'azimut': 'Mantén el torso recto',
+  'shoulders': 'Mantén los hombros nivelados',
+  // default → “Mantén la cabeza recta”
+};
+
 // Map domain GateSense → internal _GateSense
 _GateSense _mapSense(GateSense s) =>
     s == GateSense.insideIsOk ? _GateSense.insideIsOk : _GateSense.outsideIsOk;
@@ -48,16 +55,6 @@ bool _insideNowScalar(_AxisGate g, double value) {
   final th = g.enterBand;
   final inside = g.sense == _GateSense.insideIsOk;
   return inside ? (value <= th) : (value >= th);
-}
-
-bool _insideNowSignedBand(
-  _AxisGate g, {
-  required double angleDeg,
-  required double lo,
-  required double hi,
-}) {
-  final dist = PoseCaptureController._signedDistanceToBand(angleDeg, lo, hi);
-  return _insideNowScalar(g, dist);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -103,72 +100,47 @@ extension on _ValidationRule {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Unified rule strategy: descriptors + single _BandRule implementation
+// Versión simplificada: reglas basadas en closures
 // ───────────────────────────────────────────────────────────────────────
 
-// Strategy typedefs
-typedef _MetricFn<S> = double? Function(
-  _EvalCtx c,
-  _AxisGate gate,
-  ValidationProfile p,
-  S state,
-);
-
-typedef _HintFn<S> = _HintAnim Function(
-  PoseCaptureController ctrl,
-  _EvalCtx c,
-  bool maintainNow,
-  ValidationProfile p,
-  S state,
-);
-
-// Descriptor that wires a rule together
-class _RuleDesc<S> {
-  const _RuleDesc({
-    required this.id,
-    required this.makeState,
-    required this.metric,
-    required this.hint,
-    this.ignorePrevBreakOf = const <String>{},
-    this.blockInterruptionDuranteValidacion = false,
-  });
-
-  final String id;
-  final S Function() makeState;
-  final _MetricFn<S> metric;
-  final _HintFn<S> hint;
-  final Set<String> ignorePrevBreakOf;
-  final bool blockInterruptionDuranteValidacion;
-}
-
-// Single unified rule that uses the descriptor
-class _BandRule<S> extends _ValidationRule {
-  _BandRule({
-    required this.profile,
-    required this.desc,
+class _ClosureRule extends _ValidationRule {
+  _ClosureRule({
+    required String id,
     required _AxisGate gate,
-  })  : _state = desc.makeState(),
+    required double? Function(_EvalCtx) metric,
+    required _HintAnim Function(PoseCaptureController, _EvalCtx, bool) hint,
+    Set<String> ignorePrevBreakOf = const {},
+    bool blockInterruptionDuranteValidacion = false,
+  })  : _metric = metric,
+        _hint = hint,
         super(
-          id: desc.id,
+          id: id,
           gate: gate,
-          ignorePrevBreakOf: desc.ignorePrevBreakOf,
-          blockInterruptionDuranteValidacion:
-              desc.blockInterruptionDuranteValidacion,
+          ignorePrevBreakOf: ignorePrevBreakOf,
+          blockInterruptionDuranteValidacion: blockInterruptionDuranteValidacion,
         );
 
-  final ValidationProfile profile;
-  final _RuleDesc<S> desc;
-  final S _state;
+  final double? Function(_EvalCtx) _metric;
+  final _HintAnim Function(PoseCaptureController, _EvalCtx, bool) _hint;
 
   @override
-  double? metric(_EvalCtx c) => desc.metric(c, gate, profile, _state);
+  double? metric(_EvalCtx c) => _metric(c);
 
   @override
   _HintAnim buildHint(PoseCaptureController ctrl, _EvalCtx c) =>
-      desc.hint(ctrl, c, _showMaintainNow, profile, _state);
+      _hint(ctrl, c, _showMaintainNow);
 }
 
-// ── Common metric helpers used by descriptors ──────────────────────────
+// ── Common metric helpers used by closures ─────────────────────────────
+
+_AxisGate _gateFrom(dynamic g) => _AxisGate(
+      baseDeadband: g.baseDeadband,
+      sense: _mapSense(g.sense),
+      tighten: g.tighten,
+      hysteresis: g.hysteresis,
+      dwell: g.dwell,
+      extraRelaxAfterFirst: g.extraRelaxAfterFirst,
+    );
 
 double _metricSignedBand(
   double value,
@@ -176,207 +148,164 @@ double _metricSignedBand(
   double lo0,
   double hi0,
 ) {
-  final delta = gate.hysteresis - gate.tighten;
-  final expand = delta > 0 ? delta : 0.0;
-  final lo = gate.firstAttemptDone ? (lo0 - expand) : lo0;
-  final hi = gate.firstAttemptDone ? (hi0 + expand) : hi0;
+  final double expand =
+      (gate.hysteresis - gate.tighten).clamp(0.0, double.infinity);
+  final double lo = gate.firstAttemptDone ? (lo0 - expand) : lo0;
+  final double hi = gate.firstAttemptDone ? (hi0 + expand) : hi0;
   return PoseCaptureController._signedDistanceToBand(value, lo, hi);
 }
 
-double? _metricFromKey(
-  MetricRegistry reg,
-  FrameInputs i,
-  MetricKey key,
-) {
-  return reg.get<double>(key, i); // <- pide double
-}
-
-// ── Rule descriptors (replace previous concrete classes) ───────────────
+// ── Rule builders (state captured in closures) ─────────────────────────
 
 // AZIMUT
-class _AzimutState {
-  _TurnDir lastDir = _TurnDir.right;
-}
+_ValidationRule makeAzimutRule(ValidationProfile p) {
+  var lastDir = _TurnDir.right; // estado capturado
 
-final _RuleDesc<_AzimutState> _azimutDesc = _RuleDesc<_AzimutState>(
-  id: 'azimut',
-  makeState: () => _AzimutState(),
-  blockInterruptionDuranteValidacion: true,
-  metric: (c, gate, p, s) {
-    final double? a =
-        c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
-    if (a == null) return null;
-    return _metricSignedBand(
-      a,
-      gate,
-      p.azimutBand.lo.toDouble(),
-      p.azimutBand.hi.toDouble(),
-    );
-  },
-  hint: (ctrl, c, maintain, p, s) {
-    if (maintain) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, 'Mantén el torso recto');
-    }
-
-    // Mantener guía direccional hasta dwell (con deadzone y último lado)
-    final a = c.metrics.get(MetricKeys.azimutSigned, c.inputs);
-    if (a != null) {
-      final center = (p.azimutBand.lo + p.azimutBand.hi) / 2.0;
-      if ((a - center).abs() > p.ui.azimutHintDeadzoneDeg) {
-        s.lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
+  final gate = _gateFrom(p.azimutGate);
+  return _ClosureRule(
+    id: 'azimut',
+    gate: gate,
+    blockInterruptionDuranteValidacion: true,
+    metric: (c) {
+      final double? a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
+      if (a == null) return null;
+      return _metricSignedBand(
+        a,
+        gate,
+        p.azimutBand.lo.toDouble(),
+        p.azimutBand.hi.toDouble(),
+      );
+    },
+    hint: (ctrl, c, maintain) {
+      if (maintain) {
+        ctrl._hideAnimationIfVisible();
+        return const _HintAnim(_Axis.none, 'Mantén el torso recto');
       }
-    }
 
-    ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
-    final txt = (s.lastDir == _TurnDir.left)
-        ? 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás'
-        : 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás';
-    return _HintAnim(_Axis.none, txt);
-  },
-);
+      // Mantener guía direccional hasta dwell (con deadzone y último lado)
+      final a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
+      if (a != null) {
+        final center = (p.azimutBand.lo + p.azimutBand.hi) / 2.0;
+        if ((a - center).abs() > p.ui.azimutHintDeadzoneDeg) {
+          lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
+        }
+      }
+
+      ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
+      final txt = (lastDir == _TurnDir.left)
+          ? 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás'
+          : 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás';
+      return _HintAnim(_Axis.none, txt);
+    },
+  );
+}
 
 // SHOULDERS
-class _ShouldersState {
-  int lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
+_ValidationRule makeShouldersRule(ValidationProfile p) {
+  var lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
+
+  final gate = _gateFrom(p.shouldersGate);
+  return _ClosureRule(
+    id: 'shoulders',
+    gate: gate,
+    blockInterruptionDuranteValidacion: true,
+    metric: (c) {
+      final double? sv =
+          c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
+      if (sv == null) return null;
+      return _metricSignedBand(
+        sv,
+        gate,
+        p.shouldersBand.lo.toDouble(),
+        p.shouldersBand.hi.toDouble(),
+      );
+    },
+    hint: (ctrl, c, maintain) {
+      if (maintain) {
+        ctrl._hideAnimationIfVisible();
+        return const _HintAnim(_Axis.none, 'Mantén los hombros nivelados');
+      }
+
+      final sv = c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
+      if (sv != null && sv.abs() > p.ui.shouldersHintDeadzoneDeg) {
+        lastSign = sv > 0 ? 1 : -1;
+      }
+
+      ctrl._hideAnimationIfVisible();
+      final txt = (lastSign > 0)
+          ? 'Baja un poco el hombro derecho o sube el izquierdo'
+          : 'Baja un poco el hombro izquierdo o sube el derecho';
+      return _HintAnim(_Axis.none, txt);
+    },
+  );
 }
 
-final _RuleDesc<_ShouldersState> _shouldersDesc =
-    _RuleDesc<_ShouldersState>(
-  id: 'shoulders',
-  makeState: () => _ShouldersState(),
-  blockInterruptionDuranteValidacion: true,
-  metric: (c, gate, p, s) {
-    final double? sv =
-        c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
-    if (sv == null) return null;
-    return _metricSignedBand(
-      sv,
-      gate,
-      p.shouldersBand.lo.toDouble(),
-      p.shouldersBand.hi.toDouble(),
-    );
-  },
-  hint: (ctrl, c, maintain, p, s) {
-    if (maintain) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, 'Mantén los hombros nivelados');
-    }
-
-    final sv = c.metrics.get(MetricKeys.shouldersSigned, c.inputs);
-    if (sv != null && sv.abs() > p.ui.shouldersHintDeadzoneDeg) {
-      s.lastSign = sv > 0 ? 1 : -1;
-    }
-
-    ctrl._hideAnimationIfVisible();
-    final txt = (s.lastSign > 0)
-        ? 'Baja un poco el hombro derecho o sube el izquierdo'
-        : 'Baja un poco el hombro izquierdo o sube el derecho';
-    return _HintAnim(_Axis.none, txt);
-  },
-);
-
-// YAW
-final _RuleDesc<void> _yawDesc = _RuleDesc<void>(
-  id: 'yaw',
-  makeState: () => null,
-  ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) =>
-      _metricFromKey(c.metrics, c.inputs, MetricKeys.yawAbs),
-  hint: (ctrl, c, maintain, p, _) {
-    if (maintain) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
-    }
-
-    final a = c.yawDegForAnim; // firmado
-    _TurnDir dir;
-
-    if (a != null && a.abs() > p.ui.yawHintDeadzoneDeg) {
-      dir = (a > 0) ? _TurnDir.left : _TurnDir.right;
-      ctrl._driveYawAnimation(a);
-    } else {
-      // conserva último lado conocido (si no hay, default left)
-      dir = (ctrl._activeTurn != _TurnDir.none)
-          ? ctrl._activeTurn
-          : _TurnDir.left;
-      ctrl._hideAnimationIfVisible();
-    }
-
-    final txt = (dir == _TurnDir.left)
-        ? 'Gira ligeramente la cabeza a la izquierda'
-        : 'Gira ligeramente la cabeza a la derecha';
-    return _HintAnim(_Axis.yaw, txt);
-  },
-);
-
-// PITCH
-final _RuleDesc<void> _pitchDesc = _RuleDesc<void>(
-  id: 'pitch',
-  makeState: () => null,
-  ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) =>
-      _metricFromKey(c.metrics, c.inputs, MetricKeys.pitchAbs),
-  hint: (ctrl, c, maintain, p, _) {
-    if (maintain) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
-    }
-
-    final a = c.pitchDegForAnim; // + arriba, - abajo
-    bool up;
-
-    if (a != null && a.abs() > p.ui.pitchHintDeadzoneDeg) {
-      up = a > 0;
-      ctrl._drivePitchAnimation(a);
-    } else {
-      // conserva último estado; si no hay, por defecto “arriba”
-      up = ctrl._activePitchUp ?? true;
-      ctrl._hideAnimationIfVisible();
-    }
-
-    final txt =
-        up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
-    return _HintAnim(_Axis.pitch, txt);
-  },
-);
-
-// ROLL
-final _RuleDesc<void> _rollDesc = _RuleDesc<void>(
-  id: 'roll',
-  makeState: () => null,
-  ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) =>
-      _metricFromKey(c.metrics, c.inputs, MetricKeys.rollErr),
-  hint: (ctrl, c, maintain, p, _) {
-    if (maintain) {
-      ctrl._hideAnimationIfVisible();
-      return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
-    }
-
-    // Mantener guía direccional hasta dwell
-    final a = c.rollDegForAnim;
-    if (a != null) {
-      final delta = ctrl._deltaToNearest180(a);
-      if (delta.abs() > p.ui.rollHintDeadzoneDeg) {
-        ctrl._driveRollAnimation(delta);
-        final ccwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
-        final txt = ccwForUser
-            ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
-            : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
-        return _HintAnim(_Axis.roll, txt);
+// Genérico para YAW / PITCH (mismo patrón, distintos assets/textos)
+_ValidationRule makeHeadRule({
+  required String id,
+  required _Axis axis,
+  required dynamic gateCfg, // p.yaw / p.pitch
+  required MetricKey key, // MetricKeys.yawAbs / pitchAbs
+  required double? Function(_EvalCtx) animAngle, // c.yawDegForAnim / pitch
+  required double Function(dynamic ui) deadzoneOf, // (ui) => ui.yawHintDeadzoneDeg
+  required void Function(PoseCaptureController, double) drive, // _driveYawAnimation/_drivePitchAnimation
+  required String Function(double a) hintText, // texto según signo
+}) {
+  final gate = _gateFrom(gateCfg);
+  return _ClosureRule(
+    id: id,
+    gate: gate,
+    ignorePrevBreakOf: const {'azimut', 'shoulders'},
+    metric: (c) => c.metrics.get<double>(key, c.inputs),
+    hint: (ctrl, c, maintain) {
+      if (maintain) {
+        ctrl._hideAnimationIfVisible();
+        return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
       }
-    }
+      final a = animAngle(c);
+      if (a != null && a.abs() > deadzoneOf(ctrl.profile.ui)) {
+        drive(ctrl, a);
+        return _HintAnim(axis, hintText(a));
+      }
+      ctrl._hideAnimationIfVisible();
+      return _HintAnim(axis, null);
+    },
+  );
+}
 
-    // Sin señal suficiente: usa último estado recordado
-    final ccw = ctrl._activeRollPositive ?? true;
-    ctrl._hideAnimationIfVisible();
-    final txt = ccw
-        ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
-        : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
-    return _HintAnim(_Axis.roll, txt);
-  },
-);
+// ROLL (lógica especial con delta a 180°)
+_ValidationRule makeRollRule(ValidationProfile p) {
+  final gate = _gateFrom(p.roll);
+  return _ClosureRule(
+    id: 'roll',
+    gate: gate,
+    ignorePrevBreakOf: const {'azimut', 'shoulders'},
+    metric: (c) => c.metrics.get<double>(MetricKeys.rollErr, c.inputs),
+    hint: (ctrl, c, maintain) {
+      if (maintain) {
+        ctrl._hideAnimationIfVisible();
+        return const _HintAnim(_Axis.none, 'Mantén la cabeza recta');
+      }
+
+      final a = c.rollDegForAnim;
+      if (a != null) {
+        final delta = ctrl._deltaToNearest180(a);
+        if (delta.abs() > p.ui.rollHintDeadzoneDeg) {
+          ctrl._driveRollAnimation(delta);
+          final cwForUser = ctrl.mirror ? (delta < 0) : (delta > 0);
+          final txt = cwForUser
+              ? 'Rota ligeramente tu cabeza en sentido horario ⟳'
+              : 'Rota ligeramente tu cabeza en sentido antihorario ⟲';
+          return _HintAnim(_Axis.roll, txt);
+        }
+      }
+
+      // Sin señal suficiente → opcional: nada o recordar último estado
+      ctrl._hideAnimationIfVisible();
+      return const _HintAnim(_Axis.roll, null);
+    },
+  );
+}
 
 // ── Estado por instancia para reglas usando Expando (sin tocar la clase) ──
 final Expando<List<_ValidationRule>> _rulesExp = Expando('_rules');
@@ -457,76 +386,37 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // Usa el perfil inyectado para construir gates y reglas
     final p = profile;
 
+    // Yaw / Pitch por helper genérico
+    final yawRule = makeHeadRule(
+      id: 'yaw',
+      axis: _Axis.yaw,
+      gateCfg: p.yaw,
+      key: MetricKeys.yawAbs,
+      animAngle: (c) => c.yawDegForAnim,
+      deadzoneOf: (ui) => ui.yawHintDeadzoneDeg,
+      drive: (ctrl, a) => ctrl._driveYawAnimation(a),
+      hintText: (a) =>
+          (a > 0) ? 'Gira ligeramente la cabeza a la izquierda' : 'Gira ligeramente la cabeza a la derecha',
+    );
+
+    final pitchRule = makeHeadRule(
+      id: 'pitch',
+      axis: _Axis.pitch,
+      gateCfg: p.pitch,
+      key: MetricKeys.pitchAbs,
+      animAngle: (c) => c.pitchDegForAnim,
+      deadzoneOf: (ui) => ui.pitchHintDeadzoneDeg,
+      drive: (ctrl, a) => ctrl._drivePitchAnimation(a),
+      hintText: (a) =>
+          (a > 0) ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza',
+    );
+
     final list = <_ValidationRule>[
-      // AZIMUT
-      _BandRule(
-        profile: p,
-        desc: _azimutDesc,
-        gate: _AxisGate(
-          baseDeadband: p.azimutGate.baseDeadband,
-          sense: _mapSense(p.azimutGate.sense),
-          tighten: p.azimutGate.tighten,
-          hysteresis: p.azimutGate.hysteresis,
-          dwell: p.azimutGate.dwell,
-          extraRelaxAfterFirst: p.azimutGate.extraRelaxAfterFirst,
-        ),
-      ),
-
-      // SHOULDERS
-      _BandRule(
-        profile: p,
-        desc: _shouldersDesc,
-        gate: _AxisGate(
-          baseDeadband: p.shouldersGate.baseDeadband,
-          sense: _mapSense(p.shouldersGate.sense),
-          tighten: p.shouldersGate.tighten,
-          hysteresis: p.shouldersGate.hysteresis,
-          dwell: p.shouldersGate.dwell,
-          extraRelaxAfterFirst: p.shouldersGate.extraRelaxAfterFirst,
-        ),
-      ),
-
-      // YAW
-      _BandRule(
-        profile: p,
-        desc: _yawDesc,
-        gate: _AxisGate(
-          baseDeadband: p.yaw.baseDeadband,
-          sense: _mapSense(p.yaw.sense),
-          tighten: p.yaw.tighten,
-          hysteresis: p.yaw.hysteresis,
-          dwell: p.yaw.dwell,
-          extraRelaxAfterFirst: p.yaw.extraRelaxAfterFirst,
-        ),
-      ),
-
-      // PITCH
-      _BandRule(
-        profile: p,
-        desc: _pitchDesc,
-        gate: _AxisGate(
-          baseDeadband: p.pitch.baseDeadband,
-          sense: _mapSense(p.pitch.sense),
-          tighten: p.pitch.tighten,
-          hysteresis: p.pitch.hysteresis,
-          dwell: p.pitch.dwell,
-          extraRelaxAfterFirst: p.pitch.extraRelaxAfterFirst,
-        ),
-      ),
-
-      // ROLL
-      _BandRule(
-        profile: p,
-        desc: _rollDesc,
-        gate: _AxisGate(
-          baseDeadband: p.roll.baseDeadband,
-          sense: _mapSense(p.roll.sense),
-          tighten: p.roll.tighten,
-          hysteresis: p.roll.hysteresis,
-          dwell: p.roll.dwell,
-          extraRelaxAfterFirst: p.roll.extraRelaxAfterFirst,
-        ),
-      ),
+      makeAzimutRule(p),
+      makeShouldersRule(p),
+      yawRule,
+      pitchRule,
+      makeRollRule(p),
     ];
 
     _rulesExp[this] = list;
@@ -1057,24 +947,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
   }) {
     final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
 
-    String? maintainMsg;
-    if (!_isDone) {
-      switch (_currentRule.id) {
-        case 'azimut':
-          maintainMsg = 'Mantén el torso recto';
-          break;
-        case 'shoulders':
-          maintainMsg = 'Mantén los hombros nivelados';
-          break;
-        default:
-          maintainMsg = 'Mantén la cabeza recta';
-      }
-    }
+    String maintainMsg = _maintainById[_currentRule.id] ?? 'Mantén la cabeza recta';
 
     // Forzamos a String (no null). Usa '' para “no mostrar nada”.
     final String effectiveMsg = faceOk
         ? (_nullIfBlank(finalHint) ??
-            (maintainNow ? (maintainMsg ?? '') : '')) // nunca null
+            (maintainNow ? maintainMsg : '')) // nunca null
         : 'Ubica tu rostro dentro del óvalo';
 
     _setHud(
