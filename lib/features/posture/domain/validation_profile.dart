@@ -110,14 +110,14 @@ class ValidationProfile {
     // Head
     yaw: GateConfig(
       baseDeadband: 1.6,
-      tighten: 0.9,
-      hysteresis: 0.8,
+      tighten: 1,
+      hysteresis: 1,
       maxOffDeg: 20.0,
     ),
     pitch: GateConfig(
       baseDeadband: 1.6,
-      tighten: 0.9,
-      hysteresis: 0.8,
+      tighten: 1,
+      hysteresis: 1,
       maxOffDeg: 20.0,
     ),
     roll: GateConfig(
@@ -131,8 +131,8 @@ class ValidationProfile {
     shouldersBand: Band(-0.7, 1.7),
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
-      tighten: 1.1,
-      hysteresis: 1.5,
+      tighten: 1.0,
+      hysteresis: 1.6,
       maxOffDeg: 20.0,
     ),
 
