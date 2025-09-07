@@ -16,7 +16,7 @@ const Color kProgressGreen = Color(0xFF4DC274);
 /// ─────────────────────────────────────────────────────────────────────
 class PortraitUiModel {
   const PortraitUiModel({
-    this.primaryMessage = 'Centra tu rostro en el óvalo',
+    this.primaryMessage = 'Ubica tu rostro dentro del óvalo',
     this.secondaryMessage,
     this.countdownSeconds,
     this.countdownProgress,

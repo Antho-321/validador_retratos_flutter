@@ -456,7 +456,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     _setHud(
       const PortraitUiModel(
-        primaryMessage: 'Show your face in the oval',
+        primaryMessage: 'Ubica tu rostro dentro del óvalo',
         secondaryMessage: null,
         countdownSeconds: null,
         countdownProgress: null,
