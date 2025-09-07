@@ -147,14 +147,14 @@ class _BandRule<S> extends _ValidationRule {
     required this.profile,
     required this.desc,
     required _AxisGate gate,
-  }) : _state = desc.makeState(),
-       super(
-         id: desc.id,
-         gate: gate,
-         ignorePrevBreakOf: desc.ignorePrevBreakOf,
-         blockInterruptionDuranteValidacion:
-             desc.blockInterruptionDuranteValidacion,
-       );
+  })  : _state = desc.makeState(),
+        super(
+          id: desc.id,
+          gate: gate,
+          ignorePrevBreakOf: desc.ignorePrevBreakOf,
+          blockInterruptionDuranteValidacion:
+              desc.blockInterruptionDuranteValidacion,
+        );
 
   final ValidationProfile profile;
   final _RuleDesc<S> desc;
@@ -203,7 +203,8 @@ final _RuleDesc<_AzimutState> _azimutDesc = _RuleDesc<_AzimutState>(
   makeState: () => _AzimutState(),
   blockInterruptionDuranteValidacion: true,
   metric: (c, gate, p, s) {
-    final double? a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
+    final double? a =
+        c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
     if (a == null) return null;
     return _metricSignedBand(
       a,
@@ -240,12 +241,14 @@ class _ShouldersState {
   int lastSign = 1; // 1 ⇒ baja der/sube izq; -1 ⇒ baja izq/sube der
 }
 
-final _RuleDesc<_ShouldersState> _shouldersDesc = _RuleDesc<_ShouldersState>(
+final _RuleDesc<_ShouldersState> _shouldersDesc =
+    _RuleDesc<_ShouldersState>(
   id: 'shoulders',
   makeState: () => _ShouldersState(),
   blockInterruptionDuranteValidacion: true,
   metric: (c, gate, p, s) {
-    final double? sv = c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
+    final double? sv =
+        c.metrics.get<double>(MetricKeys.shouldersSigned, c.inputs);
     if (sv == null) return null;
     return _metricSignedBand(
       sv,
@@ -278,7 +281,8 @@ final _RuleDesc<void> _yawDesc = _RuleDesc<void>(
   id: 'yaw',
   makeState: () => null,
   ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.yawAbs),
+  metric: (c, gate, p, _) =>
+      _metricFromKey(c.metrics, c.inputs, MetricKeys.yawAbs),
   hint: (ctrl, c, maintain, p, _) {
     if (maintain) {
       ctrl._hideAnimationIfVisible();
@@ -293,7 +297,9 @@ final _RuleDesc<void> _yawDesc = _RuleDesc<void>(
       ctrl._driveYawAnimation(a);
     } else {
       // conserva último lado conocido (si no hay, default left)
-      dir = (ctrl._activeTurn != _TurnDir.none) ? ctrl._activeTurn : _TurnDir.left;
+      dir = (ctrl._activeTurn != _TurnDir.none)
+          ? ctrl._activeTurn
+          : _TurnDir.left;
       ctrl._hideAnimationIfVisible();
     }
 
@@ -309,7 +315,8 @@ final _RuleDesc<void> _pitchDesc = _RuleDesc<void>(
   id: 'pitch',
   makeState: () => null,
   ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.pitchAbs),
+  metric: (c, gate, p, _) =>
+      _metricFromKey(c.metrics, c.inputs, MetricKeys.pitchAbs),
   hint: (ctrl, c, maintain, p, _) {
     if (maintain) {
       ctrl._hideAnimationIfVisible();
@@ -328,7 +335,8 @@ final _RuleDesc<void> _pitchDesc = _RuleDesc<void>(
       ctrl._hideAnimationIfVisible();
     }
 
-    final txt = up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
+    final txt =
+        up ? 'Sube ligeramente la cabeza' : 'Baja ligeramente la cabeza';
     return _HintAnim(_Axis.pitch, txt);
   },
 );
@@ -338,7 +346,8 @@ final _RuleDesc<void> _rollDesc = _RuleDesc<void>(
   id: 'roll',
   makeState: () => null,
   ignorePrevBreakOf: const {'azimut', 'shoulders'},
-  metric: (c, gate, p, _) => _metricFromKey(c.metrics, c.inputs, MetricKeys.rollErr),
+  metric: (c, gate, p, _) =>
+      _metricFromKey(c.metrics, c.inputs, MetricKeys.rollErr),
   hint: (ctrl, c, maintain, p, _) {
     if (maintain) {
       ctrl._hideAnimationIfVisible();
@@ -609,7 +618,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final now = DateTime.now();
 
     // Mapea PosePoint → records ({x,y,z}) para cumplir FrameInputs
-    final lms3dRec = lms3d?.map((p) => (x: p.x.toDouble(), y: p.y.toDouble(), z: (p.z ?? 0.0).toDouble())).toList();
+    final lms3dRec = lms3d
+        ?.map((p) => (x: p.x.toDouble(), y: p.y.toDouble(), z: (p.z ?? 0.0).toDouble()))
+        .toList();
 
     // Construye Inputs UNA sola vez para este frame
     final inputs = FrameInputs(
@@ -769,8 +780,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // Backtracking condicional: no si está en dwell ni si bloquea interrupción (primer dwell)
     final allowBacktrack = !current.gate.isDwell && !lockCurrentFirstDwell;
     if (allowBacktrack) {
-      final prevBreak =
-          _firstPrevNotHoldingFiltered(_curIdx, c, current);
+      final prevBreak = _firstPrevNotHoldingFiltered(_curIdx, c, current);
       if (prevBreak != null) {
         _curIdx = _rules.indexOf(prevBreak);
         return;
@@ -814,39 +824,57 @@ extension _OnFrameLogicExt on PoseCaptureController {
     return _currentRule.buildHint(this, c);
   }
 
+  // ⚠️ Requiere que la clase PoseCaptureController tenga:
+  //     _Axis _animAxis = _Axis.none;
+  // para llevar el “eje activo” del overlay.
+
   void _driveYawAnimation(double yawDeg) {
     final desiredTurn = (yawDeg > 0) ? _TurnDir.left : _TurnDir.right;
     _activePitchUp = null;
     _activeRollPositive = null;
 
-    if (desiredTurn != _activeTurn) {
+    final bool switchingAxis = _animAxis != _Axis.yaw;
+    if (switchingAxis) _hideAnimationIfVisible(); // forzar blank antes de cambiar de eje
+
+    if (desiredTurn != _activeTurn || switchingAxis) {
       _activeTurn = desiredTurn;
       if (desiredTurn == _TurnDir.right) {
         _turnRightSeqLoaded = true;
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 14,
-          count: 22,
-          xStart: 0,
-          xEnd: 256,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 14,
+              count: 22,
+              xStart: 0,
+              xEnd: 256,
+            )
+            .then((_) {
+          _animAxis = _Axis.yaw;
+          _ensureAnimVisible();
+        });
       } else {
         _turnLeftSeqLoaded = true;
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 30,
-          count: 21,
-          xStart: 0,
-          xEnd: 256,
-          reverseOrder: true,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 30,
+              count: 21,
+              xStart: 0,
+              xEnd: 256,
+              reverseOrder: true,
+            )
+            .then((_) {
+          _animAxis = _Axis.yaw;
+          _ensureAnimVisible();
+        });
       }
+    } else {
+      _ensureAnimVisible();
     }
-    _ensureAnimVisible();
   }
 
   void _drivePitchAnimation(double pitchDeg) {
@@ -854,70 +882,98 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _activeTurn = _TurnDir.none;
     _activeRollPositive = null;
 
-    if (_activePitchUp != desiredPitchUp) {
+    final bool switchingAxis = _animAxis != _Axis.pitch;
+    if (switchingAxis) _hideAnimationIfVisible(); // forzar blank antes de cambiar de eje
+
+    if (_activePitchUp != desiredPitchUp || switchingAxis) {
       _activePitchUp = desiredPitchUp;
       if (desiredPitchUp) {
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 30,
-          count: 21,
-          xStart: 256,
-          xEnd: 512,
-          reverseOrder: true,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 30,
+              count: 21,
+              xStart: 256,
+              xEnd: 512,
+              reverseOrder: true,
+            )
+            .then((_) {
+          _animAxis = _Axis.pitch;
+          _ensureAnimVisible();
+        });
       } else {
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 14,
-          count: 22,
-          xStart: 256,
-          xEnd: 512,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 14,
+              count: 22,
+              xStart: 256,
+              xEnd: 512,
+            )
+            .then((_) {
+          _animAxis = _Axis.pitch;
+          _ensureAnimVisible();
+        });
       }
+    } else {
+      _ensureAnimVisible();
     }
-    _ensureAnimVisible();
   }
 
   void _driveRollAnimation(double deltaTo180) {
     // Map delta to user-perceived rotation with mirror
-    final bool wantCcwForUser =
-        mirror ? (deltaTo180 < 0) : (deltaTo180 > 0);
+    final bool wantCcwForUser = mirror ? (deltaTo180 < 0) : (deltaTo180 > 0);
 
     _activeTurn = _TurnDir.none;
+
+    final bool switchingAxis = _animAxis != _Axis.roll;
+    if (switchingAxis) _hideAnimationIfVisible(); // forzar blank antes de cambiar de eje
+
     // reuse _activeRollPositive to track “CCW-for-user”
-    if (_activeRollPositive != wantCcwForUser) {
+    if (_activeRollPositive != wantCcwForUser || switchingAxis) {
       _activeRollPositive = wantCcwForUser;
 
       if (wantCcwForUser) {
         // CCW
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 30,
-          count: 21,
-          xStart: 512,
-          xEnd: 768,
-          reverseOrder: true,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 30,
+              count: 21,
+              xStart: 512,
+              xEnd: 768,
+              reverseOrder: true,
+            )
+            .then((_) {
+          _animAxis = _Axis.roll;
+          _ensureAnimVisible();
+        });
       } else {
         // CW
         // ignore: discarded_futures
-        seq.loadFromAssets(
-          directory: 'assets/frames',
-          pattern: 'frame_%04d.png',
-          startNumber: 14,
-          count: 22,
-          xStart: 512,
-          xEnd: 768,
-        );
+        seq
+            .loadFromAssets(
+              directory: 'assets/frames',
+              pattern: 'frame_%04d.png',
+              startNumber: 14,
+              count: 22,
+              xStart: 512,
+              xEnd: 768,
+            )
+            .then((_) {
+          _animAxis = _Axis.roll;
+          _ensureAnimVisible();
+        });
       }
+    } else {
+      _ensureAnimVisible();
     }
-    _ensureAnimVisible();
   }
 
   void _ensureAnimVisible() {
@@ -941,6 +997,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _activeTurn = _TurnDir.none;
     _activePitchUp = null;
     _activeRollPositive = null;
+    _animAxis = _Axis.none; // ⇐ clave: limpiar eje activo al ocultar
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1003,9 +1060,14 @@ extension _OnFrameLogicExt on PoseCaptureController {
     String? maintainMsg;
     if (!_isDone) {
       switch (_currentRule.id) {
-        case 'azimut':    maintainMsg = 'Mantén el torso recto'; break;
-        case 'shoulders': maintainMsg = 'Mantén los hombros nivelados'; break;
-        default:          maintainMsg = 'Mantén la cabeza recta';
+        case 'azimut':
+          maintainMsg = 'Mantén el torso recto';
+          break;
+        case 'shoulders':
+          maintainMsg = 'Mantén los hombros nivelados';
+          break;
+        default:
+          maintainMsg = 'Mantén la cabeza recta';
       }
     }
 

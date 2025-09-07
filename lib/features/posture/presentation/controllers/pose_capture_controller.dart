@@ -519,6 +519,9 @@ class PoseCaptureController extends ChangeNotifier {
   // Track roll sign (true => rollDeg > 0)
   bool? _activeRollPositive;
 
+  // NEW — eje actualmente mostrado por el overlay (para evitar “cruces” entre ejes)
+  _Axis _animAxis = _Axis.none;
+
   // EMA smoothing for angles (yaw/pitch HUD)
   static const double _emaTauMs = 150.0; // kept for compatibility
   double? _emaYawDeg;
