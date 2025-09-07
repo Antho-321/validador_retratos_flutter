@@ -35,6 +35,32 @@ AngleCheck checkAngle({
   return AngleCheck(ok: false, progress: progress, offDeg: off);
 }
 
+/// Result para validar pertenencia a un rango [lo, hi] con progreso.
+class BandCheck {
+  final bool ok;
+  final double progress; // 0..1
+  final double offDeg;   // exceso respecto al borde más cercano
+  const BandCheck({required this.ok, required this.progress, required this.offDeg});
+}
+
+/// Progreso lineal: 1.0 dentro del rango; fuera decae a 0 con maxOffDeg.
+BandCheck checkBand({
+  required bool enabled,
+  required double value,
+  required double lo,
+  required double hi,
+  required double maxOffDeg,
+}) {
+  if (!enabled) return const BandCheck(ok: true, progress: 1.0, offDeg: 0.0);
+  if (value >= lo && value <= hi) {
+    return const BandCheck(ok: true, progress: 1.0, offDeg: 0.0);
+    }
+  final d = (value < lo) ? (lo - value) : (value - hi); // distancia al borde
+  final off = d.clamp(0.0, maxOffDeg).toDouble();
+  final progress = (1.0 - (off / maxOffDeg)).clamp(0.0, 1.0).toDouble();
+  return BandCheck(ok: false, progress: progress, offDeg: off);
+}
+
 /// Report of all portrait checks (expand as you add rules).
 class PortraitValidationReport {
   const PortraitValidationReport({
@@ -60,6 +86,11 @@ class PortraitValidationReport {
     required this.shouldersOk,
     required this.shouldersDeg,
     required this.shouldersProgress,
+
+    // Azimut (torso)
+    required this.azimutOk,
+    required this.azimutDeg,
+    required this.azimutProgress,
 
     // UI ring & overall
     required this.ovalProgress,
@@ -90,9 +121,14 @@ class PortraitValidationReport {
   final double shouldersDeg;       // (-90..90]
   final double shouldersProgress;  // 0..1
 
+  /// Azimut (torso)
+  final bool azimutOk;
+  final double azimutDeg;
+  final double azimutProgress;
+
   /// UI ring progress:
   /// - while face isn't inside oval -> equals fractionInsideOval
-  /// - once face is inside oval     -> equals combined head progress (yaw/pitch[/roll])
+  /// - once face is inside oval     -> equals combined progress (yaw/pitch/roll + shoulders + azimut)
   final double ovalProgress;
 
   /// Overall gate for capture/countdown
@@ -103,8 +139,8 @@ class PortraitValidationReport {
 class PortraitValidator {
   const PortraitValidator();
 
-  /// Main entry point. Give it the raw *image-space* landmarks (px) plus the
-  /// image size and the *current* canvas size/mirroring/fit used by your preview.
+  /// Main entry point. Give it the raw image-space landmarks (px) plus the
+  /// image size and the current canvas size/mirroring/fit used by your preview.
   PortraitValidationReport evaluate({
     required List<Offset> landmarksImg, // face landmarks in image-space (px)
     required Size imageSize,            // from your frame
@@ -136,6 +172,13 @@ class PortraitValidator {
     bool enableShoulders = false,
     double shouldersDeadbandDeg = 5.0,  // allow up to ±5°
     double shouldersMaxOffDeg = 20.0,   // where progress bottoms out
+
+    // Azimut (torso) — progreso por banda [lo, hi]
+    bool enableAzimut = false,
+    double? azimutDeg,                  // ángulo firmado ya estimado (3D)
+    double azimutBandLo = 0.0,
+    double azimutBandHi = 0.0,
+    double azimutMaxOffDeg = 20.0,
   }) {
     if (landmarksImg.isEmpty ||
         imageSize.width <= 0 ||
@@ -157,12 +200,15 @@ class PortraitValidator {
         shouldersOk: false,
         shouldersDeg: 0.0,
         shouldersProgress: 0.0,
+        azimutOk: false,
+        azimutDeg: 0.0,
+        azimutProgress: 0.0,
         ovalProgress: 0.0,
         allChecksOk: false,
       );
     }
 
-    // ── Face-in-oval (in canvas space, respecting fit/mirror) ────────────
+    // Face-in-oval (in canvas space, respecting fit/mirror)
     final mapped = geom.mapImagePointsToCanvas(
       points: landmarksImg,
       imageSize: imageSize,
@@ -189,17 +235,22 @@ class PortraitValidator {
     final fracInside = inside / mapped.length;
     final faceOk = fracInside >= (minFractionInside.clamp(0.0, 1.0));
 
-    // ── Head orientation (yaw & pitch & roll in image space) ─────────────
+    // Head orientation (yaw & pitch & roll in image space)
     double yawDeg = 0.0, pitchDeg = 0.0, rollDeg = 0.0;
     bool yawOk = false, pitchOk = false, rollOk = false;
     double yawProgress = enableYaw ? 0.0 : 1.0;
     double pitchProgress = enablePitch ? 0.0 : 1.0;
     double rollProgress = enableRoll ? 0.0 : 1.0;
 
-    // ── Shoulders (tilt) ─────────────────────────────────────────────────
+    // Shoulders (tilt)
     bool shouldersOk = false;
     double shouldersDeg = 0.0;
     double shouldersProgress = enableShoulders ? 0.0 : 1.0;
+
+    // Azimut (torso)
+    bool azimutOk = false;
+    double azimutDegVal = 0.0;
+    double azimutProgress = enableAzimut ? 0.0 : 1.0;
 
     if (faceOk && (enableYaw || enablePitch || enableRoll)) {
       // Use your estimator once; it expects H/W ints (as in your page).
@@ -233,7 +284,7 @@ class PortraitValidator {
         pitchProgress = res.progress;
       }
 
-      // Roll (mirror flips sign). New rule: OK only if |roll| ≥ deadband.
+      // Roll (mirror flips sign). New rule: OK only if |roll| >= deadband.
       if (enableRoll) {
         rollDeg = ypr.roll;
         final absRoll = rollDeg.abs();
@@ -250,7 +301,7 @@ class PortraitValidator {
       }
     }
 
-    // Shoulders tilt (independent from head ring; contributes to allChecksOk)
+    // Shoulders tilt (independent from head ring; contributes to ring and allChecksOk)
     if (faceOk && enableShoulders && (poseLandmarksImg != null)) {
       final ang = geom.calcularAnguloHombros(poseLandmarksImg);
       if (ang != null) {
@@ -266,23 +317,39 @@ class PortraitValidator {
       }
     }
 
-    // UI ring: face progress until it passes; then combine head progress.
-    // (Shoulders do NOT affect the visual ring; only the overall gate.)
-    double headProgress = 1.0;
+    // Azimut progress with band [lo, hi]
+    if (faceOk && enableAzimut && azimutDeg != null) {
+      azimutDegVal = azimutDeg!;
+      final bz = checkBand(
+        enabled: true,
+        value: azimutDegVal,
+        lo: azimutBandLo,
+        hi: azimutBandHi,
+        maxOffDeg: azimutMaxOffDeg,
+      );
+      azimutOk = bz.ok;
+      azimutProgress = bz.progress;
+    }
+
+    // UI ring: face progress until it passes; then combine progress of all enabled checks.
+    double combinedProgress = 1.0;
     final parts = <double>[];
     if (enableYaw) parts.add(yawProgress);
     if (enablePitch) parts.add(pitchProgress);
     if (enableRoll) parts.add(rollProgress);
+    if (enableShoulders) parts.add(shouldersProgress);
+    if (enableAzimut) parts.add(azimutProgress);
     if (parts.isNotEmpty) {
-      headProgress = parts.reduce(_min);
+      combinedProgress = parts.reduce(_min);
     }
-    final ringProgress = faceOk ? headProgress : fracInside;
+    final ringProgress = faceOk ? combinedProgress : fracInside;
 
     final allOk = faceOk &&
         (!enableYaw || yawOk) &&
         (!enablePitch || pitchOk) &&
         (!enableRoll || rollOk) &&
-        (!enableShoulders || shouldersOk);
+        (!enableShoulders || shouldersOk) &&
+        (!enableAzimut || azimutOk);
 
     return PortraitValidationReport(
       faceInOval: faceOk,
@@ -299,6 +366,9 @@ class PortraitValidator {
       shouldersOk: shouldersOk,
       shouldersDeg: shouldersDeg,
       shouldersProgress: shouldersProgress,
+      azimutOk: azimutOk,
+      azimutDeg: azimutDegVal,
+      azimutProgress: azimutProgress,
       ovalProgress: ringProgress,
       allChecksOk: allOk,
     );

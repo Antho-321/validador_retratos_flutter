@@ -524,6 +524,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
       fit: BoxFit.cover,
     );
 
+    // ⬇️ NUEVO: azimut 3D para HUD/progreso (si hay 3D)
+    double? azDegHUD;
+    if (lms3dRec != null) {
+      final double zToPx = _zToPxScale ?? inputs.imageSize.width; // mismo fallback
+      azDegHUD = geom.estimateAzimutBiacromial3D(
+        poseLandmarks3D: lms3dRec,
+        zToPx: zToPx,
+        mirror: inputs.mirror,
+      );
+    }
+
     // Limpia el registry (lazy cache por frame)
     _metricRegistry.clear();
 
@@ -532,6 +543,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final pitchGateNow = _findRule('pitch')!.gate;
     final rollGateNow = _findRule('roll')!.gate;
     final shouldersGateNow = _findRule('shoulders')!.gate;
+    final azimutGateNow = _findRule('azimut')!.gate; // ⬅️ NUEVO
 
     final double yawDeadbandNow = yawGateNow.enterBand;
     final double pitchDeadbandNow = pitchGateNow.enterBand;
@@ -548,6 +560,25 @@ extension _OnFrameLogicExt on PoseCaptureController {
       shouldersTolSymNow += shouldersExpandNow;
     }
 
+    // ⬇️ NUEVO: banda dinámica para azimut (relajar tras primer intento)
+    final double azExpandNow =
+        math.max(0.0, azimutGateNow.hysteresis - azimutGateNow.tighten);
+    double azLoNow = p.azimutBand.lo.toDouble();
+    double azHiNow = p.azimutBand.hi.toDouble();
+    if (azimutGateNow.firstAttemptDone) {
+      azLoNow -= azExpandNow;
+      azHiNow += azExpandNow;
+    }
+
+    // ⬇️ NUEVO: progresos del anillo contextuales a la regla ACTUAL
+    final String curId = _currentRule.id;
+    final bool uiEnableHead = (curId == 'yaw' || curId == 'pitch' || curId == 'roll');
+    final bool uiEnableYaw = uiEnableHead;
+    final bool uiEnablePitch = uiEnableHead;
+    final bool uiEnableRoll = uiEnableHead;
+    final bool uiEnableShoulders = (curId == 'shoulders');
+    final bool uiEnableAzimut = (curId == 'azimut') && (azDegHUD != null);
+
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final report = _validator.evaluate(
       landmarksImg: inputs.landmarksImg!, // ya comprobado arriba
@@ -560,26 +591,31 @@ extension _OnFrameLogicExt on PoseCaptureController {
       minFractionInside: p.face.minFractionInside,
       eps: p.face.eps,
 
-      // Yaw
-      enableYaw: true,
+      // Yaw/Pitch/Roll (solo si la etapa actual es de cabeza)
+      enableYaw: uiEnableYaw,
       yawDeadbandDeg: yawDeadbandNow,
       yawMaxOffDeg: p.yaw.maxOffDeg,
 
-      // Pitch
-      enablePitch: true,
+      enablePitch: uiEnablePitch,
       pitchDeadbandDeg: pitchDeadbandNow,
       pitchMaxOffDeg: p.pitch.maxOffDeg,
 
-      // Roll
-      enableRoll: true,
+      enableRoll: uiEnableRoll,
       rollDeadbandDeg: rollDeadbandNow,
       rollMaxOffDeg: p.roll.maxOffDeg,
 
-      // Shoulders (nivelación)
+      // Shoulders (solo cuando corresponde)
       poseLandmarksImg: inputs.poseLandmarksImg,
-      enableShoulders: true,
+      enableShoulders: uiEnableShoulders,
       shouldersDeadbandDeg: shouldersTolSymNow, // dinámico simétrico para UI
       shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
+
+      // Azimut (solo cuando corresponde y hay 3D)
+      enableAzimut: uiEnableAzimut,
+      azimutDeg: azDegHUD,
+      azimutBandLo: azLoNow,
+      azimutBandHi: azHiNow,
+      azimutMaxOffDeg: p.azimutGate.maxOffDeg,
     );
 
     final bool faceOk = report.faceInOval;
