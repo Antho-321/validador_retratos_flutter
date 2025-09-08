@@ -256,6 +256,7 @@ _ValidationRule makeHeadRule({
     id: id,
     gate: gate,
     ignorePrevBreakOf: const {'azimut', 'shoulders'},
+    blockInterruptionDuranteValidacion: true, // ⬅️ ACTIVADO
     metric: (c) => c.metrics.get<double>(key, c.inputs),
     hint: (ctrl, c, maintain) {
       if (maintain) {
@@ -280,6 +281,7 @@ _ValidationRule makeRollRule(ValidationProfile p) {
     id: 'roll',
     gate: gate,
     ignorePrevBreakOf: const {'azimut', 'shoulders'},
+    blockInterruptionDuranteValidacion: true, // ⬅️ ACTIVADO
     metric: (c) => c.metrics.get<double>(MetricKeys.rollErr, c.inputs),
     hint: (ctrl, c, maintain) {
       if (maintain) {
