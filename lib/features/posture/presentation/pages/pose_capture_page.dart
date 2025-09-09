@@ -9,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../../services/pose_webrtc_service.dart';
+import '../../../posture/domain/service/pose_capture_service.dart';
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -35,7 +35,7 @@ class PoseCapturePage extends StatefulWidget {
     this.validationsEnabled = true,
   });
 
-  final PoseWebRTCService poseService;
+  final PoseCaptureService poseService;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;

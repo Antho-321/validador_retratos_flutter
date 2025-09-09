@@ -40,6 +40,7 @@ dependencies:
   image: ^4.5.4
   flutter_webrtc: ^1.0.0
   http: ^1.2.2
+  get_it: ^7.6.7
 
 dev_dependencies:
   flutter_test:

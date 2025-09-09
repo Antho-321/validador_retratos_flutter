@@ -28,7 +28,7 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
-import '../models/pose_point.dart';
+import '../../infrastructure/model/pose_point.dart';
 
 enum PacketKind { po, pd }
 
@@ -207,9 +207,9 @@ class PoseBinaryParser {
         final cyq = _clampQ(yq, hq);
         ptsQ.add(_PtQ(cxq, cyq, zq));
         ptsPx.add(PosePoint(
-          cxq / scale,
-          cyq / scale,
-          zq != null ? (zq / zScale) : null,
+          x: cxq / scale,
+          y: cyq / scale,
+          z: zq != null ? (zq / zScale) : null,
         ));
       }
       posesQ.add(ptsQ);
@@ -306,9 +306,9 @@ class PoseBinaryParser {
           final cyq = _clampQ(yq, hq);
           ptsQ.add(_PtQ(cxq, cyq, zq));
           ptsPx.add(PosePoint(
-            cxq / scale,
-            cyq / scale,
-            zq != null ? (zq / zScale) : null,
+            x: cxq / scale,
+            y: cyq / scale,
+            z: zq != null ? (zq / zScale) : null,
           ));
         }
 
@@ -385,9 +385,9 @@ class PoseBinaryParser {
 
         outQ.add(_PtQ(xq, yq, zq));
         outPx.add(PosePoint(
-          xq / scale,
-          yq / scale,
-          (hasZ && zq != null) ? (zq / zScale) : null,
+          x: xq / scale,
+          y: yq / scale,
+          z: (hasZ && zq != null) ? (zq / zScale) : null,
         ));
       }
 
@@ -417,7 +417,7 @@ class PoseBinaryParser {
   static int _i16le(Uint8List b, int i) {
     final v = b[i] | (b[i + 1] << 8);
     return (v & 0x8000) != 0 ? (v - 0x10000) : v;
-    }
+  }
 
   static int _asInt8(int u) => (u & 0x80) != 0 ? (u - 256) : u;
 

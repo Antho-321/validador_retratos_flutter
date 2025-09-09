@@ -1,4 +1,4 @@
-// lib/features/posture/domain/validation_profile.dart
+// lib/features/posture/domain/entity/validation_profile.dart
 
 /// Public sense for gates in the domain layer (no underscores → not private).
 enum GateSense { insideIsOk, outsideIsOk }

@@ -10,7 +10,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'dart:ui' show Size, Offset;
 import 'package:flutter/painting.dart' show BoxFit;
 
-import '../../services/pose_webrtc_service.dart';
+import '../../domain/service/pose_capture_service.dart';
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 import '../widgets/frame_sequence_overlay.dart'
@@ -18,7 +18,7 @@ import '../widgets/frame_sequence_overlay.dart'
 import '../../domain/validators/portrait_validations.dart'
     show PortraitValidator;
 // ⬇️ NEW: centralized, data-driven thresholds & bands
-import '../../domain/validation_profile.dart' show ValidationProfile, GateSense;
+import '../../domain/entity/validation_profile.dart' show ValidationProfile, GateSense;
 
 import '../../domain/metrics/pose_geometry.dart' as geom;  // ⬅️ NUEVO
 import '../../domain/metrics/metrics.dart';
@@ -323,7 +323,7 @@ class _Countdown {
 /// Pipeline de captura (WebRTC → fallback)
 class _Capture {
   static Future<Uint8List?> tryAll(
-    PoseWebRTCService svc,
+    PoseCaptureService svc,
     SnapshotFn? fallback,
   ) async {
     // 1) WebRTC track
@@ -453,7 +453,7 @@ class PoseCaptureController extends ChangeNotifier {
   }
 
   // ── External deps/config ──────────────────────────────────────────────
-  final PoseWebRTCService poseService;
+  final PoseCaptureService poseService;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;

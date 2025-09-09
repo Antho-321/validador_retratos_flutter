@@ -2,7 +2,7 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable; // <- add this
-import 'overlays.dart' show PoseFrame;
+import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 
 /// Classic overlay that takes a concrete PoseFrame (e.g., from a StreamBuilder).
 class PoseOverlay extends StatelessWidget {

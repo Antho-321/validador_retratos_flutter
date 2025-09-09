@@ -1,6 +1,7 @@
 // lib/features/posture/presentation/widgets/overlays.dart
 import 'package:flutter/material.dart';
-import 'dart:ui' as ui show PointMode; // ⬅️ bring PointMode into scope
+import 'dart:ui' as ui show PointMode; // ⬅️ PointMode
+import '../../infrastructure/model/pose_frame.dart' show PoseFrame; // ⬅️ ruta corregida
 
 /// ───────────────────────── Existing widgets (unchanged) ─────────────────────────
 
@@ -63,42 +64,6 @@ class ProgressRing extends StatelessWidget {
           ],
         ),
       );
-}
-
-/// ───────────────────────── Pose model + helpers ─────────────────────────
-/// What the painter needs: server image size and poses in **pixel** coords (px,py)
-class PoseFrame {
-  PoseFrame({required this.imageSize, required this.posesPx});
-  final Size imageSize;                  // server "image_size" (w,h)
-  final List<List<Offset>> posesPx;      // each pose is a list of 33 Offsets (px,py)
-}
-
-/// Convert server JSON (from /ws/pose or /pose) into PoseFrame
-/// Expects: {"poses":[[{"x":..,"y":..,"px":..,"py":..}, ...], ...], "image_size":{"w":W,"h":H}}
-PoseFrame? poseFrameFromMap(Map<String, dynamic>? m) {
-  if (m == null) return null;
-  final img = m['image_size'] as Map<String, dynamic>?;
-  if (img == null) return null;
-
-  final w = (img['w'] as num).toDouble();
-  final h = (img['h'] as num).toDouble();
-
-  final rawPoses = (m['poses'] as List?) ?? const [];
-  final posesPx = <List<Offset>>[];
-
-  for (final p in rawPoses) {
-    final pts = <Offset>[];
-    for (final lm in (p as List)) {
-      final map = (lm as Map<String, dynamic>);
-      // Prefer px/py; fallback to normalized x,y
-      final px = (map['px'] ?? ((map['x'] as num?) ?? 0.0) * w) as num;
-      final py = (map['py'] ?? ((map['y'] as num?) ?? 0.0) * h) as num;
-      pts.add(Offset(px.toDouble(), py.toDouble()));
-    }
-    posesPx.add(pts);
-  }
-
-  return PoseFrame(imageSize: Size(w, h), posesPx: posesPx);
 }
 
 /// MediaPipe Pose connections (33 pts)
@@ -210,7 +175,6 @@ class SkeletonPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant SkeletonPainter old) =>
-      // Repaint si cambia el frame (identidad/listas), color o configuración relevante
       old.frame != frame ||
       old.color != color ||
       old.strokeWidth != strokeWidth ||
@@ -220,11 +184,10 @@ class SkeletonPainter extends CustomPainter {
 }
 
 /// ───────────────────────── Overlay widget ─────────────────────────
-/// Drop this on top of your camera preview. Pass the latest PoseFrame from your WS/HTTP service.
 class PoseSkeletonOverlay extends StatelessWidget {
   const PoseSkeletonOverlay({
     super.key,
-    required this.data,           // PoseFrame? (null => nothing to draw)
+    required this.data, // PoseFrame? (null => nothing to draw)
     this.color = Colors.limeAccent,
     this.strokeWidth = 2.0,
     this.drawPoints = true,
@@ -251,7 +214,7 @@ class PoseSkeletonOverlay extends StatelessWidget {
         mirror: mirror,
         fit: fit,
       ),
-      size: Size.infinite, // ocupa todo el overlay (importante en Stack/Positioned.fill)
+      size: Size.infinite, // ocupa todo el overlay
       isComplex: true,
       willChange: true,
     );

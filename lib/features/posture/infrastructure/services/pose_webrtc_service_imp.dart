@@ -1,9 +1,9 @@
-// lib/features/posture/services/pose_webrtc_service.dart
+// lib/features/posture/infrastructure/services/pose_webrtc_service_imp.dart
 //
-// NOTE: If you want to use a non-libwebrtc encoder on Android,
-// you must inject a custom VideoEncoderFactory in the NATIVE plugin
-// (see the Kotlin patch after this file). This Dart code stays the same;
-// the encoder used is decided by the native PeerConnectionFactory.
+// Implementación de infraestructura del servicio de captura por WebRTC.
+// - Implementa el contrato del dominio: PoseCaptureService
+// - No importa nada desde `presentation/*`
+// - Usa modelos/parsers propios de infraestructura
 
 import 'dart:async';
 import 'dart:convert';
@@ -14,17 +14,21 @@ import 'package:flutter/foundation.dart' show ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
-import '../presentation/widgets/overlays.dart' show PoseFrame, poseFrameFromMap;
-import 'webrtc/rtc_video_encoder.dart'; // ← centralized encoder configuration
-import 'parsers/pose_binary_parser.dart'; // ← isolated PO/PD parser
-import 'models/pose_point.dart'; // new shared model
+// Contrato del dominio
+import '../../domain/service/pose_capture_service.dart';
+
+// Modelos/Parsers/Encoder en infraestructura
+import '../model/pose_frame.dart' show PoseFrame, poseFrameFromMap;
+import '../webrtc/rtc_video_encoder.dart';
+import '../parsers/pose_binary_parser.dart';
+import '../model/pose_point.dart';
 
 /// Parse JSON safely into a `Map<String, dynamic>`.
 Map<String, dynamic> _parseJson(String text) =>
     jsonDecode(text) as Map<String, dynamic>;
 
-class PoseWebRTCService {
-  PoseWebRTCService({
+class PoseWebrtcServiceImp implements PoseCaptureService {
+  PoseWebrtcServiceImp({
     required this.offerUri,
     this.facingMode = 'user',
     // Match Python client by default (16:9 @ 30fps)
@@ -50,7 +54,7 @@ class PoseWebRTCService {
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'], // primary='pose', extra='face'
-    RtcVideoEncoder? encoder, // (DI optional)
+    RtcVideoEncoder? encoder,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
@@ -62,6 +66,10 @@ class PoseWebRTCService {
               preferHevc: preferHevc,
             );
 
+  // ────────────────────────────────────────────────────────────────────
+  // Config
+  // ────────────────────────────────────────────────────────────────────
+
   final Uri offerUri;
   final String facingMode;
   final int idealWidth;
@@ -72,21 +80,19 @@ class PoseWebRTCService {
   final bool preCreateDataChannels;
   final int negotiatedFallbackAfterSeconds;
 
-  /// When true, log detailed diagnostics; when false, suppress ALL prints
-  /// from this class (third-party/native logs may still appear).
+  /// When true, log detailed diagnostics; when false, suppress ALL prints.
   final bool logEverything;
 
-  /// When true, strip FEC codecs (RED/ULPFEC/FlexFEC) from the video m-line
-  /// in the local SDP offer to minimize buffering/overhead.
+  /// Strip FEC codecs (RED/ULPFEC/FlexFEC) from the video m-line.
   final bool stripFecFromSdp;
 
-  /// When true, strip RTX payloads and generic NACK/PLI/FIR/REMB; keep only transport-cc.
+  /// Strip RTX payloads and generic NACK/PLI/FIR/REMB; keep only transport-cc.
   final bool stripRtxAndNackFromSdp;
 
   /// If [stripRtxAndNackFromSdp] is true, keep only a=rtcp-fb:* transport-cc.
   final bool keepTransportCcOnly;
 
-  /// Tasks to request from the server's adapters (e.g., ['pose'], or ['pose','face'])
+  /// Tasks requested al servidor (['pose'], ['pose','face'], etc.)
   final List<String> requestedTasks;
 
   String get _primaryTask =>
@@ -97,8 +103,12 @@ class PoseWebRTCService {
   final String? _turnUsername;
   final String? _turnPassword;
 
-  // ← centralized encoder
+  // Centralized encoder
   final RtcVideoEncoder encoder;
+
+  // ────────────────────────────────────────────────────────────────────
+  // Estado WebRTC
+  // ────────────────────────────────────────────────────────────────────
 
   RTCPeerConnection? _pc;
 
@@ -108,22 +118,26 @@ class PoseWebRTCService {
   final Map<String, RTCDataChannel> _resultsPerTask = {}; // task -> DC
 
   MediaStream? _localStream;
-  MediaStream? get localStream => _localStream; // ← added getter
+  MediaStream? get localStream => _localStream; // getter público
   RTCRtpTransceiver? _videoTransceiver;
 
   Timer? _rtpStatsTimer;
   Timer? _dcGuardTimer;
   bool _disposed = false;
 
+  // Renderers para vista previa local/remota (opcional en UI)
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
+
+  // Último frame decodificado (interno); la UI debería escuchar `frames`
   final ValueNotifier<PoseFrame?> latestFrame = ValueNotifier<PoseFrame?>(null);
 
+  // Stream público para la UI (contrato del dominio)
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
+  @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
-  /// NEW: latest face landmarks cache (requires 'face' in [requestedTasks]).
-  /// Exposed as 2D for overlay compatibility.
+  /// Cache de landmarks de cara 2D (requiere 'face' en [requestedTasks]).
   List<List<Offset>>? get latestFaceLandmarks {
     final faces3d = _lastPosesPerTask['face'];
     if (faces3d == null) return null;
@@ -133,28 +147,27 @@ class PoseWebRTCService {
         .toList(growable: false);
   }
 
-  /// Latest primary pose landmarks (first person) — 3D (if available).
-  /// Returns `null` if no 'pose' data has arrived yet.
+  /// Último pose principal (3D) si está disponible.
   List<PosePoint>? get latestPoseLandmarks3D {
     final poses = _lastPosesPerTask['pose'];
     if (poses == null || poses.isEmpty) return null;
-    return poses.first; // choose the first detected person
+    return poses.first;
   }
 
-  /// Latest primary pose landmarks (first person) — 2D view for overlays.
+  /// Último pose principal (2D) para overlays.
   List<Offset>? get latestPoseLandmarks {
     final ps = latestPoseLandmarks3D;
     if (ps == null) return null;
     return ps.map((p) => Offset(p.x, p.y)).toList(growable: false);
   }
 
-  // ─────── Parsers & state PER TASK ───────
+  // Parsers & estado por tarea
   final Map<String, PoseBinaryParser> _parsers = {}; // task -> parser
   final Map<String, List<List<PosePoint>>> _lastPosesPerTask = {}; // task -> poses(3D)
   int? _lastW;
   int? _lastH;
 
-  // NEW: último seq aceptado por task (comparación circular 16-bit)
+  // Último seq aceptado por task (comparación circular 16-bit)
   final Map<String, int> _lastSeqPerTask = {};
   bool _isNewer16(int seq, int? last) {
     if (last == null) return true;
@@ -180,14 +193,15 @@ class PoseWebRTCService {
     // Server defaults: results=0, ctrl=1, face=2, others auto-increment from 3
     final t = task.toLowerCase();
     if (indexInList == 0) return 0; // primary 'results'
-    if (t == 'face') return 2; // must match server's DC_FACE_ID (default 2)
-    return 3 + (indexInList - 1); // conservative auto IDs for extra tasks
+    if (t == 'face') return 2; // server DC_FACE_ID (default 2)
+    return 3 + (indexInList - 1);
   }
 
-  // ================================
-  // Lifecycle
-  // ================================
+  // ────────────────────────────────────────────────────────────────────
+  // Lifecycle (Contrato)
+  // ────────────────────────────────────────────────────────────────────
 
+  @override
   Future<void> init() async {
     _log('[client] init()');
     await localRenderer.initialize();
@@ -216,10 +230,9 @@ class PoseWebRTCService {
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     localRenderer.srcObject = _localStream;
 
-    // ↓ NEW: hint encoder/algorithms to optimize for motion/latency
+    // Hint encoder/algorithms to optimize for motion/latency
     try {
       final dynamic dtrack = _localStream!.getVideoTracks().first;
-      // Some flutter_webrtc builds expose this; safe dynamic call.
       // ignore: avoid_dynamic_calls
       await dtrack.setVideoContentHint('motion');
     } catch (_) {
@@ -232,6 +245,7 @@ class PoseWebRTCService {
     );
   }
 
+  @override
   Future<void> connect() async {
     _log(
       '[client] connect() STUN=${_stunUrl ?? '-'} '
@@ -239,7 +253,7 @@ class PoseWebRTCService {
       'preferHevc=$preferHevc',
     );
 
-    // ── UPDATED: added iceCandidatePoolSize: 4 and TURN over UDP ────────────
+    // iceCandidatePoolSize: 4 + TURN over UDP
     final config = <String, dynamic>{
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
@@ -248,7 +262,7 @@ class PoseWebRTCService {
         if (_stunUrl != null && _stunUrl!.isNotEmpty) {'urls': _stunUrl},
         if (_turnUrl != null && _turnUrl!.isNotEmpty)
           {
-            'urls': _forceTurnUdp(_turnUrl!), // ← prefer UDP over TCP
+            'urls': _forceTurnUdp(_turnUrl!),
             if ((_turnUsername ?? '').isNotEmpty) 'username': _turnUsername,
             if ((_turnPassword ?? '').isNotEmpty) 'credential': _turnPassword,
           },
@@ -274,11 +288,11 @@ class PoseWebRTCService {
       _log('[client] on-negotiation-needed');
     };
 
-    // Data channels: optionally pre-create so the OFFER carries m=application.
+    // Data channels: pre-create para que el OFFER lleve m=application
     if (preCreateDataChannels) {
       final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
 
-      // 1) Primary 'results' for tasks[0] (unordered lossy, negotiated id=0)
+      // 1) Primary 'results' (unordered lossy, negotiated id=0)
       {
         final String task0 = tasks[0].toLowerCase();
         final lossy = RTCDataChannelInit()
@@ -289,12 +303,11 @@ class PoseWebRTCService {
         final ch = await _pc!.createDataChannel('results', lossy);
         _dc = ch;
         _resultsPerTask[task0] = ch;
-        _log(
-            "[client] created negotiated DC 'results' id=${ch.id} (task=$task0)");
+        _log("[client] created negotiated DC 'results' id=${ch.id} (task=$task0)");
         _wireResults(ch, task: task0);
       }
 
-      // 2) Extra 'results:<task>' channels (unordered lossy, negotiated)
+      // 2) Extra 'results:<task>' (unordered lossy, negotiated)
       for (var i = 1; i < tasks.length; i++) {
         final task = tasks[i].toLowerCase().trim();
         if (task.isEmpty) continue;
@@ -319,13 +332,11 @@ class PoseWebRTCService {
       _log("[client] created negotiated DC 'ctrl' id=1");
       _wireCtrl(_ctrl!);
     } else {
-      _log(
-          "[client] preCreateDataChannels=false → waiting for peer-announced channels");
+      _log("[client] preCreateDataChannels=false → waiting peer-announced DCs");
     }
 
-    // Always adopt peer-announced channels if they arrive.
+    // Adoptar canales anunciados por el peer si llegan
     _pc!.onDataChannel = (RTCDataChannel ch) {
-      // label is nullable in flutter_webrtc → normalize to empty string
       final label = ch.label ?? '';
       _log("[client] datachannel announced by peer: $label id=${ch.id}");
 
@@ -347,7 +358,7 @@ class PoseWebRTCService {
       }
     };
 
-    // Add video as sendonly.
+    // SendOnly del track de video local
     final videoTrack = _localStream!.getVideoTracks().first;
     _videoTransceiver = await _pc!.addTransceiver(
       track: videoTrack,
@@ -365,30 +376,27 @@ class PoseWebRTCService {
       }
     };
 
-    // ─────────────────────────────────────────────────────────────
-    // Centralized encoder setup (codec prefs + sender limits)
-    // ─────────────────────────────────────────────────────────────
+    // Encoder (codec prefs + sender limits)
     await encoder.applyTo(_videoTransceiver!);
 
-    // Create offer and log SDP parts like the Python client
+    // Crear offer
     _log('[client] creating offer…');
     var offer = await _pc!.createOffer({
       'offerToReceiveVideo': 0,
       'offerToReceiveAudio': 0,
     });
 
-    // Hint initial bitrate for H.264
+    // Bitrate inicial para H.264
     final munged = RtcVideoEncoder.mungeH264BitrateHints(
       offer.sdp!,
       kbps: maxBitrateKbps,
     );
 
-    // ↓↓↓ NEW: Strip FEC codecs from the m=video section if requested
+    // SDP munging
     var sdp = munged;
     if (stripFecFromSdp) {
       sdp = _stripVideoFec(sdp);
     }
-    // ↓↓↓ NEW: Also strip RTX/NACK/REMB (keep transport-cc)
     if (stripRtxAndNackFromSdp) {
       sdp = _stripVideoRtxNackAndRemb(
         sdp,
@@ -397,8 +405,7 @@ class PoseWebRTCService {
         keepTransportCcOnly: keepTransportCcOnly,
       );
     }
-    // ↓↓↓ NEW: Keep only the chosen video codec(s) to avoid payload switches
-    final only = preferHevc ? ['h265'] : ['h264']; // or ['vp8'] if you prefer
+    final only = preferHevc ? ['h265'] : ['h264']; // o ['vp8']
     sdp = _keepOnlyVideoCodecs(sdp, only);
     offer = RTCSessionDescription(sdp, offer.type);
 
@@ -417,7 +424,7 @@ class PoseWebRTCService {
     final body = {
       'type': local!.type,
       'sdp': local.sdp,
-      // NEW ↓ tell server which adapters you want
+      // dile al servidor qué adapters quieres
       'tasks': requestedTasks.isEmpty ? ['pose'] : requestedTasks,
     };
     final res = await http.post(
@@ -440,10 +447,7 @@ class PoseWebRTCService {
     );
 
     final ansSdp = (ansMap['sdp'] as String?) ?? '';
-    _log(
-      "[client] remote answer has m=application: "
-      "${ansSdp.contains('m=application')}",
-    );
+    _log("[client] remote answer has m=application: ${ansSdp.contains('m=application')}");
     _log('[client] remote answer set');
 
     _dumpSdp('remote-answer', ansSdp);
@@ -452,9 +456,74 @@ class PoseWebRTCService {
     _startNoResultsGuard();
   }
 
-  // ================================
-  // Helpers (ICE, etc.)
-  // ================================
+  @override
+  Future<void> switchCamera() async {
+    final tracks = _localStream?.getVideoTracks();
+    if (tracks == null || tracks.isEmpty) return;
+
+    try {
+      await Helper.switchCamera(tracks.first);
+      _log('[client] camera switched');
+      if (_videoTransceiver != null) {
+        await encoder.applyTo(_videoTransceiver!); // mantener límites tras el switch
+      }
+    } catch (e) {
+      _log('[client] switchCamera failed: $e');
+    }
+  }
+
+  Future<void> close() => dispose();
+
+  @override
+  Future<void> dispose() async {
+    _disposed = true;
+    _log('[client] dispose()');
+
+    try {
+      await _ctrl?.close();
+    } catch (_) {}
+    try {
+      await _dc?.close();
+    } catch (_) {}
+    try {
+      await _pc?.close();
+    } catch (_) {}
+
+    // Detener tracks antes de soltar stream/renderer
+    try {
+      _localStream?.getTracks().forEach((t) {
+        try {
+          t.stop();
+        } catch (_) {}
+      });
+    } catch (_) {}
+
+    try {
+      await localRenderer.dispose();
+    } catch (_) {}
+    try {
+      await remoteRenderer.dispose();
+    } catch (_) {}
+    try {
+      await _localStream?.dispose();
+    } catch (_) {}
+
+    _localStream = null;
+
+    _rtpStatsTimer?.cancel();
+    _dcGuardTimer?.cancel();
+    await _framesCtrl.close();
+
+    // Limpiar estado
+    _lastSeqPerTask.clear();
+    _lastPosesPerTask.clear();
+
+    _log('[client] disposed');
+  }
+
+  // ────────────────────────────────────────────────────────────────────
+  // Helpers (ICE, DCs, Parsing, SDP, etc.)
+  // ────────────────────────────────────────────────────────────────────
 
   Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
     if (pc.iceGatheringState ==
@@ -485,10 +554,6 @@ class PoseWebRTCService {
 
     return c.future;
   }
-
-  // ===============================
-  // Data channels
-  // ===============================
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {
@@ -529,11 +594,9 @@ class PoseWebRTCService {
         final txtRaw = m.text ?? '';
         final txt = txtRaw.trim();
         if (txt.toUpperCase() == 'KF') {
-          _log(
-            "[client] '$task' got KF request (string) — ignoring on client",
-          );
+          _log("[client] '$task' got KF request (string) — ignoring on client");
         } else {
-          _handlePoseText(txtRaw); // JSON fallback (kept simple)
+          _handlePoseText(txtRaw); // JSON fallback
         }
       }
     };
@@ -606,7 +669,6 @@ class PoseWebRTCService {
           ..ordered = !lossy;
 
         if (lossy) {
-          // NOTE: cannot set null on some plugin versions; set only when lossy
           init.maxRetransmits = 0;
         }
 
@@ -637,10 +699,7 @@ class PoseWebRTCService {
     _wireCtrl(_ctrl!);
   }
 
-  // ================================
-  // JSON Fallback
-  // ================================
-
+  // JSON fallback
   void _handlePoseText(String text) {
     try {
       final m = _parseJson(text);
@@ -658,39 +717,35 @@ class PoseWebRTCService {
     }
   }
 
-  // ================================
-  // Binary PO/PD Parsing (per task)
-  // ================================
-
+  // Binary PO/PD parsing (per task)
   void _handleTaskBinary(String task, Uint8List b) {
     final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
     final res = parser.parse(b);
 
     if (res is PoseParseOk) {
-      final pkt = res.packet; // has kind, keyframe, seq, w, h, poses(List<List<PosePoint>>)
+      final pkt = res.packet; // kind, keyframe, seq, w, h, poses(List<List<PosePoint>>)
       final int? seq = pkt.seq;
 
-      // ── DROP: PD no-KF re-ordenados (unordered/lossy DC) ─────────────
+      // DROP: PD no-KF re-ordenados (unordered/lossy DC)
       if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
         final int? last = _lastSeqPerTask[task];
         if (last != null && !_isNewer16(seq, last)) {
           _log("[client] drop stale PD task=$task seq=$seq (last=$last)");
-          // ACK igualmente si es el stream primario, para no confundir al servidor
+          // ACK igualmente si es el stream primario
           if (task == _primaryTask && res.ackSeq != null) {
             _sendCtrlAck(res.ackSeq!);
           }
           return; // no actualices estado ni emitas frame
         }
       }
-      // ─────────────────────────────────────────────────────────────────
 
-      // Save accepted packet state
+      // Guardar estado aceptado
       _lastW = pkt.w;
       _lastH = pkt.h;
-      _lastPosesPerTask[task] = pkt.poses; // ← poses are 3D now
+      _lastPosesPerTask[task] = pkt.poses; // 3D
       if (seq != null) _lastSeqPerTask[task] = seq;
 
-      // Fuse all tasks' poses into one list (3D) for emission
+      // Fusionar todas las tasks (3D) y emitir
       final fused = _lastPosesPerTask.values
           .expand((l) => l)
           .toList(growable: false);
@@ -705,11 +760,11 @@ class PoseWebRTCService {
         seq: pkt.seq,
       );
 
-      // ACK PD only for the PRIMARY stream (e.g., 'pose')
+      // ACK solo para el stream PRIMARIO (e.g., 'pose')
       if (task == _primaryTask && res.ackSeq != null) {
         _sendCtrlAck(res.ackSeq!);
       }
-      // Ask for KF if parser detected a sequence hole
+      // Pedir KF si el parser detectó hueco de secuencia
       if (res.requestKeyframe) {
         _log('[client] PD seq mismatch (task=$task) -> requesting KF');
         _sendCtrlKF();
@@ -729,7 +784,7 @@ class PoseWebRTCService {
   }) {
     if (_disposed) return;
 
-    // Map to 2D for the existing HUD/overlay
+    // Map 3D → 2D para el HUD/overlay
     final poses2d = poses3d
         .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
         .toList(growable: false);
@@ -739,10 +794,8 @@ class PoseWebRTCService {
       posesPx: poses2d,
     );
 
-    _log(
-      '[client] emit frame kind=$kind seq=${seq ?? '-'} '
-      'poses=${poses2d.length} size=${w}x$h',
-    );
+    _log('[client] emit frame kind=$kind seq=${seq ?? '-'} '
+        'poses=${poses2d.length} size=${w}x$h');
 
     latestFrame.value = frame;
     if (!_framesCtrl.isClosed) {
@@ -773,16 +826,10 @@ class PoseWebRTCService {
     c.send(RTCDataChannelMessage.fromBinary(out));
   }
 
-  // ================================
-  // Diagnostics
-  // ================================
-
   void _dumpSdp(String tag, String? sdp) {
     if (!logEverything || sdp == null) return;
 
-    // Split SDP into lines safely (CRLF or LF)
     final lines = sdp.split(RegExp(r'\r?\n'));
-
     final take = <String>[];
     var inVideo = false;
 
@@ -843,28 +890,21 @@ class PoseWebRTCService {
         final ctrlOpen =
             _ctrl?.state == RTCDataChannelState.RTCDataChannelOpen;
 
-        // If channels are open, don't try creating negotiated ones — just nudge.
+        // Si hay canales abiertos, no intentes negotiated — solo nudge.
         if (dcOpen || ctrlOpen) {
-          _log(
-            '[client] no results yet, channels open → re-nudge (HELLO+KF)',
-          );
+          _log('[client] no results yet, channels open → re-nudge (HELLO+KF)');
           _nudgeServer();
           return;
         }
 
-        // Channels not open: try negotiated(0/1) once.
-        _log(
-          '[client] no results and channels not open → trying negotiated DCs (0/1)',
-        );
+        // Canales no abiertos: intenta negotiated(0/1) una vez.
+        _log('[client] no results and DCs closed → trying negotiated DCs (0/1)');
         await _recreateNegotiatedChannels();
       },
     );
   }
 
-  // ================================
   // SDP munging helpers (FEC strip)
-  // ================================
-
   String _stripVideoFec(String sdp) {
     final lines = sdp.split(RegExp(r'\r?\n'));
     final fecNames = {'red', 'ulpfec', 'flexfec-03'};
@@ -881,9 +921,9 @@ class PoseWebRTCService {
       }
     }
 
-    if (fecPts.isEmpty) return sdp; // nothing to do
+    if (fecPts.isEmpty) return sdp;
 
-    // Pass 2: rebuild lines skipping FEC payloads and their attributes
+    // Pass 2: rebuild skipping FEC payloads/attrs
     final out = <String>[];
     for (final l in lines) {
       if (l.startsWith('m=video')) {
@@ -910,10 +950,7 @@ class PoseWebRTCService {
     return out.join('\r\n');
   }
 
-  // ================================
   // SDP munging helpers (RTX/NACK/REMB strip)
-  // ================================
-
   String _stripVideoRtxNackAndRemb(String sdp,
       {bool dropNack = true, bool dropRtx = true, bool keepTransportCcOnly = true}) {
     final lines = sdp.split(RegExp(r'\r?\n'));
@@ -940,21 +977,19 @@ class PoseWebRTCService {
           continue;
         }
 
-        // Drop any attributes tied to RTX PTs
+        // Drop attrs ligados a RTX PTs
         if (dropRtx && RegExp(r'^a=(rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
           final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
           if (m != null && rtxPts.contains(m.group(1)!)) continue;
         }
 
-        // Drop generic NACK / PLI / FIR feedback if requested
+        // Drop generic NACK/PLI/FIR feedback si se pide
         if (dropNack && l.startsWith('a=rtcp-fb:')) {
-          // Keep transport-cc only (and optionally drop goog-remb)
           if (keepTransportCcOnly) {
             if (l.contains('transport-cc')) { out.add(l); continue; }
-            // drop everything else (incl. goog-remb, nack, ccm fir, nack pli)
+            // drop todo lo demás (incl. goog-remb, nack, ccm fir, nack pli)
             continue;
           } else {
-            // drop nack/fir/pli, keep others
             if (l.contains('nack') || l.contains('ccm fir') || l.contains('pli')) continue;
           }
         }
@@ -964,16 +999,12 @@ class PoseWebRTCService {
     return out.join('\r\n');
   }
 
-  // ================================
-  // SDP munging helpers (keep only selected codecs)
-  // ================================
-
+  // SDP munging helpers (mantener solo ciertos códecs)
   String _keepOnlyVideoCodecs(String sdp, List<String> codecNamesLower) {
-    // Split SDP into lines safely (CRLF or LF)
     final lines = sdp.split(RegExp(r'\r?\n'));
     final keepPts = <String>{};
 
-    // Pass 1: collect payload types (PTs) of the codecs we want to keep
+    // PTs de los códecs que queremos mantener
     for (final l in lines) {
       final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
       if (m != null) {
@@ -984,7 +1015,6 @@ class PoseWebRTCService {
     }
     if (keepPts.isEmpty) return sdp;
 
-    // Pass 2: rebuild the video section, dropping everything tied to other PTs
     final out = <String>[];
     var inVideo = false;
 
@@ -1007,72 +1037,6 @@ class PoseWebRTCService {
       out.add(l);
     }
 
-    // Use CRLF per SDP spec (LF also works in practice)
     return out.join('\r\n');
-  }
-
-  // ================================
-
-  Future<void> switchCamera() async {
-    final tracks = _localStream?.getVideoTracks();
-    if (tracks == null || tracks.isEmpty) return;
-
-    try {
-      await Helper.switchCamera(tracks.first);
-      _log('[client] camera switched');
-      if (_videoTransceiver != null) {
-        await encoder.applyTo(_videoTransceiver!); // keep limits after switch
-      }
-    } catch (e) {
-      _log('[client] switchCamera failed: $e');
-    }
-  }
-
-  Future<void> close() => dispose();
-
-  Future<void> dispose() async {
-    _disposed = true;
-    _log('[client] dispose()');
-
-    try {
-      await _ctrl?.close();
-    } catch (_) {}
-    try {
-      await _dc?.close();
-    } catch (_) {}
-    try {
-      await _pc?.close();
-    } catch (_) {}
-
-    // Stop local tracks explicitly before disposing the stream/renderer
-    try {
-      _localStream?.getTracks().forEach((t) {
-        try {
-          t.stop();
-        } catch (_) {}
-      });
-    } catch (_) {}
-
-    try {
-      await localRenderer.dispose();
-    } catch (_) {}
-    try {
-      await remoteRenderer.dispose();
-    } catch (_) {}
-    try {
-      await _localStream?.dispose();
-    } catch (_) {}
-
-    _localStream = null; // ← ensure getter returns null after dispose
-
-    _rtpStatsTimer?.cancel();
-    _dcGuardTimer?.cancel();
-    await _framesCtrl.close();
-
-    // NEW: limpia estados para siguiente sesión
-    _lastSeqPerTask.clear();
-    _lastPosesPerTask.clear();
-
-    _log('[client] disposed');
   }
 }
