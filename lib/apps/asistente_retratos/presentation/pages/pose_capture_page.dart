@@ -2,7 +2,7 @@
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
 import 'dart:typed_data' show Uint8List;
-import 'dart:ui' show Size; // for LayoutBuilder size
+import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat;
 
 import 'package:flutter/material.dart';
@@ -21,17 +21,9 @@ class PoseCapturePage extends StatefulWidget {
   const PoseCapturePage({
     super.key,
     required this.poseService,
-
-    /// Total logical duration of the countdown when [countdownSpeed] == 1.0.
     this.countdownDuration = const Duration(seconds: 3),
-
-    /// Visual smoothness of the ring updates (frames per second).
     this.countdownFps = 30,
-
-    /// Speed multiplier: 1.0 = normal; 2.0 = twice as fast (finishes in half the time).
     this.countdownSpeed = 1.6,
-
-    /// NEW: enables/disables pose validations logic entirely.
     this.validationsEnabled = true,
   });
 
@@ -39,8 +31,6 @@ class PoseCapturePage extends StatefulWidget {
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;
-
-  /// NEW: global switch to disable all validations (yaw/pitch/roll/shoulders/azimut).
   final bool validationsEnabled;
 
   @override
@@ -48,8 +38,7 @@ class PoseCapturePage extends StatefulWidget {
 }
 
 class _PoseCapturePageState extends State<PoseCapturePage> {
-  // UI-only state
-  final GlobalKey _previewKey = GlobalKey(); // wraps only the camera preview
+  final GlobalKey _previewKey = GlobalKey();
   late final PoseCaptureController ctl;
 
   @override
@@ -61,9 +50,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       countdownFps: widget.countdownFps,
       countdownSpeed: widget.countdownSpeed,
       mirror: true,
-      validationsEnabled: widget.validationsEnabled, // NEW: pass the flag
+      validationsEnabled: widget.validationsEnabled,
     );
-    // Provide fallback snapshot closure (uses this widget's context & key)
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
     ctl.attach();
   }
@@ -81,7 +69,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final boundary = ctx.findRenderObject() as RenderRepaintBoundary?;
     if (boundary == null) return null;
 
-    // Match on-screen sharpness.
     final dpr = MediaQuery.of(context).devicePixelRatio;
     final ui.Image image = await boundary.toImage(pixelRatio: dpr);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -95,18 +82,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(constraints.maxWidth, constraints.maxHeight);
-        ctl.setCanvasSize(size); // keep current canvas size for mapping
+        ctl.setCanvasSize(size);
 
         return AnimatedBuilder(
           animation: ctl,
           builder: (context, _) {
+            final scheme = Theme.of(context).colorScheme;
+
             return Scaffold(
-              backgroundColor: Colors.black,
+              // Usa el fondo del tema (en tu ThemeMode.dark será negro)
+              backgroundColor: Theme.of(context).scaffoldBackgroundColor,
               body: Stack(
                 children: [
-                  // Live preview + overlays only when NOT capturing and no photo shown
                   if (!ctl.isCapturing && ctl.capturedPng == null) ...[
-                    // 1) Full-screen local preview (wrapped for snapshot)
+                    // 1) Preview
                     Positioned.fill(
                       child: RepaintBoundary(
                         key: _previewKey,
@@ -118,7 +107,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       ),
                     ),
 
-                    // 2) Low-latency landmarks overlay (your existing widget)
+                    // 2) Landmarks overlay
                     Positioned.fill(
                       child: IgnorePointer(
                         child: PoseOverlayFast(
@@ -129,7 +118,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       ),
                     ),
 
-                    // 3) Portrait HUD (face oval, checklist, guidance, countdown)
+                    // 3) HUD
                     Positioned.fill(
                       child: IgnorePointer(
                         child: PortraitValidatorHUD(
@@ -139,23 +128,22 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                           showSafeBox: false,
                           messageGap: 0.045,
                           ovalRectFor: (sz) {
-                            final r   = faceOvalRectFor(sz);
-                            final newW = r.width  * 0.90;     // 10% más angosto
-                            final newH = r.height * 0.85;     // 15% más bajo
-                            final dx   = (r.width  - newW) / 2; // centrar horizontalmente
-                            final dy   = (r.height - newH) / 2; // centrar verticalmente
+                            final r = faceOvalRectFor(sz);
+                            final newW = r.width * 0.90;
+                            final newH = r.height * 0.85;
+                            final dx = (r.width - newW) / 2;
+                            final dy = (r.height - newH) / 2;
                             return Rect.fromLTWH(r.left + dx, r.top + dy, newW, newH);
                           },
                         ),
                       ),
                     ),
 
-                    // 4) Frame sequence animation overlay (ONLY while hint is active)
+                    // 4) Secuencia de giro
                     if (ctl.showTurnRightSeq)
                       Positioned(
                         left: 0,
                         right: 0,
-                        // ~75% desde arriba: queda por debajo de los textos del HUD.
                         top: constraints.maxHeight * 0.75,
                         child: IgnorePointer(
                           child: SizedBox(
@@ -175,7 +163,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         ),
                       ),
 
-                    // 5) Optional remote PiP
+                    // 5) Remote PiP (idéntico a tu versión original, sin contenedores extra)
                     Positioned(
                       left: 12,
                       top: 12,
@@ -185,27 +173,27 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         borderRadius: BorderRadius.circular(12),
                         child: RTCVideoView(
                           svc.remoteRenderer,
-                          mirror: ctl.mirror, // consider false if remote is not mirrored
+                          mirror: ctl.mirror, // considera false si el remoto no va espejado
                           objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                         ),
                       ),
                     ),
                   ],
 
-                  // Capture in progress (hidden live UI, image not ready yet)
+                  // CAPTURANDO → overlay con el color de fondo del tema y spinner temado
                   if (ctl.isCapturing && ctl.capturedPng == null)
-                    const Positioned.fill(
+                    Positioned.fill(
                       child: ColoredBox(
-                        color: Colors.black,
-                        child: Center(child: CircularProgressIndicator()),
+                        color: scheme.background,
+                        child: const Center(child: CircularProgressIndicator()),
                       ),
                     ),
 
-                  // Captured photo overlay (tap/close → return to live)
+                  // FOTO CAPTURADA
                   if (ctl.capturedPng != null)
                     Positioned.fill(
                       child: Container(
-                        color: Colors.black,
+                        color: scheme.background,
                         alignment: Alignment.center,
                         child: Stack(
                           children: [
@@ -224,10 +212,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               top: 16,
                               right: 16,
                               child: Material(
-                                color: Colors.black54,
+                                color: scheme.primary.withOpacity(0.92), // rojo primario
                                 shape: const CircleBorder(),
                                 child: IconButton(
-                                  icon: const Icon(Icons.close, color: Colors.white),
+                                  icon: Icon(Icons.close, color: scheme.onPrimary),
                                   onPressed: ctl.closeCaptured,
                                   tooltip: 'Cerrar',
                                 ),
