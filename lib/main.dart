@@ -4,9 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get_it/get_it.dart';
 
-import 'features/posture/dependencias_posture.dart';
-import 'features/posture/domain/service/pose_capture_service.dart';
-import 'features/posture/presentation/pages/pose_capture_page.dart';
+import 'apps/guia_retrato/dependencias_posture.dart';
+import 'apps/guia_retrato/domain/service/pose_capture_service.dart';
+import 'apps/guia_retrato/presentation/pages/pose_capture_page.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
