@@ -2,17 +2,26 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui show PointMode; // ⬅️ PointMode
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame; // ⬅️ ruta corregida
+import '../styles/colors.dart' show CaptureTheme; // ⬅️ para faceOval/pipBorder, etc.
 
-/// ───────────────────────── Existing widgets (unchanged) ─────────────────────────
+/// ───────────────────────── Existing widgets (palette-driven) ─────────────────────────
 
 class CircularMaskPainter extends CustomPainter {
-  const CircularMaskPainter({required this.circleCenter, required this.circleRadius});
+  const CircularMaskPainter({
+    required this.circleCenter,
+    required this.circleRadius,
+    this.maskColor, // ⬅️ NUEVO opcional: inyecta color desde el Theme
+  });
+
   final Offset circleCenter;
   final double circleRadius;
+  final Color? maskColor;
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = Colors.black.withOpacity(0.5);
+    // Si no te pasan color, usa un negro 50% (comportamiento anterior)
+    final paint = Paint()
+      ..color = (maskColor ?? const Color(0x80000000)); // 0.5 de opacidad
     final full = Path()..addRect(Rect.fromLTWH(0, 0, size.width, size.height));
     final hole = Path()..addOval(Rect.fromCircle(center: circleCenter, radius: circleRadius));
     final mask = Path.combine(PathOperation.difference, full, hole);
@@ -26,44 +35,61 @@ class CircularMaskPainter extends CustomPainter {
 class TopShade extends StatelessWidget {
   const TopShade({super.key});
   @override
-  Widget build(BuildContext context) => IgnorePointer(
-        child: Container(
-          height: 140,
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [Color(0xCC000000), Colors.transparent],
-            ),
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    // Usa scrim de la paleta para la sombra superior, desvaneciendo a transparente.
+    final top = scheme.scrim.withOpacity(0.80);
+    return IgnorePointer(
+      child: Container(
+        height: 140,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [top, Colors.transparent],
           ),
         ),
-      );
+      ),
+    );
+  }
 }
 
 class ProgressRing extends StatelessWidget {
   const ProgressRing({super.key, required this.value, required this.color});
   final double value;
   final Color color;
+
   @override
-  Widget build(BuildContext context) => SizedBox(
-        width: 80,
-        height: 80,
-        child: Stack(
-          alignment: Alignment.center,
-          children: [
-            CircularProgressIndicator(
-              value: value,
-              strokeWidth: 6,
-              backgroundColor: Colors.white24,
-              valueColor: AlwaysStoppedAnimation(color),
-            ),
-            Text(
-              '${(value * 100).round()}%',
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
-            ),
-          ],
-        ),
-      );
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textStyle = Theme.of(context).textTheme.titleMedium?.copyWith(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w600,
+        ) ??
+        TextStyle(
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+          color: scheme.onSurface,
+        );
+
+    return SizedBox(
+      width: 80,
+      height: 80,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CircularProgressIndicator(
+            value: value,
+            strokeWidth: 6,
+            // Antes: Colors.white24 → ahora onSurface con baja opacidad
+            backgroundColor: scheme.onSurface.withOpacity(0.24),
+            valueColor: AlwaysStoppedAnimation<Color>(color), // color viene de tu paleta
+          ),
+          Text('${(value * 100).round()}%', style: textStyle),
+        ],
+      ),
+    );
+  }
 }
 
 /// MediaPipe Pose connections (33 pts)
@@ -140,7 +166,6 @@ class SkeletonPainter extends CustomPainter {
       ..isAntiAlias = false;
 
     canvas.save();
-    // Aplicar transform: letterbox + escala + espejo (si procede)
     if (mirror) {
       canvas.translate(size.width - offX, offY);
       canvas.scale(-s, s);
@@ -152,7 +177,6 @@ class SkeletonPainter extends CustomPainter {
     for (final pose in frame.posesPx) {
       if (pose.isEmpty) continue;
 
-      // Líneas: construir pares A,B… y dibujar en un batch
       _linePts.clear();
       for (final e in kPoseConnections) {
         final a = e[0], b = e[1];
@@ -164,7 +188,6 @@ class SkeletonPainter extends CustomPainter {
         canvas.drawPoints(ui.PointMode.lines, _linePts, line);
       }
 
-      // Puntos: un único batch
       if (drawPoints) {
         canvas.drawPoints(ui.PointMode.points, pose, dot);
       }
@@ -188,7 +211,7 @@ class PoseSkeletonOverlay extends StatelessWidget {
   const PoseSkeletonOverlay({
     super.key,
     required this.data, // PoseFrame? (null => nothing to draw)
-    this.color = Colors.limeAccent,
+    this.color,         // ⬅️ ahora opcional: si no lo pasas, usa la paleta
     this.strokeWidth = 2.0,
     this.drawPoints = true,
     this.mirror = false,
@@ -196,7 +219,7 @@ class PoseSkeletonOverlay extends StatelessWidget {
   });
 
   final PoseFrame? data;
-  final Color color;
+  final Color? color;
   final double strokeWidth;
   final bool drawPoints;
   final bool mirror;
@@ -205,10 +228,18 @@ class PoseSkeletonOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (data == null) return const SizedBox.shrink();
+
+    // Color por defecto desde la paleta:
+    // 1) intenta usar CaptureTheme.faceOval (si está registrado)
+    // 2) si no, cae a colorScheme.primary
+    final scheme = Theme.of(context).colorScheme;
+    final capture = Theme.of(context).extension<CaptureTheme>();
+    final resolved = color ?? capture?.faceOval ?? scheme.primary;
+
     return CustomPaint(
       painter: SkeletonPainter(
         frame: data!,
-        color: color,
+        color: resolved,
         strokeWidth: strokeWidth,
         drawPoints: drawPoints,
         mirror: mirror,
