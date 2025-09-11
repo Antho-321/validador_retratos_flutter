@@ -7,6 +7,7 @@ import 'package:get_it/get_it.dart';
 import 'apps/asistente_retratos/dependencias_posture.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
+import 'apps/asistente_retratos/presentation/styles/theme.dart'; // ⬅️ Theme de la app
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -18,7 +19,7 @@ Future<void> main() async {
     defaultValue: true,
   );
 
-  final offerUrl = const String.fromEnvironment(
+  const offerUrl = String.fromEnvironment(
     'POSE_WEBRTC_URL',
     defaultValue: 'http://192.168.100.5:8000/webrtc/offer',
   );
@@ -48,7 +49,7 @@ class PoseApp extends StatefulWidget {
     required this.validationsEnabled,
   });
 
-  final PoseCaptureService service;   // ← usa el contrato, no la implementación
+  final PoseCaptureService service;   // usa el contrato, no la implementación
   final bool validationsEnabled;
 
   @override
@@ -66,9 +67,11 @@ class _PoseAppState extends State<PoseApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(),
+      theme: AsistenteTheme.light,
+      darkTheme: AsistenteTheme.dark,
+      themeMode: ThemeMode.dark, // la pantalla de cámara va mejor en dark
       home: PoseCapturePage(
-        poseService: widget.service,          // ← la página debe aceptar el contrato
+        poseService: widget.service,              // la página acepta el contrato
         validationsEnabled: widget.validationsEnabled,
       ),
     );
