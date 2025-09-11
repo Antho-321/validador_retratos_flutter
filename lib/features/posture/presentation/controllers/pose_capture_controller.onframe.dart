@@ -572,14 +572,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
       azHiNow += azExpandNow;
     }
 
-    // ⬇️ NUEVO: progresos del anillo contextuales a la regla ACTUAL
-    final String curId = _currentRule.id;
-    final bool uiEnableHead = (curId == 'yaw' || curId == 'pitch' || curId == 'roll');
-    final bool uiEnableYaw = uiEnableHead;
+    // ⬇️ progresos del anillo contextuales a la regla ACTUAL
+    final bool doneNow = _isDone;
+    final String? curId = doneNow ? null : _currentRule.id;
+
+    final bool uiEnableHead  = !doneNow && (curId == 'yaw' || curId == 'pitch' || curId == 'roll');
+    final bool uiEnableYaw   = uiEnableHead;
     final bool uiEnablePitch = uiEnableHead;
-    final bool uiEnableRoll = uiEnableHead;
-    final bool uiEnableShoulders = (curId == 'shoulders');
-    final bool uiEnableAzimut = (curId == 'azimut') && (azDegHUD != null);
+    final bool uiEnableRoll  = uiEnableHead;
+
+    final bool uiEnableShoulders = !doneNow && (curId == 'shoulders');
+    final bool uiEnableAzimut    = !doneNow && (curId == 'azimut') && (azDegHUD != null);
 
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final report = _validator.evaluate(
@@ -985,7 +988,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
   }) {
     final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
 
-    String maintainMsg = _maintainById[_currentRule.id] ?? 'Mantén la cabeza recta';
+    final String maintainMsg = !_isDone
+        ? (_maintainById[_currentRule.id] ?? 'Mantén la cabeza recta')
+        : 'Mantén la cabeza recta';
 
     // Forzamos a String (no null). Usa '' para “no mostrar nada”.
     final String effectiveMsg = faceOk
