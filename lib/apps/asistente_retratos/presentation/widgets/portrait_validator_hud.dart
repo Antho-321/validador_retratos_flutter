@@ -1,15 +1,14 @@
+// lib/apps/asistente_retratos/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'dart:math' as math;
 
 import '../../core/face_oval_geometry.dart'
   show faceOvalRectFor, faceOvalPointsFor, faceOvalPathFor;
+import '../styles/colors.dart' show CaptureTheme, AppColors; // ⬅️ paleta específica de la app
 
 /// Trata cadenas vacías como null para no reservar espacio visual.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
-
-/// Verde de éxito del proyecto (coincide con otros componentes).
-const Color kProgressGreen = Color(0xFF4DC274);
 
 /// ─────────────────────────────────────────────────────────────────────
 /// Modelo UI simplificado: solo lo que sí se muestra en pantalla.
@@ -115,59 +114,83 @@ class PortraitValidatorHUD extends StatelessWidget {
             ? math.min(desiredTop, ringTop - 8)
             : desiredTop;
 
-        return Stack(
-          children: [
-            // 1) Ghost target (óvalo y caja segura)
-            Positioned.fill(
-              child: CustomPaint(
-                painter: _GhostPainter(
-                  ovalRect: ovalRect,           // NEW
-                  color: Colors.white,
-                  opacity: 0.85,
-                  strokeWidth: 2.0,
-                  showGhost: showGhost,
-                  showSafeBox: showSafeBox,
-                  shadeOutsideOval: true,
-                  shadeOpacity: 0.30,
-                  progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
-                ),
-              ),
-            ),
+        // Override local del scheme para que onSurface sea negro (ink)
+        final base = Theme.of(context);
+        final hudTheme = base.copyWith(
+          colorScheme: base.colorScheme.copyWith(
+            onSurface: AppColors.ink, // negro de tu paleta, aplicado vía scheme
+          ),
+        );
 
-            // 2) Mensajes (anclados bajo el óvalo)
-            Positioned(
-              left: 12,
-              right: 12,
-              top: messagesTop,
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
+        return Theme(
+          data: hudTheme,
+          child: Builder(
+            builder: (context) {
+              // A partir de aquí, Theme.of(context).colorScheme.onSurface == negro
+              final scheme   = Theme.of(context).colorScheme;
+              final capture  = Theme.of(context).extension<CaptureTheme>();
+
+              return Stack(
                 children: [
-                  _GuidancePill(
-                    primary: model.primaryMessage,
-                    secondary: model.secondaryMessage,
+                  // 1) Ghost target (óvalo y caja segura)
+                  Positioned.fill(
+                    child: CustomPaint(
+                      painter: _GhostPainter(
+                        ovalRect: ovalRect,           // NEW
+                        // Trazo del óvalo/caja desde la paleta:
+                        color: capture?.faceOval ?? scheme.primary,
+                        opacity: 0.85,
+                        strokeWidth: 2.0,
+                        showGhost: showGhost,
+                        showSafeBox: showSafeBox,
+                        shadeOutsideOval: true,
+                        // Sombra exterior usando scrim del tema
+                        shadeOpacity: 0.30,
+                        scrimColor: scheme.scrim,
+                        // Progreso en color HUD OK de la paleta (o secondary)
+                        progressColor: capture?.hudOk ?? scheme.secondary,
+                        progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
+                      ),
+                    ),
                   ),
-                  if (belowMessages != null) ...[
-                    const SizedBox(height: 8),
-                    Center(child: belowMessages!),
-                  ],
-                ],
-              ),
-            ),
 
-            // 3) Anillo de cuenta regresiva (opcional)
-            if (model.countdownSeconds != null && model.countdownProgress != null)
-              Positioned(
-                bottom: ringBottom + safe.bottom,
-                left: 0,
-                right: 0,
-                child: Center(
-                  child: _CountdownRing(
-                    seconds: model.countdownSeconds!,
-                    progress: model.countdownProgress!.clamp(0.0, 1.0),
+                  // 2) Mensajes (anclados bajo el óvalo)
+                  Positioned(
+                    left: 12,
+                    right: 12,
+                    top: messagesTop,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _GuidancePill(
+                          primary: model.primaryMessage,
+                          secondary: model.secondaryMessage,
+                        ),
+                        if (belowMessages != null) ...[
+                          const SizedBox(height: 8),
+                          Center(child: belowMessages!),
+                        ],
+                      ],
+                    ),
                   ),
-                ),
-              ),
-          ],
+
+                  // 3) Anillo de cuenta regresiva (opcional)
+                  if (model.countdownSeconds != null && model.countdownProgress != null)
+                    Positioned(
+                      bottom: ringBottom + safe.bottom,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: _CountdownRing(
+                          seconds: model.countdownSeconds!,
+                          progress: model.countdownProgress!.clamp(0.0, 1.0),
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
         );
       },
     );
@@ -186,6 +209,8 @@ class _GhostPainter extends CustomPainter {
     this.shadeOutsideOval = true,
     this.shadeOpacity = 0.30,
     this.progress = 0.0,
+    this.scrimColor = const Color(0xFF000000), // ⬅️ por defecto negro
+    this.progressColor = const Color(0xFF53B056), // ⬅️ fallback verde
   });
 
   final Rect ovalRect;            // NEW
@@ -199,6 +224,10 @@ class _GhostPainter extends CustomPainter {
   final double shadeOpacity;
   final double progress; // 0..1
 
+  // NUEVO: colores desde el tema (con fallback)
+  final Color scrimColor;
+  final Color progressColor;
+
   @override
   void paint(Canvas canvas, Size size) {
     if (!showGhost) return;
@@ -208,7 +237,7 @@ class _GhostPainter extends CustomPainter {
         ..fillType = PathFillType.evenOdd
         ..addRect(Offset.zero & size)
         ..addOval(ovalRect);
-      final maskPaint = Paint()..color = Colors.black.withOpacity(shadeOpacity);
+      final maskPaint = Paint()..color = scrimColor.withOpacity(shadeOpacity);
       canvas.drawPath(mask, maskPaint);
     }
 
@@ -223,7 +252,7 @@ class _GhostPainter extends CustomPainter {
     final p = progress.clamp(0.0, 1.0);
     if (p > 0) {
       final arcPaint = Paint()
-        ..color = kProgressGreen
+        ..color = progressColor
         ..style = PaintingStyle.stroke
         ..strokeWidth = strokeWidth + 3
         ..strokeCap = StrokeCap.round
@@ -260,7 +289,9 @@ class _GhostPainter extends CustomPainter {
       old.showSafeBox != showSafeBox ||
       old.shadeOutsideOval != shadeOutsideOval ||
       old.shadeOpacity != shadeOpacity ||
-      old.progress != progress;
+      old.progress != progress ||
+      old.scrimColor != scrimColor ||
+      old.progressColor != progressColor;
 }
 
 /// Pastilla de guía (principal + opcional secundaria)
@@ -273,6 +304,14 @@ class _GuidancePill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final String? secondaryText = _nullIfBlank(secondary);
+    final scheme = Theme.of(context).colorScheme;
+
+    // Fondo y sombras desde la paleta
+    final pillBg = scheme.surfaceContainerHigh; // requiere Material 3
+    final shadow = Theme.of(context).shadowColor.withOpacity(0.26);
+
+    // Texto/ícono sobre el contenedor
+    final onPill = scheme.onSurface;
 
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 250),
@@ -282,31 +321,29 @@ class _GuidancePill extends StatelessWidget {
         key: ValueKey<String>(primary + (secondaryText ?? '')),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
-          color: const Color(0xFFFFF1B8),
+          color: pillBg,
           borderRadius: BorderRadius.circular(16),
-          boxShadow: const [
-            BoxShadow(color: Colors.black26, blurRadius: 8, offset: Offset(0, 4))
-          ],
+          boxShadow: [BoxShadow(color: shadow, blurRadius: 8, offset: const Offset(0, 4))],
         ),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(mainAxisSize: MainAxisSize.min, children: const [
-              Icon(Icons.north_east_rounded, color: Colors.black87, size: 18),
-              SizedBox(width: 8),
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.north_east_rounded, color: onPill, size: 18),
+              const SizedBox(width: 8),
             ]),
             Text(
               primary,
-              style: const TextStyle(
-                color: Colors.black87, fontSize: 16, fontWeight: FontWeight.w700),
+              style: TextStyle(
+                color: onPill, fontSize: 16, fontWeight: FontWeight.w700),
             ),
             if (secondaryText != null) ...[
               const SizedBox(height: 6),
               Text(
                 secondaryText,
-                style: const TextStyle(
-                    color: Colors.black87, fontSize: 13, fontWeight: FontWeight.w500),
+                style: TextStyle(
+                  color: onPill, fontSize: 13, fontWeight: FontWeight.w500),
               ),
             ]
           ],
@@ -316,7 +353,7 @@ class _GuidancePill extends StatelessWidget {
   }
 }
 
-/// Anillo de cuenta regresiva
+/// Anillo de cuenta regresiva (usa blanco desde paleta + verde de paleta)
 class _CountdownRing extends StatelessWidget {
   const _CountdownRing({required this.seconds, required this.progress});
 
@@ -326,6 +363,17 @@ class _CountdownRing extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     const double size = 92;
+
+    // 1) Pista de fondo: BLANCO de la paleta con 24% de opacidad
+    final Color bgTrack = AppColors.white.withOpacity(0.24);
+
+    // 2) Arco activo: verde de la paleta (si hay override en CaptureTheme, respétalo)
+    final capture = Theme.of(context).extension<CaptureTheme>();
+    final Color active = capture?.hudOk ?? AppColors.green;
+
+    // 3) Texto central: BLANCO de la paleta
+    final Color textColor = AppColors.white;
+
     return SizedBox(
       width: size,
       height: size,
@@ -335,11 +383,11 @@ class _CountdownRing extends StatelessWidget {
           SizedBox(
             width: size,
             height: size,
-            child: const CircularProgressIndicator(
+            child: CircularProgressIndicator(
               value: 1.0,
               strokeWidth: 6,
-              backgroundColor: Colors.white24,
-              valueColor: AlwaysStoppedAnimation<Color>(Colors.white24),
+              backgroundColor: bgTrack,
+              valueColor: AlwaysStoppedAnimation<Color>(bgTrack),
             ),
           ),
           SizedBox(
@@ -348,14 +396,14 @@ class _CountdownRing extends StatelessWidget {
             child: CircularProgressIndicator(
               value: progress,
               strokeWidth: 6,
-              valueColor: const AlwaysStoppedAnimation<Color>(kProgressGreen),
+              valueColor: AlwaysStoppedAnimation<Color>(active),
               backgroundColor: Colors.transparent,
             ),
           ),
           Text(
             '$seconds',
-            style: const TextStyle(
-              fontSize: 28, fontWeight: FontWeight.w700, color: Colors.white),
+            style: TextStyle(
+              fontSize: 28, fontWeight: FontWeight.w700, color: textColor),
           ),
         ],
       ),
