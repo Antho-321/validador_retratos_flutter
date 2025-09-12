@@ -25,6 +25,7 @@ class PoseCapturePage extends StatefulWidget {
     this.countdownFps = 30,
     this.countdownSpeed = 1.6,
     this.validationsEnabled = true,
+    this.drawLandmarks = true, // ⬅️ nuevo
   });
 
   final PoseCaptureService poseService;
@@ -32,6 +33,7 @@ class PoseCapturePage extends StatefulWidget {
   final int countdownFps;
   final double countdownSpeed;
   final bool validationsEnabled;
+  final bool drawLandmarks; // ⬅️ nuevo
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
@@ -108,15 +110,16 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                     ),
 
                     // 2) Landmarks overlay
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: PoseOverlayFast(
-                          latest: svc.latestFrame,
-                          mirror: ctl.mirror,
-                          fit: BoxFit.cover,
+                    if (widget.drawLandmarks) // ⬅️ condición
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: PoseOverlayFast(
+                            latest: svc.latestFrame,
+                            mirror: ctl.mirror,
+                            fit: BoxFit.cover,
+                          ),
                         ),
                       ),
-                    ),
 
                     // 3) HUD
                     Positioned.fill(

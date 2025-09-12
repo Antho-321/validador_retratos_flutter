@@ -9,6 +9,12 @@ import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart'; // ⬅️ Theme de la app
 
+// Habilitar/Deshabilitar dibujo de landmarks (solo rendering, NO procesamiento)
+const drawLandmarks = bool.fromEnvironment(
+  'POSE_DRAW_LANDMARKS',
+  defaultValue: true,
+);
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
@@ -49,7 +55,7 @@ class PoseApp extends StatefulWidget {
     required this.validationsEnabled,
   });
 
-  final PoseCaptureService service;   // usa el contrato, no la implementación
+  final PoseCaptureService service; // usa el contrato, no la implementación
   final bool validationsEnabled;
 
   @override
@@ -71,8 +77,9 @@ class _PoseAppState extends State<PoseApp> {
       darkTheme: AsistenteTheme.dark,
       themeMode: ThemeMode.dark, // la pantalla de cámara va mejor en dark
       home: PoseCapturePage(
-        poseService: widget.service,              // la página acepta el contrato
+        poseService: widget.service, // la página acepta el contrato
         validationsEnabled: widget.validationsEnabled,
+        drawLandmarks: drawLandmarks, // ⬅️ pasa el flag
       ),
     );
   }
