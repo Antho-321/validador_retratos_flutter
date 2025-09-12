@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/scheduler.dart'; // ⬅️ for Ticker
 
 /// How the sequence should play.
 enum FramePlayMode { forward, reverse, pingPong }
@@ -114,46 +115,45 @@ class FrameSequenceCache {
     }
   }
 
-  static Future<List<ui.Image>> _loadRecipe(_RecipeKey key) async {
-    // Construye la lista de rutas respetando reverseOrder y count.
+  // Construye SIEMPRE hacia adelante; la inversión se maneja en el controlador.
+  static List<String> _buildPathsForward(_RecipeKey key) {
     final List<String> paths = <String>[];
-    if (!key.reverseOrder) {
-      for (int i = 0; i < key.count; i++) {
-        final n = key.startNumber + i;
-        paths.add('${key.directory}/${FrameSequenceController._formatPattern(key.pattern, n)}');
-      }
-    } else {
-      for (int i = 0; i < key.count; i++) {
-        final n = key.startNumber + (key.count - 1 - i);
-        paths.add('${key.directory}/${FrameSequenceController._formatPattern(key.pattern, n)}');
+    for (int i = 0; i < key.count; i++) {
+      final n = key.startNumber + i;
+      paths.add('${key.directory}/${FrameSequenceController._formatPattern(key.pattern, n)}');
+    }
+    return paths;
+  }
+
+  // ⬇️ Versión paralela sin target decode size
+  static Future<List<ui.Image>> _loadRecipe(_RecipeKey key) async {
+    final paths = _buildPathsForward(key); // always forward order
+    final n = paths.length;
+    final out = List<ui.Image?>.filled(n, null);
+
+    const maxConcurrent = 6;
+    int next = 0;
+    final futures = <Future<void>>[];
+
+    Future<void> worker() async {
+      while (true) {
+        final i = next++;
+        if (i >= n) break;
+        final p = paths[i];
+        final bd = await rootBundle.load(p);
+        var img = await _decodeBytes(bd.buffer.asUint8List());
+        if (key.xStart != null && key.xEnd != null) {
+          img = await _cropImageXRange(img, key.xStart!, key.xEnd!);
+        }
+        out[i] = img;
       }
     }
 
-    final List<ui.Image> frames = <ui.Image>[];
-    for (final p in paths) {
-      final bd = await rootBundle.load(p);
-      var img = await _decodeBytes(bd.buffer.asUint8List());
-      if (key.xStart != null && key.xEnd != null) {
-        int left = key.xStart!;
-        int right = key.xEnd!;
-        final w = img.width;
-
-        left = left.clamp(0, w);
-        right = right.clamp(0, w);
-        if (right < left) {
-          final t = left;
-          left = right;
-          right = t;
-        }
-
-        final cropW = right - left;
-        if (cropW > 0 && (left != 0 || right != w)) {
-          img = await _cropImageXRange(img, left, right);
-        }
-      }
-      frames.add(img);
+    for (var k = 0; k < maxConcurrent; k++) {
+      futures.add(worker());
     }
-    return frames;
+    await Future.wait(futures);
+    return out.cast<ui.Image>();
   }
 
   // Helpers compartidos con el controlador (decodificación/corte)
@@ -198,12 +198,6 @@ class FrameSequenceCache {
 
   /// Limpieza manual (opcional). No se usa por defecto para evitar cold-starts.
   static Future<void> clear() async {
-    // Si deseas liberar memoria, descomenta el dispose:
-    // for (final e in _cache.values) {
-    //   for (final img in e.frames) {
-    //     try { img.dispose(); } catch (_) {}
-    //   }
-    // }
     _cache.clear();
   }
 }
@@ -251,7 +245,8 @@ class FrameSequenceController extends ChangeNotifier {
   bool autoplay;
 
   bool get isLoaded => _frames.isNotEmpty;
-  bool get isPlaying => _timer != null;
+  bool get isPlaying => _ticker != null; // ⬅️ updated
+
   int get frameCount => _frames.length;
   int get currentIndex => _index;
   ui.Image? get currentFrame =>
@@ -259,7 +254,7 @@ class FrameSequenceController extends ChangeNotifier {
 
   final List<ui.Image> _frames = <ui.Image>[];
   final Stopwatch _clock = Stopwatch();
-  Timer? _timer;
+  Ticker? _ticker; // ⬅️ new ticker
   int _index = 0;
   int _spanForPingPong = 0;
   int _loadGen = 0;
@@ -394,6 +389,11 @@ class FrameSequenceController extends ChangeNotifier {
     _ownsFrames = false;
     _frames.addAll(cached);
 
+    // Como el caché carga SIEMPRE en orden forward, si se pidió reverse, invertimos aquí.
+    if (_reverseOrderFlag && _frames.length > 1) {
+      _reverseFramesInPlace();
+    }
+
     _afterLoad();
     if (wasPlaying || autoplay) play();
   }
@@ -441,14 +441,26 @@ class FrameSequenceController extends ChangeNotifier {
     if (wasPlaying || autoplay) play();
   }
 
+  // ── Playback con Ticker ────────────────────────────────────────────────
+  int? _phaseRaw;
+
   void play() {
     if (!isLoaded || isPlaying) return;
-    _startTicker();
+    _phaseRaw = null;
+    _clock
+      ..reset()
+      ..start();
+    _ticker = Ticker((elapsed) {
+      final raw = (elapsed.inMicroseconds / 1e6 * _fps).floor();
+      _phaseRaw ??= raw;
+      final stepped = raw - _phaseRaw!;
+      _advance(stepped);
+    })..start();
   }
 
   void pause() {
-    _timer?.cancel();
-    _timer = null;
+    _ticker?.dispose();
+    _ticker = null;
     _clock.stop();
   }
 
@@ -487,6 +499,62 @@ class FrameSequenceController extends ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  void _advance(int stepped) {
+    final len = _len;
+    if (len <= 0) return;
+
+    int newIndex;
+    switch (playMode) {
+      case FramePlayMode.forward:
+        if (loop) {
+          newIndex = stepped % len;
+        } else {
+          newIndex = stepped.clamp(0, len - 1).toInt();
+          if (newIndex == len - 1) pause();
+        }
+        break;
+      case FramePlayMode.reverse:
+        if (loop) {
+          newIndex = len - 1 - (stepped % len);
+        } else {
+          newIndex = (len - 1 - stepped).clamp(0, len - 1).toInt();
+          if (newIndex == 0) pause();
+        }
+        break;
+      case FramePlayMode.pingPong:
+        if (len == 1) {
+          newIndex = 0;
+        } else {
+          final span = _spanForPingPong; // N*2-2
+          final int r = loop ? (stepped % span) : stepped.clamp(0, span - 1).toInt();
+          newIndex = (r < len) ? r : (span - r);
+          if (!loop && r == span - 1) pause();
+        }
+        break;
+    }
+
+    if (newIndex != _index) {
+      _index = newIndex;
+      notifyListeners();
+    }
+  }
+
+  void _restartClockIfPlaying() {
+    if (!isPlaying) return;
+    pause();
+    play();
+  }
+
+  void _reverseFramesInPlace() {
+    final n = _frames.length;
+    for (int i = 0; i < n ~/ 2; i++) {
+      final j = n - 1 - i;
+      final tmp = _frames[i];
+      _frames[i] = _frames[j];
+      _frames[j] = tmp;
+    }
   }
 
   // --------- Decodificación local (sin caché) para loadAssets -----------
@@ -530,6 +598,7 @@ class FrameSequenceController extends ChangeNotifier {
     _ownsFrames = true; // estas imágenes sí son de este controlador
   }
 
+  // shared helper
   static Future<ui.Image> _decodeBytes(Uint8List bytes) async {
     final codec = await ui.instantiateImageCodec(bytes);
     final fi = await codec.getNextFrame();
@@ -587,79 +656,6 @@ class FrameSequenceController extends ChangeNotifier {
     }
     _frames.clear();
     _ownsFrames = true; // reset: por defecto asumimos propiedad
-  }
-
-  int? _phaseRaw;
-
-  void _startTicker() {
-    _clock.reset();
-    _clock.start();
-    _phaseRaw = null;
-
-    _timer = Timer.periodic(const Duration(milliseconds: 8), (_) {
-      if (!isLoaded) return;
-
-      final len = _len;
-      if (len <= 0) return;
-
-      final elapsed = _clock.elapsedMicroseconds / 1e6;
-      final raw = (elapsed * _fps).floor();
-
-      _phaseRaw ??= raw;
-      final stepped = raw - _phaseRaw!;
-
-      int newIndex;
-
-      switch (playMode) {
-        case FramePlayMode.forward:
-          if (loop) {
-            newIndex = stepped % len;
-          } else {
-            newIndex = stepped.clamp(0, len - 1).toInt();
-            if (newIndex == len - 1) pause();
-          }
-          break;
-        case FramePlayMode.reverse:
-          if (loop) {
-            newIndex = len - 1 - (stepped % len);
-          } else {
-            newIndex = (len - 1 - stepped).clamp(0, len - 1).toInt();
-            if (newIndex == 0) pause();
-          }
-          break;
-        case FramePlayMode.pingPong:
-          if (len == 1) {
-            newIndex = 0;
-          } else {
-            final span = _spanForPingPong; // N*2-2
-            final int r = loop ? (stepped % span) : stepped.clamp(0, span - 1).toInt();
-            newIndex = (r < len) ? r : (span - r);
-            if (!loop && r == span - 1) pause();
-          }
-          break;
-      }
-
-      if (newIndex != _index) {
-        _index = newIndex;
-        notifyListeners();
-      }
-    });
-  }
-
-  void _restartClockIfPlaying() {
-    if (!isPlaying) return;
-    pause();
-    play();
-  }
-
-  void _reverseFramesInPlace() {
-    final n = _frames.length;
-    for (int i = 0; i < n ~/ 2; i++) {
-      final j = n - 1 - i;
-      final tmp = _frames[i];
-      _frames[i] = _frames[j];
-      _frames[j] = tmp;
-    }
   }
 
   static String _formatPattern(String pattern, int number) {
