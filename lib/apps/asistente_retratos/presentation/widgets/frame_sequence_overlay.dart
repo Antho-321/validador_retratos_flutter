@@ -10,6 +10,204 @@ import 'package:flutter/services.dart' show rootBundle;
 /// How the sequence should play.
 enum FramePlayMode { forward, reverse, pingPong }
 
+/// Clave inmutable para identificar una "receta" de carga/corte/orden.
+@immutable
+class _RecipeKey {
+  const _RecipeKey({
+    required this.directory,
+    required this.pattern,
+    required this.startNumber,
+    required this.count,
+    required this.xStart,
+    required this.xEnd,
+    required this.reverseOrder,
+  });
+
+  final String directory;
+  final String pattern;
+  final int startNumber;
+  final int count;
+  final int? xStart;
+  final int? xEnd;
+  final bool reverseOrder;
+
+  @override
+  bool operator ==(Object other) {
+    return other is _RecipeKey &&
+        other.directory == directory &&
+        other.pattern == pattern &&
+        other.startNumber == startNumber &&
+        other.count == count &&
+        other.xStart == xStart &&
+        other.xEnd == xEnd &&
+        other.reverseOrder == reverseOrder;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+        directory,
+        pattern,
+        startNumber,
+        count,
+        xStart,
+        xEnd,
+        reverseOrder,
+      );
+}
+
+/// Entrada de caché: lista de frames decodificados/cortados.
+/// Nota: No se hace refcount ni se dispone; se mantiene por la vida del proceso.
+class _CacheEntry {
+  _CacheEntry({required this.frames}) : loadedAt = DateTime.now();
+  final List<ui.Image> frames;
+  final DateTime loadedAt;
+}
+
+/// Caché global muy simple (lifetime del proceso).
+/// - Clave: receta completa (incluye reverseOrder y count).
+/// - Valor: frames ya decodificados y (si aplica) recortados.
+/// Concurrency: si dos cargas piden la misma receta, la segunda espera a la
+/// misma `Future` en _inflight.
+class FrameSequenceCache {
+  static final Map<_RecipeKey, _CacheEntry> _cache = <_RecipeKey, _CacheEntry>{};
+  static final Map<_RecipeKey, Future<List<ui.Image>>> _inflight = <_RecipeKey, Future<List<ui.Image>>>{};
+
+  static bool contains(_RecipeKey key) => _cache.containsKey(key);
+
+  static List<ui.Image>? get(_RecipeKey key) => _cache[key]?.frames;
+
+  static Future<List<ui.Image>> getOrLoad({
+    required String directory,
+    required String pattern,
+    required int startNumber,
+    required int count,
+    int? xStart,
+    int? xEnd,
+    required bool reverseOrder,
+  }) async {
+    final key = _RecipeKey(
+      directory: directory,
+      pattern: pattern,
+      startNumber: startNumber,
+      count: count,
+      xStart: xStart,
+      xEnd: xEnd,
+      reverseOrder: reverseOrder,
+    );
+
+    final cached = _cache[key];
+    if (cached != null) return cached.frames;
+
+    // Si ya hay una carga en progreso para esta receta, espera esa misma.
+    final inflight = _inflight[key];
+    if (inflight != null) return await inflight;
+
+    // Inicia carga/decodificación + recorte
+    final fut = _loadRecipe(key);
+    _inflight[key] = fut;
+    try {
+      final frames = await fut;
+      _cache[key] = _CacheEntry(frames: frames);
+      return frames;
+    } finally {
+      _inflight.remove(key);
+    }
+  }
+
+  static Future<List<ui.Image>> _loadRecipe(_RecipeKey key) async {
+    // Construye la lista de rutas respetando reverseOrder y count.
+    final List<String> paths = <String>[];
+    if (!key.reverseOrder) {
+      for (int i = 0; i < key.count; i++) {
+        final n = key.startNumber + i;
+        paths.add('${key.directory}/${FrameSequenceController._formatPattern(key.pattern, n)}');
+      }
+    } else {
+      for (int i = 0; i < key.count; i++) {
+        final n = key.startNumber + (key.count - 1 - i);
+        paths.add('${key.directory}/${FrameSequenceController._formatPattern(key.pattern, n)}');
+      }
+    }
+
+    final List<ui.Image> frames = <ui.Image>[];
+    for (final p in paths) {
+      final bd = await rootBundle.load(p);
+      var img = await _decodeBytes(bd.buffer.asUint8List());
+      if (key.xStart != null && key.xEnd != null) {
+        int left = key.xStart!;
+        int right = key.xEnd!;
+        final w = img.width;
+
+        left = left.clamp(0, w);
+        right = right.clamp(0, w);
+        if (right < left) {
+          final t = left;
+          left = right;
+          right = t;
+        }
+
+        final cropW = right - left;
+        if (cropW > 0 && (left != 0 || right != w)) {
+          img = await _cropImageXRange(img, left, right);
+        }
+      }
+      frames.add(img);
+    }
+    return frames;
+  }
+
+  // Helpers compartidos con el controlador (decodificación/corte)
+  static Future<ui.Image> _decodeBytes(Uint8List bytes) async {
+    final codec = await ui.instantiateImageCodec(bytes);
+    final fi = await codec.getNextFrame();
+    return fi.image;
+  }
+
+  static Future<ui.Image> _cropImageXRange(
+    ui.Image src,
+    int left,
+    int right,
+  ) async {
+    final cropW = right - left;
+    final h = src.height;
+    if (cropW <= 0) return src;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final paint = Paint()..filterQuality = FilterQuality.high;
+
+    final srcRect = Rect.fromLTWH(
+      left.toDouble(),
+      0,
+      cropW.toDouble(),
+      h.toDouble(),
+    );
+    final dstRect = Rect.fromLTWH(0, 0, cropW.toDouble(), h.toDouble());
+
+    canvas.drawImageRect(src, srcRect, dstRect, paint);
+    final picture = recorder.endRecording();
+    final out = await picture.toImage(cropW, h);
+
+    try {
+      // ignore: invalid_use_of_protected_member
+      src.dispose();
+    } catch (_) {}
+
+    return out;
+  }
+
+  /// Limpieza manual (opcional). No se usa por defecto para evitar cold-starts.
+  static Future<void> clear() async {
+    // Si deseas liberar memoria, descomenta el dispose:
+    // for (final e in _cache.values) {
+    //   for (final img in e.frames) {
+    //     try { img.dispose(); } catch (_) {}
+    //   }
+    // }
+    _cache.clear();
+  }
+}
+
 class _AssetPatternRecipe {
   _AssetPatternRecipe({
     required this.directory,
@@ -65,6 +263,10 @@ class FrameSequenceController extends ChangeNotifier {
   int _index = 0;
   int _spanForPingPong = 0;
   int _loadGen = 0;
+
+  /// Cuando los frames provienen del caché, el controlador **no** es dueño
+  /// de esas imágenes y **no** debe disponerlas.
+  bool _ownsFrames = true;
 
   int? _activeCount;
   int get _len => _activeCount ?? _frames.length;
@@ -133,6 +335,7 @@ class FrameSequenceController extends ChangeNotifier {
     count = _frames.length;
   }
 
+  /// Ahora con caché: primero intenta recuperar los frames de FrameSequenceCache.
   Future<void> loadFromAssets({
     required String directory,
     required String pattern,
@@ -157,28 +360,45 @@ class FrameSequenceController extends ChangeNotifier {
     _reverseOrderFlag = reverseOrder;
 
     final int gen = ++_loadGen;
+
+    // Limpia frames actuales
     await _disposeFrames();
 
-    final paths = <String>[];
-    if (!reverseOrder) {
-      for (int i = 0; i < count; i++) {
-        final n = startNumber + i;
-        paths.add('$directory/${_formatPattern(pattern, n)}');
-      }
-    } else {
-      for (int i = 0; i < count; i++) {
-        final n = startNumber + (count - 1 - i);
-        paths.add('$directory/${_formatPattern(pattern, n)}');
-      }
+    // 1) Intenta obtener del caché
+    List<ui.Image>? cached = FrameSequenceCache.get(_RecipeKey(
+      directory: directory,
+      pattern: pattern,
+      startNumber: startNumber,
+      count: count,
+      xStart: xStart,
+      xEnd: xEnd,
+      reverseOrder: reverseOrder,
+    ));
+
+    if (cached == null) {
+      // 2) No hay caché → cargar/decodificar y poblar caché
+      cached = await FrameSequenceCache.getOrLoad(
+        directory: directory,
+        pattern: pattern,
+        startNumber: startNumber,
+        count: count,
+        xStart: xStart,
+        xEnd: xEnd,
+        reverseOrder: reverseOrder,
+      );
+      if (gen != _loadGen) return;
     }
 
-    await _decodeAssets(paths, xStart: xStart, xEnd: xEnd, expectGen: gen);
-    if (gen != _loadGen) return;
+    // Copiamos las referencias a las imágenes del caché a _frames,
+    // pero indicamos que NO somos dueños (no se deben disponer).
+    _ownsFrames = false;
+    _frames.addAll(cached);
 
     _afterLoad();
     if (wasPlaying || autoplay) play();
   }
 
+  /// Carga directa de rutas de assets (sin caché). Mantengo por compatibilidad.
   Future<void> loadAssets(List<String> assetPaths) async {
     final bool wasPlaying = isPlaying;
     pause();
@@ -186,6 +406,8 @@ class FrameSequenceController extends ChangeNotifier {
     _assetRecipe = null;
     final int gen = ++_loadGen;
     await _disposeFrames();
+
+    // No caché aquí por ser rutas arbitrarias
     await _decodeAssets(assetPaths, expectGen: gen);
     if (gen != _loadGen) return;
 
@@ -193,6 +415,7 @@ class FrameSequenceController extends ChangeNotifier {
     if (wasPlaying || autoplay) play();
   }
 
+  /// Carga desde archivos (sin caché).
   Future<void> loadFiles(List<String> filePaths) async {
     final bool wasPlaying = isPlaying;
     pause();
@@ -213,6 +436,7 @@ class FrameSequenceController extends ChangeNotifier {
     }
     if (gen != _loadGen) return;
 
+    _ownsFrames = true; // somos dueños de estas imágenes
     _afterLoad();
     if (wasPlaying || autoplay) play();
   }
@@ -265,6 +489,7 @@ class FrameSequenceController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // --------- Decodificación local (sin caché) para loadAssets -----------
   Future<void> _decodeAssets(
     List<String> paths, {
     int? xStart,
@@ -302,6 +527,7 @@ class FrameSequenceController extends ChangeNotifier {
       if (expectGen != null && expectGen != _loadGen) return;
       _frames.add(img);
     }
+    _ownsFrames = true; // estas imágenes sí son de este controlador
   }
 
   static Future<ui.Image> _decodeBytes(Uint8List bytes) async {
@@ -350,13 +576,17 @@ class FrameSequenceController extends ChangeNotifier {
 
   Future<void> _disposeFrames() async {
     if (_frames.isEmpty) return;
-    for (final f in _frames) {
-      try {
-        // ignore: invalid_use_of_protected_member
-        f.dispose();
-      } catch (_) {}
+    // Si los frames vienen del caché, NO los disponemos.
+    if (_ownsFrames) {
+      for (final f in _frames) {
+        try {
+          // ignore: invalid_use_of_protected_member
+          f.dispose();
+        } catch (_) {}
+      }
     }
     _frames.clear();
+    _ownsFrames = true; // reset: por defecto asumimos propiedad
   }
 
   int? _phaseRaw;
