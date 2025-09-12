@@ -10,25 +10,16 @@ import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart'; // ⬅️ Theme de la app
 
 // Habilitar/Deshabilitar dibujo de landmarks (solo rendering, NO procesamiento)
-const drawLandmarks = bool.fromEnvironment(
-  'POSE_DRAW_LANDMARKS',
-  defaultValue: true,
-);
+const drawLandmarks = true;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
   // Flags por entorno (puedes hardcodear si quieres)
-  const bool validationsEnabled = bool.fromEnvironment(
-    'POSE_VALIDATIONS',
-    defaultValue: true,
-  );
+  const bool validationsEnabled = true;
 
-  const offerUrl = String.fromEnvironment(
-    'POSE_WEBRTC_URL',
-    defaultValue: 'http://192.168.100.5:8000/webrtc/offer',
-  );
+  const offerUrl = 'http://192.168.100.5:8000/webrtc/offer';
 
   // 1) Registrar dependencias (pasa la config del servicio aquí)
   registrarDependenciasPosture(
