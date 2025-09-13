@@ -1,28 +1,62 @@
-# 📁 Otros archivos modificados
+# 📁 Archivos modificados
 
 ## 🤖 Android
-```kotlin
+
+```text
 android/app/src/main/kotlin/com/yourpackage/yourapp/MainActivity.kt
 ```
 
 ## 🍎 iOS
-```swift
+
+```text
 ios/Runner/AppDelegate.swift
 ```
 
-# Para hacer monitoreo de logs: 
+# 🪵 Monitoreo de logs
 
-## From your project root
+## Desde la raíz del proyecto (Linux/macOS)
 
-``` python
+```bash
 mkdir -p logs
 script -a -f "logs/console_$(date +%F_%H-%M-%S).log"
 ```
 
-# Solo instalar apk en el dispositivo
+Escribe `exit` para terminar.
 
-# Ver id de dispositivo con flutter devices en la segunda columna
+## En Windows (PowerShell)
 
-flutter build apk --release
-flutter install -d adb-R58T60HBV1D-fdD64J._adb-tls-connect._tcp \
-  --use-application-binary build/app/outputs/apk/release/app-release.apk
+```powershell
+New-Item -ItemType Directory -Force -Path logs | Out-Null
+$log = "logs\console_{0}.log" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss')
+Start-Transcript -Append -Path $log
+```
+
+Ejecuta `Stop-Transcript` para terminar.
+
+# 📦 Instalar solo el APK en el dispositivo
+
+1. Obtén el ID del dispositivo (segunda columna) con:
+
+   ```bash
+   flutter devices
+   ```
+
+2. Compila el APK en modo *release*:
+
+   ```bash
+   flutter build apk --release
+   ```
+
+3. Instala el APK en el dispositivo (reemplaza `<DEVICE_ID>` con el ID obtenido):
+
+   ```bash
+   flutter install -d <DEVICE_ID> \
+     --use-application-binary build/app/outputs/apk/release/app-release.apk
+   ```
+
+   **Ejemplo:**
+
+   ```bash
+   flutter install -d adb-R58T60HBV1D-fdD64J._adb-tls-connect._tcp \
+     --use-application-binary build/app/outputs/apk/release/app-release.apk
+   ```
