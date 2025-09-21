@@ -10,6 +10,8 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../domain/service/pose_capture_service.dart';
+import '../../domain/model/lmk_state.dart';              // ⬅️ nuevo
+import '../widgets/face_landmarks_painter.dart';        // ⬅️ nuevo
 import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -92,7 +94,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             final scheme = Theme.of(context).colorScheme;
 
             return Scaffold(
-              // Usa el fondo del tema (en tu ThemeMode.dark será negro)
               backgroundColor: Theme.of(context).scaffoldBackgroundColor,
               body: Stack(
                 children: [
@@ -104,19 +105,38 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         child: RTCVideoView(
                           svc.localRenderer,
                           mirror: ctl.mirror,
-                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                         ),
                       ),
                     ),
 
-                    // 2) Landmarks overlay
-                    if (widget.drawLandmarks) // ⬅️ condición
+                    //2) Landmarks overlay (pose)
+                    if (widget.drawLandmarks)
                       Positioned.fill(
                         child: IgnorePointer(
                           child: PoseOverlayFast(
                             latest: svc.latestFrame,
                             mirror: ctl.mirror,
                             fit: BoxFit.cover,
+                            showFace: false,
+                          ),
+                        ),
+                      ),
+
+                    // 2b) Face landmarks (hold-last, sin parpadeo) — ÚNICA capa de puntos
+                    if (widget.drawLandmarks)
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: ValueListenableBuilder<LmkState>(
+                            valueListenable: svc.faceLandmarks,
+                            builder: (_, lmk, __) => CustomPaint(
+                              painter: FacePainter(
+                                lmk,
+                                mirror: ctl.mirror,
+                                srcSize: svc.latestFrame.value?.imageSize, // <-- importante
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -136,7 +156,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                             final newH = r.height * 0.85;
                             final dx = (r.width - newW) / 2;
                             final dy = (r.height - newH) / 2;
-                            return Rect.fromLTWH(r.left + dx, r.top + dy, newW, newH);
+                            return Rect.fromLTWH(
+                                r.left + dx, r.top + dy, newW, newH);
                           },
                         ),
                       ),
@@ -166,7 +187,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         ),
                       ),
 
-                    // 5) Remote PiP (idéntico a tu versión original, sin contenedores extra)
+                    // 5) Remote PiP
                     Positioned(
                       left: 12,
                       top: 12,
@@ -176,19 +197,21 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         borderRadius: BorderRadius.circular(12),
                         child: RTCVideoView(
                           svc.remoteRenderer,
-                          mirror: ctl.mirror, // considera false si el remoto no va espejado
-                          objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          mirror: ctl.mirror,
+                          objectFit:
+                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                         ),
                       ),
                     ),
                   ],
 
-                  // CAPTURANDO → overlay con el color de fondo del tema y spinner temado
+                  // CAPTURANDO
                   if (ctl.isCapturing && ctl.capturedPng == null)
                     Positioned.fill(
                       child: ColoredBox(
                         color: scheme.background,
-                        child: const Center(child: CircularProgressIndicator()),
+                        child:
+                            const Center(child: CircularProgressIndicator()),
                       ),
                     ),
 
@@ -215,10 +238,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               top: 16,
                               right: 16,
                               child: Material(
-                                color: scheme.primary.withOpacity(0.92), // rojo primario
+                                color: scheme.primary.withOpacity(0.92),
                                 shape: const CircleBorder(),
                                 child: IconButton(
-                                  icon: Icon(Icons.close, color: scheme.onPrimary),
+                                  icon: Icon(Icons.close,
+                                      color: scheme.onPrimary),
                                   onPressed: ctl.closeCaptured,
                                   tooltip: 'Cerrar',
                                 ),

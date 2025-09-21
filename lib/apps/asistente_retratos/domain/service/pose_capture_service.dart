@@ -4,6 +4,8 @@ import 'dart:ui' show Offset;
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoRenderer, MediaStream;
 
+import '../model/lmk_state.dart'; // ⬅️ añade esto
+
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
 
@@ -22,8 +24,11 @@ abstract class PoseCaptureService {
   ValueListenable<PoseFrame?> get latestFrame;
   Stream<PoseFrame> get frames;
 
-  // Accesos opcionales
+  // Accesos opcionales (puedes mantenerlos por compatibilidad)
   List<List<Offset>>? get latestFaceLandmarks;
   List<Offset>? get latestPoseLandmarks;
-  List<PosePoint>? get latestPoseLandmarks3D; // ← lo usa tu onframe
+  List<PosePoint>? get latestPoseLandmarks3D;
+
+  // ✅ Estado reactivo con “hold-last” para evitar parpadeo
+  ValueListenable<LmkState> get faceLandmarks;
 }

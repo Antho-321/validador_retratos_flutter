@@ -1,10 +1,11 @@
 // lib/apps/asistente_retratos/presentation/widgets/rtc_pose_overlay.dart
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show ValueListenable; // <- add this
+import 'package:flutter/foundation.dart' show ValueListenable, Listenable;
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
+import '../../domain/model/lmk_state.dart' show LmkState;
 
-/// Classic overlay that takes a concrete PoseFrame (e.g., from a StreamBuilder).
+/// Overlay clásico que recibe un PoseFrame concreto.
 class PoseOverlay extends StatelessWidget {
   const PoseOverlay({
     super.key,
@@ -45,8 +46,6 @@ class _PoseOverlayPainter extends CustomPainter {
 
     final scaleW = size.width / fw;
     final scaleH = size.height / fh;
-
-    // contain => min; cover => max
     final s = (fit == BoxFit.cover)
         ? (scaleW > scaleH ? scaleW : scaleH)
         : (scaleW < scaleH ? scaleW : scaleH);
@@ -72,7 +71,6 @@ class _PoseOverlayPainter extends CustomPainter {
 
     double mapY(double y) => y * s + offY;
 
-    // Minimal skeleton edges (indices follow MediaPipe Pose)
     const L = {
       'ls': 11, 'rs': 12, 'le': 13, 're': 14,
       'lw': 15, 'rw': 16, 'lh': 23, 'rh': 24,
@@ -108,39 +106,136 @@ class _PoseOverlayPainter extends CustomPainter {
       old.frame != frame || old.mirror != mirror || old.fit != fit;
 }
 
-/// Fast overlay that listens to a ValueListenable<PoseFrame?> (preferred for low latency).
-class PoseOverlayFast extends StatelessWidget {
+/// Overlay rápido: pinta pose y, opcionalmente, landmarks de cara (LmkState).
+/// Incluye HOLD-LAST para POSE usando un LmkState interno para evitar parpadeos.
+class PoseOverlayFast extends StatefulWidget {
   const PoseOverlayFast({
     super.key,
     required this.latest,
+    this.face,                 // opcional (cara)
     this.mirror = false,
     this.fit = BoxFit.cover,
+    this.showPoints = true,
+    this.showBones = true,
+    this.showFace = false,     // por defecto no dibuja la cara
+    this.useHoldLastForPose = true, // ⬅️ evita parpadeo de pose cuando hay frames vacíos
   });
 
   final ValueListenable<PoseFrame?> latest;
+  final ValueListenable<LmkState>? face;
   final bool mirror;
   final BoxFit fit;
+  final bool showPoints;
+  final bool showBones;
+  final bool showFace;
+  final bool useHoldLastForPose;
+
+  @override
+  State<PoseOverlayFast> createState() => _PoseOverlayFastState();
+}
+
+class _PoseOverlayFastState extends State<PoseOverlayFast> {
+  // Cache “hold-last” para pose (2D)
+  final LmkState _poseHold = LmkState();
+
+  @override
+  void initState() {
+    super.initState();
+    // Mantén actualizado el hold-last con el último frame NO vacío.
+    widget.latest.addListener(_onPoseFrame);
+  }
+
+  @override
+  void didUpdateWidget(covariant PoseOverlayFast oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.latest != widget.latest) {
+      oldWidget.latest.removeListener(_onPoseFrame);
+      widget.latest.addListener(_onPoseFrame);
+      // refresca el cache con el valor actual del nuevo listenable
+      _onPoseFrame();
+    }
+  }
+
+  void _onPoseFrame() {
+    if (!widget.useHoldLastForPose) return;
+    final f = widget.latest.value;
+    if (f == null) return;
+
+    // Si el frame trae landmarks válidos, actualiza el hold-last
+    if (f.posesPx.isNotEmpty && f.posesPx.first.isNotEmpty) {
+      _poseHold
+        ..last = f.posesPx
+        ..lastSeq = _poseHold.lastSeq + 1   // ← en cascades usa asignación, no ++
+        ..lastTs = DateTime.now();
+      // No hace falta setState; el repintado lo dispara 'latest'
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.latest.removeListener(_onPoseFrame);
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    // Listenables que deben gatillar repaints (pose y opcionalmente cara)
+    final repaint = widget.face == null
+        ? widget.latest
+        : Listenable.merge(<Listenable>[widget.latest, widget.face!]);
+
     return CustomPaint(
-      painter: _PoseOverlayFastPainter(latest, mirror: mirror, fit: fit),
+      painter: _PoseOverlayFastPainter(
+        latest: widget.latest,
+        mirror: widget.mirror,
+        fit: widget.fit,
+        showPoints: widget.showPoints,
+        showBones: widget.showBones,
+        showFace: widget.showFace,
+        face: widget.face,
+        // getters hacia el cache hold-last; el painter los consulta en cada paint
+        getPoseHold: () => _poseHold,
+        useHoldLastForPose: widget.useHoldLastForPose,
+      ),
       size: Size.infinite,
       isComplex: true,
       willChange: true,
+      // El repaint real lo controla el painter con `repaint: ...`
+      foregroundPainter: null,
     );
   }
 }
 
 class _PoseOverlayFastPainter extends CustomPainter {
-  _PoseOverlayFastPainter(this.latest, {required this.mirror, required this.fit})
-      : super(repaint: latest);
+  _PoseOverlayFastPainter({
+    required this.latest,
+    required this.mirror,
+    required this.fit,
+    required this.showPoints,
+    required this.showBones,
+    required this.showFace,
+    required this.useHoldLastForPose,
+    required this.getPoseHold,
+    this.face,
+  }) : super(
+          repaint: face == null
+              ? latest
+              : Listenable.merge(<Listenable>[latest, face!]),
+        );
 
   final ValueListenable<PoseFrame?> latest;
+  final ValueListenable<LmkState>? face;
   final bool mirror;
   final BoxFit fit;
+  final bool showPoints;
+  final bool showBones;
+  final bool showFace;
+  final bool useHoldLastForPose;
 
-  // Landmark indices (MediaPipe Pose)
+  // Proveedor del cache hold-last (vive en el State, persiste entre rebuilds)
+  final LmkState Function() getPoseHold;
+
+  // Huesos (MediaPipe Pose)
   static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
   static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
 
@@ -153,20 +248,37 @@ class _PoseOverlayFastPainter extends CustomPainter {
     [RH, RK], [RK, RA],
   ];
 
-  // Reusable buffers
-  final Path _scratch = Path(); // (reservado por si alternas a Path)
-  final List<Offset> _linePts = <Offset>[]; // pares A,B,A,B,...
+  final List<Offset> _linePts = <Offset>[];
 
   @override
   void paint(Canvas canvas, Size size) {
     final f = latest.value;
-    if (f == null) return;
 
-    final fw = f.imageSize.width.toDouble();
-    final fh = f.imageSize.height.toDouble();
-    if (fw <= 0 || fh <= 0) return;
+    // Decide qué landmarks de pose usar: actuales o “hold-last”
+    List<List<Offset>>? poses;
+    Size imgSize = const Size(0, 0);
 
-    // Compute scale/offset once
+    if (f != null) {
+      imgSize = Size(f.imageSize.width.toDouble(), f.imageSize.height.toDouble());
+      if (f.posesPx.isNotEmpty && f.posesPx.first.isNotEmpty) {
+        poses = f.posesPx;
+      }
+    }
+
+    if (poses == null && useHoldLastForPose) {
+      final hold = getPoseHold();
+      if (hold.last != null && hold.isFresh) {
+        poses = hold.last;
+        // cuando usamos hold-last, asumimos mismo sistema de coords del frame
+        // (la escala la calculamos con el último imgSize no-nulo si lo hubo)
+      }
+    }
+
+    if (poses == null || imgSize.width <= 0 || imgSize.height <= 0) return;
+
+    // Escalado/offset como antes
+    final fw = imgSize.width;
+    final fh = imgSize.height;
     final scaleW = size.width / fw;
     final scaleH = size.height / fh;
     final s = (fit == BoxFit.cover)
@@ -178,8 +290,7 @@ class _PoseOverlayFastPainter extends CustomPainter {
     final offX = (size.width - drawW) / 2.0;
     final offY = (size.height - drawH) / 2.0;
 
-    // Configure paints (disable antialias for speed)
-    final line = Paint()
+    final bonePaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
@@ -193,8 +304,14 @@ class _PoseOverlayFastPainter extends CustomPainter {
       ..isAntiAlias = false
       ..color = Colors.limeAccent;
 
+    final facePaint = Paint()
+      ..strokeWidth = 3
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke
+      ..isAntiAlias = false
+      ..color = Colors.white;
+
     canvas.save();
-    // Apply transform: translate to box, scale to fit, mirror if needed
     if (mirror) {
       canvas.translate(size.width - offX, offY);
       canvas.scale(-s, s);
@@ -203,28 +320,48 @@ class _PoseOverlayFastPainter extends CustomPainter {
       canvas.scale(s, s);
     }
 
-    // Batch draw per pose: one drawPoints for all edges + one drawPoints for all points
-    for (final pose in f.posesPx) {
+    // 1) Pose
+    for (final pose in poses) {
       if (pose.isEmpty) continue;
 
-      _linePts.clear();
-      for (final e in _edges) {
-        if (pose.length <= e[0] || pose.length <= e[1]) continue;
-        _linePts..add(pose[e[0]])..add(pose[e[1]]);
+      if (showBones) {
+        _linePts.clear();
+        for (final e in _edges) {
+          if (pose.length <= e[0] || pose.length <= e[1]) continue;
+          _linePts..add(pose[e[0]])..add(pose[e[1]]);
+        }
+        if (_linePts.isNotEmpty) {
+          canvas.drawPoints(PointMode.lines, _linePts, bonePaint);
+        }
       }
-      // One call for all edges
-      if (_linePts.isNotEmpty) {
-        canvas.drawPoints(PointMode.lines, _linePts, line);
+      if (showPoints) {
+        canvas.drawPoints(PointMode.points, pose, ptsPaint);
       }
+    }
 
-      // One call for all landmarks (round caps make them look like small circles)
-      canvas.drawPoints(PointMode.points, pose, ptsPaint);
+    // 2) Cara (opcional)
+    if (showFace && face != null) {
+      final lmk = face!.value;
+      final faces = lmk.last;
+      if (faces != null && lmk.isFresh) {
+        for (final pts in faces) {
+          if (pts.isEmpty) continue;
+          canvas.drawPoints(PointMode.points, pts, facePaint);
+        }
+      }
     }
 
     canvas.restore();
   }
 
-  // Repaint is entirely driven by the ValueListenable in the constructor.
   @override
-  bool shouldRepaint(covariant _PoseOverlayFastPainter old) => false;
+  bool shouldRepaint(covariant _PoseOverlayFastPainter old) =>
+      old.mirror != mirror ||
+      old.fit != fit ||
+      old.showPoints != showPoints ||
+      old.showBones != showBones ||
+      old.showFace != showFace ||
+      old.useHoldLastForPose != useHoldLastForPose ||
+      old.latest != latest ||
+      old.face != face;
 }
