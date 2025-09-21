@@ -2,8 +2,10 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, Listenable;
+
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../domain/model/lmk_state.dart' show LmkState;
+import '../styles/colors.dart'; // AppColors & CaptureTheme
 
 /// Overlay clásico que recibe un PoseFrame concreto.
 class PoseOverlay extends StatelessWidget {
@@ -20,8 +22,17 @@ class PoseOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Toma el color desde el tema si existe; si no, usa el alias de la paleta.
+    final cap = Theme.of(context).extension<CaptureTheme>();
+    final landmarksColor = cap?.landmarks ?? AppColors.landmarks;
+
     return CustomPaint(
-      painter: _PoseOverlayPainter(frame, mirror: mirror, fit: fit),
+      painter: _PoseOverlayPainter(
+        frame,
+        mirror: mirror,
+        fit: fit,
+        landmarksColor: landmarksColor, // ⬅️ nuevo
+      ),
       size: Size.infinite,
       isComplex: true,
       willChange: true,
@@ -30,10 +41,17 @@ class PoseOverlay extends StatelessWidget {
 }
 
 class _PoseOverlayPainter extends CustomPainter {
-  _PoseOverlayPainter(this.frame, {required this.mirror, required this.fit});
+  _PoseOverlayPainter(
+    this.frame, {
+    required this.mirror,
+    required this.fit,
+    required this.landmarksColor, // ⬅️ nuevo
+  });
+
   final PoseFrame? frame;
   final bool mirror;
   final BoxFit fit;
+  final Color landmarksColor; // ⬅️ nuevo
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -57,12 +75,13 @@ class _PoseOverlayPainter extends CustomPainter {
 
     final pt = Paint()
       ..style = PaintingStyle.fill
-      ..color = Colors.limeAccent;
+      ..color = landmarksColor; // ← reemplaza limeAccent
+
     final line = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
-      ..color = Colors.limeAccent;
+      ..color = landmarksColor; // ← reemplaza limeAccent
 
     double mapX(double x) {
       final local = x * s + offX;
@@ -103,7 +122,10 @@ class _PoseOverlayPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _PoseOverlayPainter old) =>
-      old.frame != frame || old.mirror != mirror || old.fit != fit;
+      old.frame != frame ||
+      old.mirror != mirror ||
+      old.fit != fit ||
+      old.landmarksColor != landmarksColor; // ⬅️ compara el color
 }
 
 /// Overlay rápido: pinta pose y, opcionalmente, landmarks de cara (LmkState).
@@ -165,7 +187,7 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
     if (f.posesPx.isNotEmpty && f.posesPx.first.isNotEmpty) {
       _poseHold
         ..last = f.posesPx
-        ..lastSeq = _poseHold.lastSeq + 1   // ← en cascades usa asignación, no ++
+        ..lastSeq = _poseHold.lastSeq + 1   // cascada con asignación
         ..lastTs = DateTime.now();
       // No hace falta setState; el repintado lo dispara 'latest'
     }
@@ -179,6 +201,10 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
 
   @override
   Widget build(BuildContext context) {
+    // Toma el color desde el tema si existe; si no, usa el alias de la paleta.
+    final cap = Theme.of(context).extension<CaptureTheme>();
+    final landmarksColor = cap?.landmarks ?? AppColors.landmarks;
+
     // Listenables que deben gatillar repaints (pose y opcionalmente cara)
     final repaint = widget.face == null
         ? widget.latest
@@ -196,6 +222,7 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
         // getters hacia el cache hold-last; el painter los consulta en cada paint
         getPoseHold: () => _poseHold,
         useHoldLastForPose: widget.useHoldLastForPose,
+        landmarksColor: landmarksColor, // ⬅️ nuevo
       ),
       size: Size.infinite,
       isComplex: true,
@@ -216,6 +243,7 @@ class _PoseOverlayFastPainter extends CustomPainter {
     required this.showFace,
     required this.useHoldLastForPose,
     required this.getPoseHold,
+    required this.landmarksColor, // ⬅️ nuevo
     this.face,
   }) : super(
           repaint: face == null
@@ -234,6 +262,9 @@ class _PoseOverlayFastPainter extends CustomPainter {
 
   // Proveedor del cache hold-last (vive en el State, persiste entre rebuilds)
   final LmkState Function() getPoseHold;
+
+  // Color para landmarks/huesos/puntos
+  final Color landmarksColor; // ⬅️ nuevo
 
   // Huesos (MediaPipe Pose)
   static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
@@ -270,7 +301,6 @@ class _PoseOverlayFastPainter extends CustomPainter {
       if (hold.last != null && hold.isFresh) {
         poses = hold.last;
         // cuando usamos hold-last, asumimos mismo sistema de coords del frame
-        // (la escala la calculamos con el último imgSize no-nulo si lo hubo)
       }
     }
 
@@ -295,14 +325,14 @@ class _PoseOverlayFastPainter extends CustomPainter {
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = false
-      ..color = Colors.limeAccent;
+      ..color = landmarksColor; // ← reemplaza limeAccent
 
     final ptsPaint = Paint()
       ..strokeWidth = 3
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke
       ..isAntiAlias = false
-      ..color = Colors.limeAccent;
+      ..color = landmarksColor; // ← reemplaza limeAccent
 
     final facePaint = Paint()
       ..strokeWidth = 3
@@ -363,5 +393,6 @@ class _PoseOverlayFastPainter extends CustomPainter {
       old.showFace != showFace ||
       old.useHoldLastForPose != useHoldLastForPose ||
       old.latest != latest ||
-      old.face != face;
+      old.face != face ||
+      old.landmarksColor != landmarksColor; // ⬅️ compara el color
 }

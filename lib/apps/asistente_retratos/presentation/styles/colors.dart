@@ -12,6 +12,7 @@ class AppColors {
   static const greyDark   = Color(0xFF777070);
   static const greyLight  = Color(0xFFECEBEB);
   static const white      = Color(0xFFFFFFFF);
+  static const landmarks  = Color(0xFFEEFF41);
 
   static ColorScheme scheme(Brightness brightness) {
     final dark = brightness == Brightness.dark;
@@ -50,6 +51,7 @@ class CaptureTheme extends ThemeExtension<CaptureTheme> {
   final Color hudText;
   final Color faceOval;
   final Color pipBorder;
+  final Color landmarks; // ⬅️ alias temable
 
   const CaptureTheme({
     this.hudOk = AppColors.green,
@@ -58,20 +60,39 @@ class CaptureTheme extends ThemeExtension<CaptureTheme> {
     this.hudText = AppColors.white,
     this.faceOval = AppColors.green,
     this.pipBorder = AppColors.white,
+    this.landmarks = AppColors.landmarks, // por defecto en paleta
   });
+
+  /// Mantiene una sola fuente de verdad: mapea desde ColorScheme
+  factory CaptureTheme.fromScheme(ColorScheme cs) => CaptureTheme(
+    hudOk: cs.secondary,
+    hudWarn: cs.tertiary,
+    hudError: cs.error,
+    hudText: cs.onBackground,
+    faceOval: cs.secondary,
+    pipBorder: cs.onBackground,
+    landmarks: cs.secondary, // ⬅️ alias coherente con secondary
+  );
 
   @override
   CaptureTheme copyWith({
-    Color? hudOk, Color? hudWarn, Color? hudError,
-    Color? hudText, Color? faceOval, Color? pipBorder,
-  }) => CaptureTheme(
-    hudOk: hudOk ?? this.hudOk,
-    hudWarn: hudWarn ?? this.hudWarn,
-    hudError: hudError ?? this.hudError,
-    hudText: hudText ?? this.hudText,
-    faceOval: faceOval ?? this.faceOval,
-    pipBorder: pipBorder ?? this.pipBorder,
-  );
+    Color? hudOk,
+    Color? hudWarn,
+    Color? hudError,
+    Color? hudText,
+    Color? faceOval,
+    Color? pipBorder,
+    Color? landmarks,
+  }) =>
+      CaptureTheme(
+        hudOk: hudOk ?? this.hudOk,
+        hudWarn: hudWarn ?? this.hudWarn,
+        hudError: hudError ?? this.hudError,
+        hudText: hudText ?? this.hudText,
+        faceOval: faceOval ?? this.faceOval,
+        pipBorder: pipBorder ?? this.pipBorder,
+        landmarks: landmarks ?? this.landmarks,
+      );
 
   @override
   ThemeExtension<CaptureTheme> lerp(ThemeExtension<CaptureTheme>? other, double t) {
@@ -84,6 +105,7 @@ class CaptureTheme extends ThemeExtension<CaptureTheme> {
       hudText:   f(hudText, other.hudText),
       faceOval:  f(faceOval, other.faceOval),
       pipBorder: f(pipBorder, other.pipBorder),
+      landmarks: f(landmarks, other.landmarks),
     );
   }
 }
