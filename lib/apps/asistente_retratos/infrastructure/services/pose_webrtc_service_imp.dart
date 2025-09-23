@@ -1,10 +1,3 @@
-// lib/apps/asistente_retratos/infrastructure/services/pose_webrtc_service_imp.dart
-//
-// Implementación de infraestructura del servicio de captura por WebRTC.
-// - Implementa el contrato del dominio: PoseCaptureService
-// - No importa nada desde `presentation/*`
-// - Usa modelos/parsers propios de infraestructura
-
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
 import 'dart:typed_data';
@@ -14,11 +7,8 @@ import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
-// Contrato del dominio
 import '../../domain/service/pose_capture_service.dart';
-import '../../domain/model/lmk_state.dart'; // LmkState
-
-// Modelos/Parsers/Encoder en infraestructura
+import '../../domain/model/lmk_state.dart';
 import '../model/pose_frame.dart' show PoseFrame, poseFrameFromMap;
 import '../webrtc/rtc_video_encoder.dart';
 import '../parsers/pose_binary_parser.dart';
@@ -35,10 +25,10 @@ Uint8List _pad8(String s) {
 
 int _dcIdFromTask(String name, {int mod = 1024}) {
   if (mod < 2) mod = 2;
-  final person = _pad8('DCMAP'); // person=b"DCMAP" padded to 8
+  final person = _pad8('DCMAP');
   final digestBytes = Blake2s(2, aad: person).convert(utf8.encode(name)).bytes;
-  final base = digestBytes[0] | (digestBytes[1] << 8); // little-endian u16
-  var id = (base % mod) & 0xFFFE; // even and < mod
+  final base = digestBytes[0] | (digestBytes[1] << 8);
+  var id = (base % mod) & 0xFFFE;
   if (id == 1) {
     id = (id + 2) % mod;
     id &= 0xFFFE;
@@ -81,9 +71,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               preferHevc: preferHevc,
             );
 
-  // ────────────────────────────────────────────────────────────────────
-  // Config
-  // ────────────────────────────────────────────────────────────────────
   final Uri offerUri;
   final String facingMode;
   final int idealWidth;
@@ -109,13 +96,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   final RtcVideoEncoder _encoder;
 
-  // ────────────────────────────────────────────────────────────────────
-  // Estado WebRTC
-  // ────────────────────────────────────────────────────────────────────
   RTCPeerConnection? _pc;
 
-  RTCDataChannel? _dc; // results:<primary>
-  RTCDataChannel? _ctrl; // ctrl
+  RTCDataChannel? _dc;
+  RTCDataChannel? _ctrl;
   final Map<String, RTCDataChannel> _resultsPerTask = {};
 
   MediaStream? _localStream;
@@ -128,7 +112,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Timer? _dcGuardTimer;
   bool _disposed = false;
 
-  // Renderers
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
@@ -137,22 +120,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   RTCVideoRenderer get remoteRenderer => _remoteRenderer;
 
-  // Último frame (para overlays de pose)
   final ValueNotifier<PoseFrame?> _latestFrame = ValueNotifier<PoseFrame?>(null);
   @override
   ValueListenable<PoseFrame?> get latestFrame => _latestFrame;
 
-  // Stream público de frames
   final _framesCtrl = StreamController<PoseFrame>.broadcast();
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
-  // Landmarks de cara con "hold-last"
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
   ValueListenable<LmkState> get faceLandmarks => _faceLmk;
 
-  // Getters de conveniencia (compat)
   @override
   List<List<Offset>>? get latestFaceLandmarks {
     final faces3d = _lastPosesPerTask['face'];
@@ -176,7 +155,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return ps.map((p) => Offset(p.x, p.y)).toList(growable: false);
   }
 
-  // Parsers & estado
   final Map<String, PoseBinaryParser> _parsers = {};
   final Map<String, List<List<PosePoint>>> _lastPosesPerTask = {};
   int? _lastW;
@@ -186,12 +164,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   bool _isNewer16(int seq, int? last) {
     if (last == null) return true;
     final int d = (seq - last) & 0xFFFF;
-    return d != 0 && (d & 0x8000) == 0; // 1..32767 => newer
+    return d != 0 && (d & 0x8000) == 0;
   }
 
   void _log(Object? message) {
     if (!logEverything) return;
-    // ignore: avoid_print
     print(message);
   }
 
@@ -199,9 +176,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return url.contains('?') ? url : '$url?transport=udp';
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Lifecycle
-  // ────────────────────────────────────────────────────────────────────
   @override
   Future<void> init() async {
     _log('[client] init()');
@@ -231,10 +205,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     _localRenderer.srcObject = _localStream;
 
-    // Sugerir optimización para movimiento/latencia
     try {
       final dynamic dtrack = _localStream!.getVideoTracks().first;
-      // ignore: avoid_dynamic_calls
       await dtrack.setVideoContentHint('motion');
     } catch (_) {}
 
@@ -278,11 +250,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         (state) => _log('[client] peer connection state: $state');
     _pc!.onRenegotiationNeeded = () => _log('[client] on-negotiation-needed');
 
-    // Precrear DCs (m=application en offer)
     if (preCreateDataChannels) {
       final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
 
-      // results:<primary>
       {
         final String task0 = tasks[0].toLowerCase();
         final lossy = RTCDataChannelInit()
@@ -299,7 +269,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _wireResults(ch, task: task0);
       }
 
-      // results:<extras>
       for (var i = 1; i < tasks.length; i++) {
         final task = tasks[i].toLowerCase().trim();
         if (task.isEmpty) continue;
@@ -317,7 +286,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _wireResults(ch, task: task);
       }
 
-      // ctrl (reliable)
       final reliable = RTCDataChannelInit()
         ..negotiated = true
         ..id = 1
@@ -347,7 +315,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
     };
 
-    // Enviar solo video local
     final videoTrack = _localStream!.getVideoTracks().first;
     _videoTransceiver = await _pc!.addTransceiver(
       track: videoTrack,
@@ -363,23 +330,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
     };
 
-    // Encoder (codec prefs + limits)
     await _encoder.applyTo(_videoTransceiver!);
 
-    // Offer
     _log('[client] creating offer…');
     var offer = await _pc!.createOffer({
       'offerToReceiveVideo': 0,
       'offerToReceiveAudio': 0,
     });
 
-    // Bitrate hints para H.264
     final munged = RtcVideoEncoder.mungeH264BitrateHints(
       offer.sdp!,
       kbps: maxBitrateKbps,
     );
 
-    // SDP munging
     var sdp = munged;
     if (stripFecFromSdp) {
       sdp = _stripVideoFec(sdp);
@@ -501,9 +464,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _log('[client] disposed');
   }
 
-  // ────────────────────────────────────────────────────────────────────
-  // Helpers (ICE, DCs, Parsing, SDP, etc.)
-  // ────────────────────────────────────────────────────────────────────
   Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
     if (pc.iceGatheringState ==
         RTCIceGatheringState.RTCIceGatheringStateComplete) {
@@ -573,7 +533,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         if (txt.toUpperCase() == 'KF') {
           _log("[client] '$task' got KF request (string) — ignoring on client");
         } else {
-          _handlePoseText(txtRaw); // JSON fallback
+          _handlePoseText(txtRaw);
         }
       }
     };
@@ -693,7 +653,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final res = parser.parse(b);
 
     if (res is PoseParseOk) {
-      final pkt = res.packet; // kind, keyframe, seq, w, h, poses(List<List<PosePoint>>)
+      final pkt = res.packet;
       final int? seq = pkt.seq;
 
       if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
@@ -709,17 +669,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       _lastW = pkt.w;
       _lastH = pkt.h;
-      _lastPosesPerTask[task] = pkt.poses; // 3D
+      _lastPosesPerTask[task] = pkt.poses;
       if (seq != null) _lastSeqPerTask[task] = seq;
 
-      // Actualiza LmkState si es 'face' (2D hold-last)
       if (task == 'face') {
         final twoD = pkt.poses
             .map((pose) =>
                 pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
             .toList(growable: false);
 
-        // No uses notifyListeners directo; asigna value con un nuevo objeto:
         _faceLmk.value = LmkState(
           last: twoD,
           lastSeq: seq ?? _faceLmk.value.lastSeq,
@@ -727,7 +685,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         );
       }
 
-      // Fusiona todas las tasks (3D) y emite frame 2D para overlays de pose
       final fused = _lastPosesPerTask.values.expand((l) => l).toList(growable: false);
       _emitBinary(
         pkt.w,
@@ -789,9 +746,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
 
     final out = Uint8List(5);
-    out[0] = 0x41; // 'A'
-    out[1] = 0x43; // 'C'
-    out[2] = 0x4B; // 'K'
+    out[0] = 0x41;
+    out[1] = 0x43;
+    out[2] = 0x4B;
     out[3] = (seq & 0xFF);
     out[4] = ((seq >> 8) & 0xFF);
 
@@ -873,7 +830,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     );
   }
 
-  // SDP munging helpers (FEC strip)
   String _stripVideoFec(String sdp) {
     final lines = sdp.split(RegExp(r'\r?\n'));
     final fecNames = {'red', 'ulpfec', 'flexfec-03'};
@@ -912,13 +868,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return out.join('\r\n');
   }
 
-  // SDP munging helpers (RTX/NACK/REMB strip)
   String _stripVideoRtxNackAndRemb(String sdp,
       {bool dropNack = true, bool dropRtx = true, bool keepTransportCcOnly = true}) {
     final lines = sdp.split(RegExp(r'\r?\n'));
     final rtxPts = <String>{};
 
-    // 1) collect RTX payload types
     for (final l in lines) {
       final m = RegExp(r'^a=rtpmap:(\d+)\s+rtx/').firstMatch(l);
       if (m != null) rtxPts.add(m.group(1)!);
@@ -949,7 +903,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               out.add(l);
               continue;
             }
-            continue; // drop everything else (goog-remb, nack, ccm fir, nack pli)
+            continue;
           } else {
             if (l.contains('nack') || l.contains('ccm fir') || l.contains('pli')) {
               continue;
@@ -962,7 +916,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return out.join('\r\n');
   }
 
-  // SDP munging helpers (mantener solo ciertos códecs)
   String _keepOnlyVideoCodecs(String sdp, List<String> codecNamesLower) {
     final lines = sdp.split(RegExp(r'\r?\n'));
     final keepPts = <String>{};
