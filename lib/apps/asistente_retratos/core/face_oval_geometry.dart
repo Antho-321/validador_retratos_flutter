@@ -1,3 +1,5 @@
+// lib/apps/asistente_retratos/core/face_oval_geometry.dart
+
 import 'dart:ui' show Offset, Rect, Size, Path;
 import 'dart:math' as math;
 

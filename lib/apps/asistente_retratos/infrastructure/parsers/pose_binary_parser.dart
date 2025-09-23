@@ -1,4 +1,4 @@
-// lib/apps/asistente_retratos/services/parsers/pose_binary_parser.dart
+// lib/apps/asistente_retratos/infrastructure/parsers/pose_binary_parser.dart
 //
 // Binary PO/PD parser (Flutter/Dart) with subpixel quantization and optional Z.
 // - scale (Q) = 1 << (ver & 0x03); baseline stored in quantized ints.
