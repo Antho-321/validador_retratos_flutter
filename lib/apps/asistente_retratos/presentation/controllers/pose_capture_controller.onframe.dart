@@ -586,7 +586,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final report = _validator.evaluate(
-      landmarksImg: inputs.landmarksImg!, // ya comprobado arriba
+      faceLandmarksImg: inputs.landmarksImg!, // ya comprobado arriba
       imageSize: inputs.imageSize,
       canvasSize: inputs.canvasSize,
       mirror: inputs.mirror,

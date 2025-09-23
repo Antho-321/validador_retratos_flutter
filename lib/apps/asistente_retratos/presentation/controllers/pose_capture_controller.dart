@@ -578,7 +578,7 @@ class PoseCaptureController extends ChangeNotifier {
     _metricRegistry.register(MetricKeys.yawAbs, (i) {
       if (i.landmarksImg == null) return null;
       final r = _validator.evaluate(
-        landmarksImg: i.landmarksImg!,
+        faceLandmarksImg: i.landmarksImg!,
         imageSize: i.imageSize,
         canvasSize: i.canvasSize,
         mirror: i.mirror,
@@ -599,7 +599,7 @@ class PoseCaptureController extends ChangeNotifier {
     _metricRegistry.register(MetricKeys.pitchAbs, (i) {
       if (i.landmarksImg == null) return null;
       final r = _validator.evaluate(
-        landmarksImg: i.landmarksImg!,
+        faceLandmarksImg: i.landmarksImg!,
         imageSize: i.imageSize,
         canvasSize: i.canvasSize,
         mirror: i.mirror,
@@ -620,7 +620,7 @@ class PoseCaptureController extends ChangeNotifier {
     _metricRegistry.register(MetricKeys.rollErr, (i) {
       if (i.landmarksImg == null) return null;
       final r = _validator.evaluate(
-        landmarksImg: i.landmarksImg!,
+        faceLandmarksImg: i.landmarksImg!,
         imageSize: i.imageSize,
         canvasSize: i.canvasSize,
         mirror: i.mirror,
@@ -642,7 +642,7 @@ class PoseCaptureController extends ChangeNotifier {
     _metricRegistry.register(MetricKeys.shouldersSigned, (i) {
       if (i.poseLandmarksImg == null) return null;
       final r = _validator.evaluate(
-        landmarksImg: i.landmarksImg ?? const <Offset>[], // cumplir firma no-null
+        faceLandmarksImg: i.landmarksImg ?? const <Offset>[], // cumplir firma no-null
         imageSize: i.imageSize,
         canvasSize: i.canvasSize,
         mirror: i.mirror,

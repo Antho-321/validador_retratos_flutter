@@ -3,8 +3,8 @@ import 'dart:ui' show Offset, Size;
 import 'package:flutter/widgets.dart' show BoxFit;
 
 import '../metrics/pose_geometry.dart' as geom;
+import '../metrics/head_pose.dart' show yawPitchRollFromFaceMesh;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
-import 'yaw_pitch_roll.dart' show yawPitchRollFromFaceMesh;
 
 /// Result type reused for yaw/pitch/roll checks.
 class AngleCheck {
@@ -142,45 +142,45 @@ class PortraitValidator {
   /// Main entry point. Give it the raw image-space landmarks (px) plus the
   /// image size and the current canvas size/mirroring/fit used by your preview.
   PortraitValidationReport evaluate({
-    required List<Offset> landmarksImg, // face landmarks in image-space (px)
-    required Size imageSize,            // from your frame
-    required Size canvasSize,           // from LayoutBuilder
-    bool mirror = true,                 // must match RTCVideoView.mirror
-    BoxFit fit = BoxFit.cover,          // must match RTCVideoView.objectFit
+    required List<Offset> faceLandmarksImg, // face landmarks in image-space (px)
+    required Size imageSize,                // from your frame
+    required Size canvasSize,               // from LayoutBuilder
+    bool mirror = true,                     // must match RTCVideoView.mirror
+    BoxFit fit = BoxFit.cover,              // must match RTCVideoView.objectFit
 
     // Face-in-oval rule
-    double minFractionInside = 1.0,     // 1.0 = all points inside to pass
-    double eps = 1e-6,                  // numeric tolerance
+    double minFractionInside = 1.0,         // 1.0 = all points inside to pass
+    double eps = 1e-6,                      // numeric tolerance
 
     // Yaw rule parameters (degrees)
     bool enableYaw = true,
-    double yawDeadbandDeg = 2.0,        // OK cone: [-2°, +2°]
-    double yawMaxOffDeg = 20.0,         // where progress bottoms out
+    double yawDeadbandDeg = 2.0,            // OK cone: [-2°, +2°]
+    double yawMaxOffDeg = 20.0,             // where progress bottoms out
 
     // Pitch rule parameters (degrees)
     bool enablePitch = true,
-    double pitchDeadbandDeg = 2.0,      // OK cone: [-2°, +2°]
-    double pitchMaxOffDeg = 20.0,       // where progress bottoms out
+    double pitchDeadbandDeg = 2.0,          // OK cone: [-2°, +2°]
+    double pitchMaxOffDeg = 20.0,           // where progress bottoms out
 
     // Roll rule parameters (degrees)
     bool enableRoll = true,
-    double rollDeadbandDeg = 175,       // caller can override (e.g., 2.2)
-    double rollMaxOffDeg = 100.0,       // kept for API symmetry (unused in new rule)
+    double rollDeadbandDeg = 175,           // caller can override (e.g., 2.2)
+    double rollMaxOffDeg = 100.0,           // kept for API symmetry (unused in new rule)
 
     // Shoulders tilt parameters (degrees)
-    List<Offset>? poseLandmarksImg,     // full-body/upper-body pose landmarks (image-space)
+    List<Offset>? poseLandmarksImg,         // full-body/upper-body pose landmarks (image-space)
     bool enableShoulders = false,
-    double shouldersDeadbandDeg = 5.0,  // allow up to ±5°
-    double shouldersMaxOffDeg = 20.0,   // where progress bottoms out
+    double shouldersDeadbandDeg = 5.0,      // allow up to ±5°
+    double shouldersMaxOffDeg = 20.0,       // where progress bottoms out
 
     // Azimut (torso) — progreso por banda [lo, hi]
     bool enableAzimut = false,
-    double? azimutDeg,                  // ángulo firmado ya estimado (3D)
+    double? azimutDeg,                      // ángulo firmado ya estimado (3D)
     double azimutBandLo = 0.0,
     double azimutBandHi = 0.0,
     double azimutMaxOffDeg = 20.0,
   }) {
-    if (landmarksImg.isEmpty ||
+    if (faceLandmarksImg.isEmpty ||
         imageSize.width <= 0 ||
         imageSize.height <= 0 ||
         canvasSize.width <= 0 ||
@@ -210,7 +210,7 @@ class PortraitValidator {
 
     // Face-in-oval (in canvas space, respecting fit/mirror)
     final mapped = geom.mapImagePointsToCanvas(
-      points: landmarksImg,
+      points: faceLandmarksImg,
       imageSize: imageSize,
       canvasSize: canvasSize,
       mirror: mirror,
@@ -256,7 +256,7 @@ class PortraitValidator {
       // Use your estimator once; it expects H/W ints (as in your page).
       final imgW = imageSize.width.toInt();
       final imgH = imageSize.height.toInt();
-      final ypr = yawPitchRollFromFaceMesh(landmarksImg, imgH, imgW);
+      final ypr = yawPitchRollFromFaceMesh(faceLandmarksImg, imgH, imgW);
 
       // Yaw (mirror flips sign for front camera UX)
       if (enableYaw) {
