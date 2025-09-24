@@ -1,7 +1,10 @@
+// lib/apps/asistente_retratos/infrastructure/services/pose_webrtc_service_imp.dart
+
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
+import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -14,6 +17,7 @@ import '../webrtc/rtc_video_encoder.dart';
 import '../parsers/pose_binary_parser.dart';
 import '../model/pose_point.dart';
 import 'package:hashlib/hashlib.dart';
+import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 
 Uint8List _pad8(String s) {
   final src = utf8.encode(s);
@@ -111,6 +115,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Timer? _rtpStatsTimer;
   Timer? _dcGuardTimer;
   bool _disposed = false;
+
+  // ── Isolate de parseo ──────────────────────────────────────────────────────
+  Isolate? _parseIsolate;
+  ReceivePort? _parseRx;
+  SendPort? _parseSendPort;
+  StreamSubscription? _parseRxSub;
 
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -222,6 +232,21 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
     _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
     _localRenderer.srcObject = _localStream;
+
+    // ⬇️ Actualiza _lastW/_lastH usando el tamaño real del video local
+    void _updateSize() {
+      final vw = _localRenderer.videoWidth;
+      final vh = _localRenderer.videoHeight;
+      if (vw > 0 && vh > 0) {
+        _lastW = vw;
+        _lastH = vh;
+        _log('[client] local video size: ${_lastW}x${_lastH}');
+      }
+    }
+
+    // Si tu versión de flutter_webrtc expone onResize, engánchalo
+    _localRenderer.onResize = _updateSize;
+    _updateSize(); // primer intento inmediato
 
     try {
       final dynamic dtrack = _localStream!.getVideoTracks().first;
@@ -418,6 +443,25 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
     _startRtpStatsProbe();
     _startNoResultsGuard();
+    // Evita spawnear dos veces si connect() se llama repetido
+    if (_parseIsolate == null) {
+      _parseRx = ReceivePort();
+      _parseIsolate = await Isolate.spawn(
+        poseParseIsolateEntry,
+        _parseRx!.sendPort,
+      );
+
+      _parseRxSub = _parseRx!.listen((msg) {
+        // 1er mensaje del isolate: su SendPort (handshake)
+        if (msg is SendPort) {
+          _parseSendPort = msg;
+          _log('[client] parse isolate handshake OK');
+          return;
+        }
+        // Resto de mensajes: resultados de parseo
+        _onParseResultFromIsolate(msg);
+      });
+    }
   }
 
   @override
@@ -481,6 +525,16 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
     _lastSeqPerTask.clear();
     _lastPosesPerTask.clear();
 
+    // cerrar isolate de parseo
+    try { await _parseRxSub?.cancel(); } catch (_) {}
+    try { _parseRx?.close(); } catch (_) {}
+    try { _parseIsolate?.kill(priority: Isolate.immediate); } catch (_) {}
+
+    _parseRxSub = null;
+    _parseIsolate = null;
+    _parseRx = null;
+    _parseSendPort = null;
+
     _log('[client] disposed');
   }
 
@@ -513,6 +567,62 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
     return c.future;
   }
+// ── Handler del isolate de parseo ──────────────────────────────────────────
+void _onParseResultFromIsolate(dynamic msg) {
+  if (_disposed || msg is! Map) return;
+
+  final String? task = msg['task'] as String?;
+  final String? type = msg['type'] as String?;
+
+  // libera el flag y relanza si quedó algo
+  if (task != null) {
+    _parsingTasks.remove(task);
+    if (_pendingBin.containsKey(task)) {
+      scheduleMicrotask(() => _drainParseLoop(task));
+    }
+  }
+
+  // ⬇️ ACK opcional desde el isolate
+  final int? ack = msg['ack'] as int?;
+  if (ack != null) _sendCtrlAck(ack);
+
+  if (type == 'ok2d') {
+    // Usa w/h del mensaje; si no, cae a las últimas conocidas; si no, al renderer
+    final int? w =
+        (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
+    final int? h =
+        (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
+    if (w == null || h == null || w == 0 || h == 0) return; // aún no sabemos el tamaño
+
+    final int? seq = msg['seq'] as int?;
+    final bool kf = (msg['keyframe'] as bool?) ?? false;
+    final List<Float32List> poses2d =
+        (msg['poses2d'] as List).cast<Float32List>();
+
+    _lastW = w;
+    _lastH = h;
+    if (seq != null && task != null) _lastSeqPerTask[task] = seq;
+
+    if (task == 'face') {
+      _lastFaceFlat = poses2d;
+      _lastFace2D = poses2d
+          .map((f) => List<Offset>.generate(
+                f.length ~/ 2,
+                (i) => Offset(f[i * 2], f[i * 2 + 1]),
+                growable: false,
+              ))
+          .toList(growable: false);
+    }
+
+    final frame = PoseFrame(
+      imageSize: Size(w.toDouble(), h.toDouble()),
+      posesPxFlat: poses2d,
+    );
+    _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
+  } else if (type == 'need_kf') {
+    _maybeSendKF();
+  }
+}
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {
@@ -651,14 +761,85 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
   void _handlePoseText(String text) {
     try {
       final m = _parseJson(text);
-      final frame = poseFrameFromMap(m);
-      _latestFrame.value = frame;
+      final PoseFrame? raw = poseFrameFromMap(m);
+      if (raw == null) return;
 
-      if (frame != null && !_framesCtrl.isClosed) {
-        _framesCtrl.add(frame);
+      // Tamaño “target” (usa los últimos w/h conocidos o los ideales)
+      final int w = _lastW ?? idealWidth;
+      final int h = _lastH ?? idealHeight;
+
+      PoseFrame out = raw;
+
+      // --- 1) Escalar poses si vienen normalizadas [0..1] ---
+      if (raw.posesPx != null && raw.posesPx!.isNotEmpty) {
+        final isNormalized = raw.posesPx!.every(
+          (pose) => pose.every(
+            (p) => p.dx >= 0 && p.dx <= 1.2 && p.dy >= 0 && p.dy <= 1.2,
+          ),
+        );
+
+        if (isNormalized) {
+          final scaled = raw.posesPx!
+              .map((pose) => pose
+                  .map((p) => Offset(p.dx * w, p.dy * h))
+                  .toList(growable: false))
+              .toList(growable: false);
+
+          out = PoseFrame(
+            imageSize: Size(w.toDouble(), h.toDouble()),
+            posesPx: scaled,
+          );
+        } else if (raw.imageSize.width <= 4 || raw.imageSize.height <= 4) {
+          // Si ya vienen en px pero el size no está, completa imageSize
+          out = PoseFrame(
+            imageSize: Size(w.toDouble(), h.toDouble()),
+            posesPx: raw.posesPx,
+          );
+        }
       }
 
-      _log('[client] results: JSON pose(s) -> emitted frame');
+      // --- 2) Actualizar faceLandmarks si viene "faces" en el JSON ---
+      final faces = m['faces'] as List<dynamic>?;
+      if (faces != null) {
+        // faces: [ [ {x,y}, {x,y}, ... ],  [ ... ] ]
+        final List<Float32List> flat = <Float32List>[];
+        for (final face in faces) {
+          final List<dynamic> lmk = face as List<dynamic>;
+          final f = Float32List(lmk.length * 2);
+          for (var i = 0; i < lmk.length; i++) {
+            final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
+            final double x = (pt['x'] as num).toDouble();
+            final double y = (pt['y'] as num).toDouble();
+            // Detectar normalizado por si acaso
+            final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
+            f[i * 2] = nrm ? (x * w) : x;
+            f[i * 2 + 1] = nrm ? (y * h) : y;
+          }
+          flat.add(f);
+        }
+
+        _lastFaceFlat = flat;
+        _lastFace2D = flat
+            .map((f) => List<Offset>.generate(
+                  f.length ~/ 2,
+                  (i) => Offset(f[i * 2], f[i * 2 + 1]),
+                  growable: false,
+                ))
+            .toList(growable: false);
+
+        _faceLmk.value = LmkState(
+          last: _lastFace2D,
+          lastFlat: _lastFaceFlat,
+          lastSeq: _faceLmk.value.lastSeq + 1,
+          lastTs: DateTime.now(),
+        );
+      }
+
+      // Publica frame a los listeners (usa el “out” ya escalado)
+      _latestFrame.value = out;
+      if (!_framesCtrl.isClosed) _framesCtrl.add(out);
+
+      _log('[client] results: JSON pose(s) -> emitted frame (scaled=${out.imageSize.width}x${out.imageSize.height})');
     } catch (e) {
       _log('[client] JSON pose parse error: $e -> requesting KF');
       _sendCtrlKF();
@@ -676,82 +857,31 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
   }
 
   void _drainParseLoop(String task) {
-    // Parse until the queue for this task is empty; always pick the latest.
-    Uint8List? buf = _pendingBin.remove(task);
-    int? lastAckToSend;
-
-    while (buf != null && !_disposed) {
-      try {
-        final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-        final res = parser.parseFlat2D(buf);
-
-        if (res is PoseParseOk2D) {
-          final pkt = res.packet;
-          final int? seq = pkt.seq;
-
-          // drop de PD viejos (igual que antes)
-          if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
-            final int? last = _lastSeqPerTask[task];
-            if (last != null && !_isNewer16(seq, last)) {
-              if (task == _primaryTask && res.ackSeq != null) {
-                lastAckToSend = res.ackSeq!;
-              }
-              buf = _pendingBin.remove(task); // tomar el más nuevo y seguir
-              continue;
-            }
-          }
-
-          _lastW = pkt.w; _lastH = pkt.h;
-          if (seq != null) _lastSeqPerTask[task] = seq;
-
-          // Si quieres seguir publicando face a _faceLmk con gate:
-          if (task == 'face') {
-            // cache plano para la UI
-            _lastFaceFlat = pkt.poses2d;
-
-            // opcional: mantener legacy para compatibilidad con otras vistas
-            _lastFace2D = pkt.poses2d.map((f) {
-              final n = f.length;
-              return List<Offset>.generate(n ~/ 2, (i) {
-                final x = f[i * 2], y = f[i * 2 + 1];
-                return Offset(x, y);
-              }, growable: false);
-            }).toList(growable: false);
-          }
-
-          // Construir frame con buffers planos (sin Offsets)
-          final frame = PoseFrame(
-            imageSize: Size(pkt.w.toDouble(), pkt.h.toDouble()),
-            posesPxFlat: pkt.poses2d,
-          );
-
-          _emitBinaryThrottled(
-            frame,
-            kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
-            seq: pkt.seq,
-          );
-
-          if (task == _primaryTask && res.ackSeq != null) {
-            lastAckToSend = res.ackSeq!;
-          }
-          if (res.requestKeyframe) _maybeSendKF();
-        } else if (res is PoseParseNeedKF) {
-          _maybeSendKF();
-        }
-      } catch (_) {
-        _maybeSendKF();
-      }
-
-      // get newest pending (drop intermediate)
-      buf = _pendingBin.remove(task);
+    // Siempre tomar el más nuevo para este task
+    final Uint8List? buf = _pendingBin.remove(task);
+    if (buf == null || _disposed) {
+      // nada que parsear; liberar el flag
+      _parsingTasks.remove(task);
+      return;
     }
 
-    // coalesce ACK: send only the last one seen in this run
-    if (lastAckToSend != null && lastAckToSend != _lastAckSeqSent) {
-      _lastAckSeqSent = lastAckToSend!;
-      _sendCtrlAck(lastAckToSend!);
+    try {
+      // Offload al isolate de parseo
+      final ttd = TransferableTypedData.fromList([buf]);
+      _parseSendPort?.send({
+        'type': 'job',
+        'task': task,
+        'data': ttd,
+      });
+
+      // Importante: no liberar _parsingTasks aquí.
+      // Esperamos la respuesta en _onParseResultFromIsolate, que liberará el flag
+      // y relanzará el drain si quedó algo nuevo en cola.
+      return;
+    } catch (_) {
+      _maybeSendKF();
+      _parsingTasks.remove(task);
     }
-    _parsingTasks.remove(task);
   }
 
   void _maybeSendKF() {
