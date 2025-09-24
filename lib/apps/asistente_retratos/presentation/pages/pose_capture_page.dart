@@ -11,8 +11,8 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';              // ⬅️ nuevo
+import '../widgets/pose_landmarks_painter.dart';
 import '../widgets/face_landmarks_painter.dart';        // ⬅️ nuevo
-import '../widgets/rtc_pose_overlay.dart' show PoseOverlayFast;
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
@@ -111,19 +111,28 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       ),
                     ),
 
-                    //2) Landmarks overlay (pose)
+                    //2) PosePainter
                     if (widget.drawLandmarks)
                       Positioned.fill(
-                        child: IgnorePointer(
-                          child: PoseOverlayFast(
-                            latest: svc.latestFrame,
-                            mirror: ctl.mirror,
-                            fit: BoxFit.cover,
-                            showFace: false,
+                        child: RepaintBoundary(
+                          child: IgnorePointer(
+                            child: ValueListenableBuilder<LmkState>(
+                              valueListenable: svc.poseLandmarks, // ⬅️ LmkState con POSE
+                              builder: (_, lmk, __) => CustomPaint(
+                                painter: PosePainter.themed(
+                                  context,
+                                  lmk,
+                                  mirror: ctl.mirror,
+                                  // ideal: toma el w,h del frame que generó esos puntos
+                                  srcSize: lmk.imageSize ?? svc.latestFrame.value?.imageSize,
+                                ),
+                                isComplex: true,
+                                willChange: true,
+                              ),
+                            ),
                           ),
                         ),
                       ),
-
                     // 2b) Face landmarks (hold-last, sin parpadeo) — ÚNICA capa de puntos
                     if (widget.drawLandmarks)
                       Positioned.fill(

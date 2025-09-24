@@ -31,4 +31,6 @@ abstract class PoseCaptureService {
 
   // ✅ Estado reactivo con “hold-last” para evitar parpadeo
   ValueListenable<LmkState> get faceLandmarks;
+  // ⬅️ NUEVO: POSE landmarks para usar con PosePainter
+  ValueListenable<LmkState> get poseLandmarks;
 }

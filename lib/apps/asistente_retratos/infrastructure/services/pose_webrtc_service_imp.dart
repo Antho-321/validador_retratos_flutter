@@ -138,13 +138,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
+  // Face
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
   ValueListenable<LmkState> get faceLandmarks => _faceLmk;
-  // face 2D pendiente para publicar con el gate de _doEmit
   List<List<Offset>>? _lastFace2D;
-  // versión plana (rápida) para el FacePainter
   List<Float32List>? _lastFaceFlat;
+
+  // Pose (nuevo)
+  final ValueNotifier<LmkState> _poseLmk = ValueNotifier<LmkState>(LmkState());
+  @override
+  ValueListenable<LmkState> get poseLandmarks => _poseLmk;
 
   @override
   List<List<Offset>>? get latestFaceLandmarks {
@@ -186,13 +190,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Set<String> _parsingTasks = {};             // tasks currently parsing
   int _lastAckSeqSent = -1;
   DateTime _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
-// ── Add fields ───────────────────────────────────────────────────────────────
-Timer? _emitGate;
-PoseFrame? _pendingFrame;
-DateTime _lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
-int get _minEmitIntervalMs => (1000 ~/ idealFps).clamp(8, 1000);
-// Reuse a single ACK buffer to avoid per-send allocations
-final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
+  // ── Add fields ───────────────────────────────────────────────────────────────
+  Timer? _emitGate;
+  PoseFrame? _pendingFrame;
+  DateTime _lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
+  int get _minEmitIntervalMs => (1000 ~/ idealFps).clamp(8, 1000);
+  // Reuse a single ACK buffer to avoid per-send allocations
+  final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
   void _log(Object? message) {
     if (!logEverything) return;
@@ -567,62 +571,63 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
     return c.future;
   }
-// ── Handler del isolate de parseo ──────────────────────────────────────────
-void _onParseResultFromIsolate(dynamic msg) {
-  if (_disposed || msg is! Map) return;
 
-  final String? task = msg['task'] as String?;
-  final String? type = msg['type'] as String?;
+  // ── Handler del isolate de parseo ──────────────────────────────────────────
+  void _onParseResultFromIsolate(dynamic msg) {
+    if (_disposed || msg is! Map) return;
 
-  // libera el flag y relanza si quedó algo
-  if (task != null) {
-    _parsingTasks.remove(task);
-    if (_pendingBin.containsKey(task)) {
-      scheduleMicrotask(() => _drainParseLoop(task));
-    }
-  }
+    final String? task = msg['task'] as String?;
+    final String? type = msg['type'] as String?;
 
-  // ⬇️ ACK opcional desde el isolate
-  final int? ack = msg['ack'] as int?;
-  if (ack != null) _sendCtrlAck(ack);
-
-  if (type == 'ok2d') {
-    // Usa w/h del mensaje; si no, cae a las últimas conocidas; si no, al renderer
-    final int? w =
-        (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
-    final int? h =
-        (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
-    if (w == null || h == null || w == 0 || h == 0) return; // aún no sabemos el tamaño
-
-    final int? seq = msg['seq'] as int?;
-    final bool kf = (msg['keyframe'] as bool?) ?? false;
-    final List<Float32List> poses2d =
-        (msg['poses2d'] as List).cast<Float32List>();
-
-    _lastW = w;
-    _lastH = h;
-    if (seq != null && task != null) _lastSeqPerTask[task] = seq;
-
-    if (task == 'face') {
-      _lastFaceFlat = poses2d;
-      _lastFace2D = poses2d
-          .map((f) => List<Offset>.generate(
-                f.length ~/ 2,
-                (i) => Offset(f[i * 2], f[i * 2 + 1]),
-                growable: false,
-              ))
-          .toList(growable: false);
+    // libera el flag y relanza si quedó algo
+    if (task != null) {
+      _parsingTasks.remove(task);
+      if (_pendingBin.containsKey(task)) {
+        scheduleMicrotask(() => _drainParseLoop(task));
+      }
     }
 
-    final frame = PoseFrame(
-      imageSize: Size(w.toDouble(), h.toDouble()),
-      posesPxFlat: poses2d,
-    );
-    _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
-  } else if (type == 'need_kf') {
-    _maybeSendKF();
+    // ⬇️ ACK opcional desde el isolate
+    final int? ack = msg['ack'] as int?;
+    if (ack != null) _sendCtrlAck(ack);
+
+    if (type == 'ok2d') {
+      // Usa w/h del mensaje; si no, cae a las últimas conocidas; si no, al renderer
+      final int? w =
+          (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
+      final int? h =
+          (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
+      if (w == null || h == null || w == 0 || h == 0) return; // aún no sabemos el tamaño
+
+      final int? seq = msg['seq'] as int?;
+      final bool kf = (msg['keyframe'] as bool?) ?? false;
+      final List<Float32List> poses2d =
+          (msg['poses2d'] as List).cast<Float32List>();
+
+      _lastW = w;
+      _lastH = h;
+      if (seq != null && task != null) _lastSeqPerTask[task] = seq;
+
+      if (task == 'face') {
+        _lastFaceFlat = poses2d;
+        _lastFace2D = poses2d
+            .map((f) => List<Offset>.generate(
+                  f.length ~/ 2,
+                  (i) => Offset(f[i * 2], f[i * 2 + 1]),
+                  growable: false,
+                ))
+            .toList(growable: false);
+      }
+
+      final frame = PoseFrame(
+        imageSize: Size(w.toDouble(), h.toDouble()),
+        posesPxFlat: poses2d,
+      );
+      _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
+    } else if (type == 'need_kf') {
+      _maybeSendKF();
+    }
   }
-}
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {
@@ -650,11 +655,11 @@ void _onParseResultFromIsolate(dynamic msg) {
         );
       }
 
-      // ── Replace inside _wireResults(ch,...): in onMessage for binary ─────────────
+      // Fast-path binario → isolate
       if (m.isBinary) {
         _enqueueBinary(task, m.binary);
       } else {
-        // unchanged: _handlePoseText(...)
+        // JSON/NDJSON/etc
         final txtRaw = m.text ?? '';
         final txt = txtRaw.trim();
         if (txt.toUpperCase() == 'KF') {
@@ -835,6 +840,22 @@ void _onParseResultFromIsolate(dynamic msg) {
         );
       }
 
+      // --- 3) Publicar POSE si 'out' trae poses ---
+      if ((out.posesPxFlat != null && out.posesPxFlat!.isNotEmpty) ||
+          (out.posesPx != null && out.posesPx!.isNotEmpty)) {
+        _poseLmk.value = (out.posesPxFlat != null && out.posesPxFlat!.isNotEmpty)
+            ? LmkState.fromFlat(
+                out.posesPxFlat!,
+                lastSeq: _poseLmk.value.lastSeq + 1,
+                imageSize: out.imageSize,
+              )
+            : LmkState.fromLegacy(
+                out.posesPx!,
+                lastSeq: _poseLmk.value.lastSeq + 1,
+                imageSize: out.imageSize,
+              );
+      }
+
       // Publica frame a los listeners (usa el “out” ya escalado)
       _latestFrame.value = out;
       if (!_framesCtrl.isClosed) _framesCtrl.add(out);
@@ -894,55 +915,73 @@ void _onParseResultFromIsolate(dynamic msg) {
 
   // Minimal passthrough; if you later add FPS throttling, plug it here.
   void _emitBinaryThrottled(
-  PoseFrame frame, {
-  required String kind,
-  int? seq,
-}) {
-  if (_disposed) return;
+    PoseFrame frame, {
+    required String kind,
+    int? seq,
+  }) {
+    if (_disposed) return;
 
-  final now = DateTime.now();
-  final elapsed = now.difference(_lastEmit).inMilliseconds;
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastEmit).inMilliseconds;
 
-  if (elapsed >= _minEmitIntervalMs && _emitGate == null) {
-    _lastEmit = now;
-    _doEmit(frame, kind: kind, seq: seq);
-    return;
-  }
-
-  final waitMs = (_minEmitIntervalMs - elapsed) > 0 ? (_minEmitIntervalMs - elapsed) : 0;
-  _pendingFrame = frame;
-  _emitGate ??= Timer(Duration(milliseconds: waitMs), () {
-    _emitGate = null;
-    final f = _pendingFrame;
-    _pendingFrame = null;
-    if (f != null && !_disposed) {
-      _lastEmit = DateTime.now();
-      _doEmit(f, kind: kind, seq: seq);
+    if (elapsed >= _minEmitIntervalMs && _emitGate == null) {
+      _lastEmit = now;
+      _doEmit(frame, kind: kind, seq: seq);
+      return;
     }
-  });
-}
 
-void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
-  final count = frame.posesPx?.length ?? frame.posesPxFlat?.length ?? 0;
-  _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=$count '
-       'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
-
-  _latestFrame.value = frame;
-
-  // Publicar face (con gate de emisión)
-  final lf  = _lastFace2D;
-  final lff = _lastFaceFlat;
-  if (lf != null || lff != null) {
-    _faceLmk.value = LmkState(
-      last: lf,                 // legacy (si lo mantienes)
-      lastFlat: lff,            // ⬅️ ruta rápida para FacePainter
-      lastSeq: seq ?? _faceLmk.value.lastSeq,
-      lastTs: DateTime.now(),
-    );
+    final waitMs = (_minEmitIntervalMs - elapsed) > 0 ? (_minEmitIntervalMs - elapsed) : 0;
+    _pendingFrame = frame;
+    _emitGate ??= Timer(Duration(milliseconds: waitMs), () {
+      _emitGate = null;
+      final f = _pendingFrame;
+      _pendingFrame = null;
+      if (f != null && !_disposed) {
+        _lastEmit = DateTime.now();
+        _doEmit(f, kind: kind, seq: seq);
+      }
+    });
   }
 
-  if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
-}
+  void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
+    final count = frame.posesPx?.length ?? frame.posesPxFlat?.length ?? 0;
+    _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=$count '
+         'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
+
+    _latestFrame.value = frame;
+
+    // --- FACE (ya existente) ---
+    final lf  = _lastFace2D;
+    final lff = _lastFaceFlat;
+    if (lf != null || lff != null) {
+      _faceLmk.value = LmkState(
+        last: lf,
+        lastFlat: lff,
+        lastSeq: seq ?? _faceLmk.value.lastSeq,
+        lastTs: DateTime.now(),
+      );
+    }
+
+    // --- POSE (nuevo) ---
+    final pxFlat = frame.posesPxFlat;
+    final pxLegacy = frame.posesPx;
+    if ((pxFlat != null && pxFlat.isNotEmpty) ||
+        (pxLegacy != null && pxLegacy.isNotEmpty)) {
+      _poseLmk.value = (pxFlat != null && pxFlat.isNotEmpty)
+          ? LmkState.fromFlat(
+              pxFlat,
+              lastSeq: seq ?? _poseLmk.value.lastSeq,
+              imageSize: frame.imageSize,
+            )
+          : LmkState.fromLegacy(
+              pxLegacy!,
+              lastSeq: seq ?? _poseLmk.value.lastSeq,
+              imageSize: frame.imageSize,
+            );
+    }
+
+    if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
+  }
 
   void _handleTaskBinary(String task, Uint8List b) {
     // NOTE: legacy path kept for reference. New fast-path uses _enqueueBinary.
@@ -1021,6 +1060,16 @@ void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
         'poses=${poses2d.length} size=${w}x$h');
 
     _latestFrame.value = frame;
+
+    // También actualiza POSE en el fallback (por si este camino se usa)
+    if (poses2d.isNotEmpty) {
+      _poseLmk.value = LmkState.fromLegacy(
+        poses2d,
+        lastSeq: seq ?? _poseLmk.value.lastSeq,
+        imageSize: Size(w.toDouble(), h.toDouble()),
+      );
+    }
+
     if (!_framesCtrl.isClosed) {
       _framesCtrl.add(frame);
     }
@@ -1034,13 +1083,13 @@ void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
   }
 
   void _sendCtrlAck(int seq) {
-  final c = _ctrl;
-  if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
-  _ackBuf[3] = (seq & 0xFF);
-  _ackBuf[4] = ((seq >> 8) & 0xFF);
-  _log('[client] sending ACK seq=$seq over ctrl');
-  c.send(RTCDataChannelMessage.fromBinary(_ackBuf));
-}
+    final c = _ctrl;
+    if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
+    _ackBuf[3] = (seq & 0xFF);
+    _ackBuf[4] = ((seq >> 8) & 0xFF);
+    _log('[client] sending ACK seq=$seq over ctrl');
+    c.send(RTCDataChannelMessage.fromBinary(_ackBuf));
+  }
 
   void _dumpSdp(String tag, String? sdp) {
     if (!logEverything || sdp == null) return;
