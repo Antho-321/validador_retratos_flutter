@@ -172,6 +172,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Set<String> _parsingTasks = {};             // tasks currently parsing
   int _lastAckSeqSent = -1;
   DateTime _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
+// ── Add fields ───────────────────────────────────────────────────────────────
+Timer? _emitGate;
+PoseFrame? _pendingFrame;
+DateTime _lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
+int get _minEmitIntervalMs => (1000 ~/ idealFps).clamp(8, 1000);
+
 
   void _log(Object? message) {
     if (!logEverything) return;
@@ -745,14 +751,56 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   // Minimal passthrough; if you later add FPS throttling, plug it here.
   void _emitBinaryThrottled(
-    int w,
-    int h,
-    List<List<PosePoint>> poses3d, {
-    required String kind,
-    int? seq,
-  }) {
-    _emitBinary(w, h, poses3d, kind: kind, seq: seq);
+  int w,
+  int h,
+  List<List<PosePoint>> poses3d, {
+  required String kind,
+  int? seq,
+}) {
+  if (_disposed) return;
+
+  // Convert to 2D once per emission; avoid allocations otherwise
+  final poses2d = poses3d
+      .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
+      .toList(growable: false);
+
+  final frame = PoseFrame(
+    imageSize: Size(w.toDouble(), h.toDouble()),
+    posesPx: poses2d,
+  );
+
+  // throttle to ~idealFps (or higher if camera is slower)
+  final now = DateTime.now();
+  final elapsed = now.difference(_lastEmit).inMilliseconds;
+
+  if (elapsed >= _minEmitIntervalMs && _emitGate == null) {
+    _lastEmit = now;
+    _doEmit(frame, kind: kind, seq: seq);
+    return;
   }
+
+  // save the latest frame to emit when the gate opens
+  _pendingFrame = frame;
+  _emitGate ??= Timer(
+    Duration(milliseconds: (_minEmitIntervalMs - elapsed).clamp(0, _minEmitIntervalMs)),
+    () {
+      _emitGate = null;
+      final f = _pendingFrame;
+      _pendingFrame = null;
+      if (f != null && !_disposed) {
+        _lastEmit = DateTime.now();
+        _doEmit(f, kind: kind, seq: seq);
+      }
+    },
+  );
+}
+
+void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
+  _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=${frame.posesPx.length} '
+       'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
+  _latestFrame.value = frame;
+  if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
+}
 
   void _handleTaskBinary(String task, Uint8List b) {
     // NOTE: legacy path kept for reference. New fast-path uses _enqueueBinary.
