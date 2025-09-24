@@ -1,4 +1,5 @@
 // lib/apps/asistente_retratos/presentation/widgets/rtc_pose_overlay.dart
+import 'dart:typed_data' show Float32List;
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart' show ValueListenable, Listenable;
@@ -7,7 +8,7 @@ import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../domain/model/lmk_state.dart' show LmkState;
 import '../styles/colors.dart'; // AppColors & CaptureTheme
 
-/// Overlay clásico que recibe un PoseFrame concreto.
+/// Overlay clásico que recibe un PoseFrame y DIBUJA SOLO la ruta rápida (flat).
 class PoseOverlay extends StatelessWidget {
   const PoseOverlay({
     super.key,
@@ -22,7 +23,6 @@ class PoseOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Toma el color desde el tema si existe; si no, usa el alias de la paleta.
     final cap = Theme.of(context).extension<CaptureTheme>();
     final landmarksColor = cap?.landmarks ?? AppColors.landmarks;
 
@@ -31,7 +31,7 @@ class PoseOverlay extends StatelessWidget {
         frame,
         mirror: mirror,
         fit: fit,
-        landmarksColor: landmarksColor, // ⬅️ nuevo
+        landmarksColor: landmarksColor,
       ),
       size: Size.infinite,
       isComplex: true,
@@ -45,18 +45,33 @@ class _PoseOverlayPainter extends CustomPainter {
     this.frame, {
     required this.mirror,
     required this.fit,
-    required this.landmarksColor, // ⬅️ nuevo
+    required this.landmarksColor,
   });
 
   final PoseFrame? frame;
   final bool mirror;
   final BoxFit fit;
-  final Color landmarksColor; // ⬅️ nuevo
+  final Color landmarksColor;
+
+  // MediaPipe Pose (índices)
+  static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
+  static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
+  static const List<List<int>> _edges = [
+    [LS, RS],
+    [LS, LE], [LE, LW],
+    [RS, RE], [RE, RW],
+    [LH, RH],
+    [LH, LK], [LK, LA],
+    [RH, RK], [RK, RA],
+  ];
 
   @override
   void paint(Canvas canvas, Size size) {
     final f = frame;
     if (f == null) return;
+
+    final flats = f.posesPxFlat;
+    if (flats == null || flats.isEmpty) return; // SOLO ruta rápida
 
     final fw = f.imageSize.width.toDouble();
     final fh = f.imageSize.height.toDouble();
@@ -75,49 +90,43 @@ class _PoseOverlayPainter extends CustomPainter {
 
     final pt = Paint()
       ..style = PaintingStyle.fill
-      ..color = landmarksColor; // ← reemplaza limeAccent
+      ..color = landmarksColor;
 
     final line = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
-      ..color = landmarksColor; // ← reemplaza limeAccent
+      ..color = landmarksColor;
 
     double mapX(double x) {
       final local = x * s + offX;
       return mirror ? (size.width - local) : local;
     }
-
     double mapY(double y) => y * s + offY;
 
-    const L = {
-      'ls': 11, 'rs': 12, 'le': 13, 're': 14,
-      'lw': 15, 'rw': 16, 'lh': 23, 'rh': 24,
-      'lk': 25, 'rk': 26, 'la': 27, 'ra': 28,
-    };
-    final edges = <List<int>>[
-      [L['ls']!, L['rs']!],
-      [L['ls']!, L['le']!], [L['le']!, L['lw']!],
-      [L['rs']!, L['re']!], [L['re']!, L['rw']!],
-      [L['lh']!, L['rh']!],
-      [L['lh']!, L['lk']!], [L['lk']!, L['la']!],
-      [L['rh']!, L['rk']!], [L['rk']!, L['ra']!],
-    ];
+    final Path bones = Path();
+    final Path dots  = Path();
+    const double r = 2.5;
 
-    for (final pose in f.posesPx) {
-      for (final e in edges) {
-        if (pose.length <= e[0] || pose.length <= e[1]) continue;
-        final a = pose[e[0]], b = pose[e[1]];
-        canvas.drawLine(
-          Offset(mapX(a.dx), mapY(a.dy)),
-          Offset(mapX(b.dx), mapY(b.dy)),
-          line,
-        );
+    for (final Float32List p in flats) {
+      // Huesos
+      for (final e in _edges) {
+        final i0 = e[0] * 2, i1 = e[1] * 2;
+        if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
+        final ax = mapX(p[i0]),     ay = mapY(p[i0 + 1]);
+        final bx = mapX(p[i1]),     by = mapY(p[i1 + 1]);
+        bones.moveTo(ax, ay);
+        bones.lineTo(bx, by);
       }
-      for (final lm in pose) {
-        canvas.drawCircle(Offset(mapX(lm.dx), mapY(lm.dy)), 2.5, pt);
+      // Puntos
+      for (int i = 0; i + 1 < p.length; i += 2) {
+        final cx = mapX(p[i]), cy = mapY(p[i + 1]);
+        dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
       }
     }
+
+    canvas.drawPath(bones, line);
+    canvas.drawPath(dots, pt);
   }
 
   @override
@@ -125,22 +134,22 @@ class _PoseOverlayPainter extends CustomPainter {
       old.frame != frame ||
       old.mirror != mirror ||
       old.fit != fit ||
-      old.landmarksColor != landmarksColor; // ⬅️ compara el color
+      old.landmarksColor != landmarksColor;
 }
 
-/// Overlay rápido: pinta pose y, opcionalmente, landmarks de cara (LmkState).
-/// Incluye HOLD-LAST para POSE usando un LmkState interno para evitar parpadeos.
+/// Overlay rápido SOLO-flat con hold-last plano para evitar parpadeos.
+/// Puede pintar también la cara (LmkState) si se pasa `face`.
 class PoseOverlayFast extends StatefulWidget {
   const PoseOverlayFast({
     super.key,
     required this.latest,
-    this.face,                 // opcional (cara)
+    this.face,                  // opcional (cara)
     this.mirror = false,
     this.fit = BoxFit.cover,
     this.showPoints = true,
     this.showBones = true,
-    this.showFace = false,     // por defecto no dibuja la cara
-    this.useHoldLastForPose = true, // ⬅️ evita parpadeo de pose cuando hay frames vacíos
+    this.showFace = false,
+    this.useHoldLastForPose = true,
   });
 
   final ValueListenable<PoseFrame?> latest;
@@ -157,13 +166,16 @@ class PoseOverlayFast extends StatefulWidget {
 }
 
 class _PoseOverlayFastState extends State<PoseOverlayFast> {
-  // Cache “hold-last” para pose (2D)
-  final LmkState _poseHold = LmkState();
+  // Hold-last PLANO (solo para pose)
+  List<Float32List>? _poseHoldFlat;
+  DateTime _poseHoldTs = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool get _poseHoldFresh =>
+      DateTime.now().difference(_poseHoldTs) < const Duration(milliseconds: 400);
 
   @override
   void initState() {
     super.initState();
-    // Mantén actualizado el hold-last con el último frame NO vacío.
     widget.latest.addListener(_onPoseFrame);
   }
 
@@ -173,7 +185,6 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
     if (oldWidget.latest != widget.latest) {
       oldWidget.latest.removeListener(_onPoseFrame);
       widget.latest.addListener(_onPoseFrame);
-      // refresca el cache con el valor actual del nuevo listenable
       _onPoseFrame();
     }
   }
@@ -183,13 +194,11 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
     final f = widget.latest.value;
     if (f == null) return;
 
-    // Si el frame trae landmarks válidos, actualiza el hold-last
-    if (f.posesPx.isNotEmpty && f.posesPx.first.isNotEmpty) {
-      _poseHold
-        ..last = f.posesPx
-        ..lastSeq = _poseHold.lastSeq + 1   // cascada con asignación
-        ..lastTs = DateTime.now();
-      // No hace falta setState; el repintado lo dispara 'latest'
+    final flats = f.posesPxFlat;
+    if (flats != null && flats.isNotEmpty) {
+      // Guardamos la referencia (evitar copiar para ser RT)
+      _poseHoldFlat = flats;
+      _poseHoldTs = DateTime.now();
     }
   }
 
@@ -201,11 +210,9 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
 
   @override
   Widget build(BuildContext context) {
-    // Toma el color desde el tema si existe; si no, usa el alias de la paleta.
     final cap = Theme.of(context).extension<CaptureTheme>();
     final landmarksColor = cap?.landmarks ?? AppColors.landmarks;
 
-    // Listenables que deben gatillar repaints (pose y opcionalmente cara)
     final repaint = widget.face == null
         ? widget.latest
         : Listenable.merge(<Listenable>[widget.latest, widget.face!]);
@@ -219,15 +226,14 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
         showBones: widget.showBones,
         showFace: widget.showFace,
         face: widget.face,
-        // getters hacia el cache hold-last; el painter los consulta en cada paint
-        getPoseHold: () => _poseHold,
         useHoldLastForPose: widget.useHoldLastForPose,
-        landmarksColor: landmarksColor, // ⬅️ nuevo
+        getPoseHoldFlat: () => _poseHoldFlat,
+        isPoseHoldFresh: () => _poseHoldFresh,
+        landmarksColor: landmarksColor,
       ),
       size: Size.infinite,
       isComplex: true,
       willChange: true,
-      // El repaint real lo controla el painter con `repaint: ...`
       foregroundPainter: null,
     );
   }
@@ -242,8 +248,9 @@ class _PoseOverlayFastPainter extends CustomPainter {
     required this.showBones,
     required this.showFace,
     required this.useHoldLastForPose,
-    required this.getPoseHold,
-    required this.landmarksColor, // ⬅️ nuevo
+    required this.getPoseHoldFlat,
+    required this.isPoseHoldFresh,
+    required this.landmarksColor,
     this.face,
   }) : super(
           repaint: face == null
@@ -260,16 +267,15 @@ class _PoseOverlayFastPainter extends CustomPainter {
   final bool showFace;
   final bool useHoldLastForPose;
 
-  // Proveedor del cache hold-last (vive en el State, persiste entre rebuilds)
-  final LmkState Function() getPoseHold;
+  // Hold-last plano
+  final List<Float32List>? Function() getPoseHoldFlat;
+  final bool Function() isPoseHoldFresh;
 
-  // Color para landmarks/huesos/puntos
-  final Color landmarksColor; // ⬅️ nuevo
+  final Color landmarksColor;
 
-  // Huesos (MediaPipe Pose)
+  // MediaPipe Pose (índices)
   static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
   static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
-
   static const List<List<int>> _edges = [
     [LS, RS],
     [LS, LE], [LE, LW],
@@ -279,36 +285,27 @@ class _PoseOverlayFastPainter extends CustomPainter {
     [RH, RK], [RK, RA],
   ];
 
-  final List<Offset> _linePts = <Offset>[];
-
   @override
   void paint(Canvas canvas, Size size) {
     final f = latest.value;
 
-    // Decide qué landmarks de pose usar: actuales o “hold-last”
-    List<List<Offset>>? poses;
-    Size imgSize = const Size(0, 0);
+    // Elegir flats actuales o hold-last
+    List<Float32List>? flats = f?.posesPxFlat;
+    Size imgSize = f?.imageSize ?? const Size(0, 0);
 
-    if (f != null) {
-      imgSize = Size(f.imageSize.width.toDouble(), f.imageSize.height.toDouble());
-      if (f.posesPx.isNotEmpty && f.posesPx.first.isNotEmpty) {
-        poses = f.posesPx;
-      }
+    if ((flats == null || flats.isEmpty) && useHoldLastForPose && isPoseHoldFresh()) {
+      flats = getPoseHoldFlat();
+      // imgSize asumimos el mismo del último válido; si necesitas exactitud,
+      // también puedes cachear el Size en el State.
     }
 
-    if (poses == null && useHoldLastForPose) {
-      final hold = getPoseHold();
-      if (hold.last != null && hold.isFresh) {
-        poses = hold.last;
-        // cuando usamos hold-last, asumimos mismo sistema de coords del frame
-      }
+    if (flats == null || flats.isEmpty || imgSize.width <= 0 || imgSize.height <= 0) {
+      return;
     }
 
-    if (poses == null || imgSize.width <= 0 || imgSize.height <= 0) return;
+    final fw = imgSize.width.toDouble();
+    final fh = imgSize.height.toDouble();
 
-    // Escalado/offset como antes
-    final fw = imgSize.width;
-    final fh = imgSize.height;
     final scaleW = size.width / fw;
     final scaleH = size.height / fh;
     final s = (fit == BoxFit.cover)
@@ -325,14 +322,12 @@ class _PoseOverlayFastPainter extends CustomPainter {
       ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = false
-      ..color = landmarksColor; // ← reemplaza limeAccent
+      ..color = landmarksColor;
 
     final ptsPaint = Paint()
-      ..strokeWidth = 3
-      ..strokeCap = StrokeCap.round
-      ..style = PaintingStyle.stroke
+      ..style = PaintingStyle.fill
       ..isAntiAlias = false
-      ..color = landmarksColor; // ← reemplaza limeAccent
+      ..color = landmarksColor;
 
     final facePaint = Paint()
       ..strokeWidth = 3
@@ -341,35 +336,43 @@ class _PoseOverlayFastPainter extends CustomPainter {
       ..isAntiAlias = false
       ..color = Colors.white;
 
-    canvas.save();
-    if (mirror) {
-      canvas.translate(size.width - offX, offY);
-      canvas.scale(-s, s);
-    } else {
-      canvas.translate(offX, offY);
-      canvas.scale(s, s);
+    double mapX(double x) {
+      final local = x * s + offX;
+      return mirror ? (size.width - local) : local;
     }
+    double mapY(double y) => y * s + offY;
 
-    // 1) Pose
-    for (final pose in poses) {
-      if (pose.isEmpty) continue;
+    canvas.save();
+    // (el mapeo ya contempla el mirror al calcular mapX)
+    // Si prefieres matriz de espejo completa, podrías usar translate+scale.
 
+    // 1) Pose SOLO-flat
+    final Path bones = Path();
+    final Path dots  = Path();
+    const double r = 2.5;
+
+    for (final Float32List p in flats) {
       if (showBones) {
-        _linePts.clear();
         for (final e in _edges) {
-          if (pose.length <= e[0] || pose.length <= e[1]) continue;
-          _linePts..add(pose[e[0]])..add(pose[e[1]]);
-        }
-        if (_linePts.isNotEmpty) {
-          canvas.drawPoints(PointMode.lines, _linePts, bonePaint);
+          final i0 = e[0] * 2, i1 = e[1] * 2;
+          if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
+          final ax = mapX(p[i0]),     ay = mapY(p[i0 + 1]);
+          final bx = mapX(p[i1]),     by = mapY(p[i1 + 1]);
+          bones.moveTo(ax, ay);
+          bones.lineTo(bx, by);
         }
       }
       if (showPoints) {
-        canvas.drawPoints(PointMode.points, pose, ptsPaint);
+        for (int i = 0; i + 1 < p.length; i += 2) {
+          final cx = mapX(p[i]), cy = mapY(p[i + 1]);
+          dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
+        }
       }
     }
+    if (showBones) canvas.drawPath(bones, bonePaint);
+    if (showPoints) canvas.drawPath(dots, ptsPaint);
 
-    // 2) Cara (opcional)
+    // 2) Cara (opcional) — sigue usando LmkState (Offsets)
     if (showFace && face != null) {
       final lmk = face!.value;
       final faces = lmk.last;
@@ -394,5 +397,5 @@ class _PoseOverlayFastPainter extends CustomPainter {
       old.useHoldLastForPose != useHoldLastForPose ||
       old.latest != latest ||
       old.face != face ||
-      old.landmarksColor != landmarksColor; // ⬅️ compara el color
+      old.landmarksColor != landmarksColor;
 }

@@ -131,6 +131,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
   ValueListenable<LmkState> get faceLandmarks => _faceLmk;
+  // face 2D pendiente para publicar con el gate de _doEmit
+  List<List<Offset>>? _lastFace2D;
+  // versión plana (rápida) para el FacePainter
+  List<Float32List>? _lastFaceFlat;
 
   @override
   List<List<Offset>>? get latestFaceLandmarks {
@@ -179,8 +183,6 @@ DateTime _lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
 int get _minEmitIntervalMs => (1000 ~/ idealFps).clamp(8, 1000);
 // Reuse a single ACK buffer to avoid per-send allocations
 final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
-
-
 
   void _log(Object? message) {
     if (!logEverything) return;
@@ -438,6 +440,8 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _lastFace2D = null;
+    _lastFaceFlat = null;
     _log('[client] dispose()');
 
     try {
@@ -679,47 +683,53 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
     while (buf != null && !_disposed) {
       try {
         final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-        final res = parser.parse(buf);
+        final res = parser.parseFlat2D(buf);
 
-        if (res is PoseParseOk) {
+        if (res is PoseParseOk2D) {
           final pkt = res.packet;
           final int? seq = pkt.seq;
 
+          // drop de PD viejos (igual que antes)
           if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
             final int? last = _lastSeqPerTask[task];
-            // drop stale PD
             if (last != null && !_isNewer16(seq, last)) {
               if (task == _primaryTask && res.ackSeq != null) {
                 lastAckToSend = res.ackSeq!;
               }
-              buf = _pendingBin.remove(task); // take the newest and continue
+              buf = _pendingBin.remove(task); // tomar el más nuevo y seguir
               continue;
             }
           }
 
           _lastW = pkt.w; _lastH = pkt.h;
-          _lastPosesPerTask[task] = pkt.poses;
-          if (pkt.seq != null) _lastSeqPerTask[task] = pkt.seq!;
+          if (seq != null) _lastSeqPerTask[task] = seq;
 
-          // Face: push 2D to the ValueNotifier (small)
+          // Si quieres seguir publicando face a _faceLmk con gate:
           if (task == 'face') {
-            final twoD = pkt.poses
-                .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-                .toList(growable: false);
-            _faceLmk.value = LmkState(
-              last: twoD,
-              lastSeq: pkt.seq ?? _faceLmk.value.lastSeq,
-              lastTs: DateTime.now(),
-            );
+            // cache plano para la UI
+            _lastFaceFlat = pkt.poses2d;
+
+            // opcional: mantener legacy para compatibilidad con otras vistas
+            _lastFace2D = pkt.poses2d.map((f) {
+              final n = f.length;
+              return List<Offset>.generate(n ~/ 2, (i) {
+                final x = f[i * 2], y = f[i * 2 + 1];
+                return Offset(x, y);
+              }, growable: false);
+            }).toList(growable: false);
           }
 
-          // fuse + emit (throttled below in §2)
-          final fused = _lastPosesPerTask.values
-              .expand((l) => l)
-              .toList(growable: false);
-          _emitBinaryThrottled(pkt.w, pkt.h, fused,
-              kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
-              seq: pkt.seq);
+          // Construir frame con buffers planos (sin Offsets)
+          final frame = PoseFrame(
+            imageSize: Size(pkt.w.toDouble(), pkt.h.toDouble()),
+            posesPxFlat: pkt.poses2d,
+          );
+
+          _emitBinaryThrottled(
+            frame,
+            kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
+            seq: pkt.seq,
+          );
 
           if (task == _primaryTask && res.ackSeq != null) {
             lastAckToSend = res.ackSeq!;
@@ -754,25 +764,12 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
   // Minimal passthrough; if you later add FPS throttling, plug it here.
   void _emitBinaryThrottled(
-  int w,
-  int h,
-  List<List<PosePoint>> poses3d, {
+  PoseFrame frame, {
   required String kind,
   int? seq,
 }) {
   if (_disposed) return;
 
-  // Convert to 2D once per emission; avoid allocations otherwise
-  final poses2d = poses3d
-      .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-      .toList(growable: false);
-
-  final frame = PoseFrame(
-    imageSize: Size(w.toDouble(), h.toDouble()),
-    posesPx: poses2d,
-  );
-
-  // throttle to ~idealFps (or higher if camera is slower)
   final now = DateTime.now();
   final elapsed = now.difference(_lastEmit).inMilliseconds;
 
@@ -782,26 +779,38 @@ final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
     return;
   }
 
-  // save the latest frame to emit when the gate opens
+  final waitMs = (_minEmitIntervalMs - elapsed) > 0 ? (_minEmitIntervalMs - elapsed) : 0;
   _pendingFrame = frame;
-  _emitGate ??= Timer(
-    Duration(milliseconds: (_minEmitIntervalMs - elapsed).clamp(0, _minEmitIntervalMs)),
-    () {
-      _emitGate = null;
-      final f = _pendingFrame;
-      _pendingFrame = null;
-      if (f != null && !_disposed) {
-        _lastEmit = DateTime.now();
-        _doEmit(f, kind: kind, seq: seq);
-      }
-    },
-  );
+  _emitGate ??= Timer(Duration(milliseconds: waitMs), () {
+    _emitGate = null;
+    final f = _pendingFrame;
+    _pendingFrame = null;
+    if (f != null && !_disposed) {
+      _lastEmit = DateTime.now();
+      _doEmit(f, kind: kind, seq: seq);
+    }
+  });
 }
 
 void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
-  _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=${frame.posesPx.length} '
+  final count = frame.posesPx?.length ?? frame.posesPxFlat?.length ?? 0;
+  _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=$count '
        'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
+
   _latestFrame.value = frame;
+
+  // Publicar face (con gate de emisión)
+  final lf  = _lastFace2D;
+  final lff = _lastFaceFlat;
+  if (lf != null || lff != null) {
+    _faceLmk.value = LmkState(
+      last: lf,                 // legacy (si lo mantienes)
+      lastFlat: lff,            // ⬅️ ruta rápida para FacePainter
+      lastSeq: seq ?? _faceLmk.value.lastSeq,
+      lastTs: DateTime.now(),
+    );
+  }
+
   if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
 }
 
@@ -831,16 +840,11 @@ void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
       if (seq != null) _lastSeqPerTask[task] = seq;
 
       if (task == 'face') {
-        final twoD = pkt.poses
-            .map((pose) =>
-                pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-            .toList(growable: false);
-
-        _faceLmk.value = LmkState(
-          last: twoD,
-          lastSeq: seq ?? _faceLmk.value.lastSeq,
-          lastTs: DateTime.now(),
-        );
+        _lastFace2D = pkt.poses.isEmpty
+            ? const <List<Offset>>[]
+            : pkt.poses
+                .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
+                .toList(growable: false);
       }
 
       final fused = _lastPosesPerTask.values.expand((l) => l).toList(growable: false);

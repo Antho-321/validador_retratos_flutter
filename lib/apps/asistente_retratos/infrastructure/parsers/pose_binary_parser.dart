@@ -66,6 +66,41 @@ class PoseParseOk extends PoseParseResult {
   final bool requestKeyframe;
 }
 
+// ===== NUEVOS TIPOS (ruta plana) ============================================
+
+class PosePacket2D {
+  const PosePacket2D({
+    required this.kind,
+    required this.w,
+    required this.h,
+    required this.poses2d,
+    this.seq,
+    this.keyframe = false,
+  });
+
+  final PacketKind kind;
+  final int w; // px
+  final int h; // px
+  /// Por persona: [x0,y0,x1,y1,...] en px
+  final List<Float32List> poses2d;
+  final int? seq;
+  final bool keyframe;
+}
+
+class PoseParseOk2D extends PoseParseResult {
+  const PoseParseOk2D({
+    required this.packet,
+    this.ackSeq,
+    this.requestKeyframe = false,
+  });
+
+  final PosePacket2D packet;
+  final int? ackSeq;
+  final bool requestKeyframe;
+}
+
+// ============================================================================
+
 class PoseParseNeedKF extends PoseParseResult {
   const PoseParseNeedKF(this.reason);
   final String reason;
@@ -102,6 +137,9 @@ class PoseBinaryParser {
   // Sticky Z presence (null until first KF decides)
   bool? _hasZ;
 
+  // ---- Reuso de buffers (ruta plana) ----
+  List<Float32List>? _lastFlat; // por pose
+
   List<List<PosePoint>>? get lastPoses => _lastPoses;
   int get parseErrors => _errors;
 
@@ -113,6 +151,7 @@ class PoseBinaryParser {
     _lastHq = 0;
     _errors = 0;
     _hasZ = null;
+    _lastFlat = null;
   }
 
   PoseParseResult parse(Uint8List b) {
@@ -141,7 +180,30 @@ class PoseBinaryParser {
     }
   }
 
-  // ── Internals ──────────────────────────────────────────────────────────────
+  /// Variante rápida que evita crear `PosePoint` y devuelve arreglos planos XY.
+  PoseParseResult parseFlat2D(Uint8List b) {
+    try {
+      if (b.length < 2) {
+        _errors++;
+        return const PoseParseNeedKF('short packet');
+      }
+      if (b[0] == 0x50 && b[1] == 0x4F) { // 'PO'
+        final pkt = _parsePO_Flat(b);
+        return PoseParseOk2D(packet: pkt);
+      }
+      if (b[0] == 0x50 && b[1] == 0x44) { // 'PD'
+        final pkt = _parsePD_Flat(b);
+        return PoseParseOk2D(packet: pkt, ackSeq: pkt.seq);
+      }
+      _errors++;
+      return const PoseParseNeedKF('unknown header (not PO/PD)');
+    } catch (e) {
+      _errors++;
+      return PoseParseNeedKF('parse error: $e');
+    }
+  }
+
+  // ── Internals (objetos) ────────────────────────────────────────────────────
 
   PosePacket _parsePO(Uint8List b) {
     int i = 2; // skip 'PO'
@@ -408,6 +470,167 @@ class PoseBinaryParser {
       seq: seq,
       keyframe: false,
     );
+  }
+
+  // ── Internals (plano/flat) ────────────────────────────────────────────────
+
+  Float32List _reuseOrAlloc(int poseIdx, int len) {
+    final prev = _lastFlat;
+    if (prev != null && poseIdx < prev.length && prev[poseIdx].length == len) {
+      return prev[poseIdx];
+    }
+    return Float32List(len);
+  }
+
+  PosePacket2D _parsePO_Flat(Uint8List b) {
+    int i = 2;
+    _require(i + 1 <= b.length, 'PO missing ver'); final ver = b[i]; i += 1;
+    _require(i + 2 <= b.length, 'PO missing nposes'); final nposes = _u16le(b, i); i += 2;
+    _require(i + 2 <= b.length, 'PO missing w'); final wq = _u16le(b, i); i += 2;
+    _require(i + 2 <= b.length, 'PO missing h'); final hq = _u16le(b, i); i += 2;
+
+    final scale = _deriveScale(ver, wq, hq);
+    final wpx = wq ~/ scale, hpx = hq ~/ scale;
+
+    // Pre-scan para Z (sticky)
+    int j = i, totalPts = 0;
+    for (int p = 0; p < nposes; p++) { _require(j + 2 <= b.length, 'PO pre-scan npts'); final npts = _u16le(b, j); j += 2; totalPts += npts; }
+    final expectedXY = j + totalPts * 4, expectedXYZ = j + totalPts * 6;
+    final hasZ = (b.length == expectedXYZ) || ((b.length - j) == totalPts * 6);
+    _hasZ = hasZ;
+
+    final posesQ = <List<_PtQ>>[];
+    final out = <Float32List>[];
+    for (int p = 0; p < nposes; p++) {
+      _require(i + 2 <= b.length, 'PO pose[$p] npts'); final npts = _u16le(b, i); i += 2;
+      final need = npts * (hasZ ? 6 : 4); _require(i + need <= b.length, 'PO pose[$p] short');
+
+      final ptsQ = <_PtQ>[];
+      final arr = _reuseOrAlloc(p, npts * 2); // x,y
+      int w = 0;
+
+      for (int k = 0; k < npts; k++) {
+        final xq = _u16le(b, i); i += 2;
+        final yq = _u16le(b, i); i += 2;
+        int? zq; if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
+        final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
+        ptsQ.add(_PtQ(cxq, cyq, zq));
+        arr[w++] = cxq / scale;  // x
+        arr[w++] = cyq / scale;  // y
+      }
+      posesQ.add(ptsQ);
+      out.add(arr);
+    }
+
+    _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
+    _lastFlat = out;
+
+    return PosePacket2D(kind: PacketKind.po, w: wpx, h: hpx, poses2d: out, keyframe: true);
+  }
+
+  PosePacket2D _parsePD_Flat(Uint8List b) {
+    int i = 2;
+    _require(i + 1 <= b.length, 'PD missing ver'); final ver = b[i]; i += 1;
+    _require(i + 1 <= b.length, 'PD missing flags'); final flags = b[i]; i += 1;
+    _require(i + 2 <= b.length, 'PD missing seq'); final seq = _u16le(b, i); i += 2;
+    _require(i + 2 <= b.length, 'PD missing nposes'); final nposes = _u16le(b, i); i += 2;
+    _require(i + 2 <= b.length, 'PD missing w'); final wq = _u16le(b, i); i += 2;
+    _require(i + 2 <= b.length, 'PD missing h'); final hq = _u16le(b, i); i += 2;
+
+    final isKey = (flags & 1) != 0;
+    final scale = _deriveScale(ver, wq, hq);
+    final wpx = wq ~/ scale, hpx = hq ~/ scale;
+
+    final noBaseline = (_lastQ == null);
+    final scaleChanged = (!noBaseline && _lastScale != scale);
+    final dimsChanged = (!noBaseline && (_lastWq != wq || _lastHq != hq));
+    if (!isKey && (scaleChanged || dimsChanged)) {
+      throw StateError('PD: Q/dims changed without keyframe');
+    }
+
+    // KF o sin baseline: absolutas
+    if (isKey || noBaseline) {
+      int j = i, totalPts = 0;
+      for (int p = 0; p < nposes; p++) { _require(j + 2 <= b.length, 'PD(KF) pre-scan npts'); final npts = _u16le(b, j); j += 2; totalPts += npts; }
+      final expectedXY = j + totalPts * 4, expectedXYZ = j + totalPts * 6;
+      final hasZ = (b.length == expectedXYZ) || ((b.length - j) == totalPts * 6);
+      _hasZ = hasZ;
+
+      final posesQ = <List<_PtQ>>[];
+      final out = <Float32List>[];
+
+      for (int p = 0; p < nposes; p++) {
+        _require(i + 2 <= b.length, 'PD(KF) pose[$p] npts'); final npts = _u16le(b, i); i += 2;
+        final need = npts * (hasZ ? 6 : 4); _require(i + need <= b.length, 'PD(KF) pose[$p] short');
+
+        final ptsQ = <_PtQ>[];
+        final arr = _reuseOrAlloc(p, npts * 2);
+        int w = 0;
+
+        for (int k = 0; k < npts; k++) {
+          final xq = _u16le(b, i); i += 2;
+          final yq = _u16le(b, i); i += 2;
+          int? zq; if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
+          final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
+          ptsQ.add(_PtQ(cxq, cyq, zq));
+          arr[w++] = cxq / scale; arr[w++] = cyq / scale;
+        }
+        posesQ.add(ptsQ);
+        out.add(arr);
+      }
+
+      _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
+      _lastFlat = out;
+
+      return PosePacket2D(kind: PacketKind.pd, w: wpx, h: hpx, poses2d: out, seq: seq, keyframe: true);
+    }
+
+    // Δ: relativiza contra baseline existente
+    if (_hasZ == null) throw StateError('PD(Δ): unknown Z presence (need keyframe)');
+    final bool hasZ = _hasZ!;
+    final prevQ = _lastQ!; _require(prevQ.length == nposes, 'PD(Δ) nposes mismatch');
+
+    final posesQ = <List<_PtQ>>[];
+    final out = <Float32List>[];
+
+    for (int p = 0; p < nposes; p++) {
+      _require(i + 2 <= b.length, 'PD(Δ) pose[$p] npts'); final npts = _u16le(b, i); i += 2;
+      final maskBytes = (npts + 7) >> 3; _require(i + maskBytes <= b.length, 'PD(Δ) mask short');
+      final int maskStart = i; i += maskBytes;
+
+      final prevPts = prevQ[p]; _require(prevPts.length == npts, 'PD(Δ) pose[$p] npts mismatch');
+
+      final outQ = <_PtQ>[];
+      final arr = _reuseOrAlloc(p, npts * 2);
+      int w = 0;
+
+      for (int j2 = 0; j2 < npts; j2++) {
+        final mb = j2 >> 3, bb = j2 & 7;
+        final changed = ((b[maskStart + mb] >> bb) & 1) == 1;
+
+        int xq = prevPts[j2].x, yq = prevPts[j2].y; int? zq = prevPts[j2].z;
+        if (changed) {
+          _require(i + 2 <= b.length, 'PD(Δ) dxdy short');
+          xq += _asInt8(b[i]); i += 1;
+          yq += _asInt8(b[i]); i += 1;
+          if (hasZ) {
+            _require(i + 1 <= b.length, 'PD(Δ) dz short');
+            final dz = _asInt8(b[i]); i += 1;
+            final prevZ = zq ?? 0; zq = _clampZq(prevZ + dz);
+          }
+        }
+        xq = _clampQ(xq, wq); yq = _clampQ(yq, hq);
+        outQ.add(_PtQ(xq, yq, zq));
+        arr[w++] = xq / scale; arr[w++] = yq / scale;
+      }
+      posesQ.add(outQ);
+      out.add(arr);
+    }
+
+    _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
+    _lastFlat = out;
+
+    return PosePacket2D(kind: PacketKind.pd, w: wpx, h: hpx, poses2d: out, seq: seq, keyframe: false);
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

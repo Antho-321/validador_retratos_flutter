@@ -1,19 +1,51 @@
 // lib/apps/asistente_retratos/infrastructure/model/pose_frame.dart
 
 // Modelo de datos usado por el servicio y la UI (sin widgets)
+import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 
 /// Lo que necesitamos para pintar/consumir un frame de pose:
 /// - tamaño de la imagen del servidor
-/// - poses en coordenadas de píxel (lista de 33 Offsets por persona)
+/// - poses en coordenadas de píxel:
+///    * `posesPx`     → lista de Offsets por persona (legacy)
+///    * `posesPxFlat` → Float32List plano [x0,y0,x1,y1,...] por persona (rápido)
 class PoseFrame {
   const PoseFrame({
     required this.imageSize,
-    required this.posesPx,
-  });
+    this.posesPx,
+    this.posesPxFlat,
+  }) : assert(
+          posesPx != null || posesPxFlat != null,
+          'Debes proveer posesPx o posesPxFlat',
+        );
 
-  final Size imageSize;               // (w, h) de la imagen del servidor
-  final List<List<Offset>> posesPx;   // cada pose: lista de Offsets (px, py)
+  /// (w, h) de la imagen del servidor
+  final Size imageSize;
+
+  /// Cada pose: lista de Offsets (px, py). Mantener para compatibilidad.
+  final List<List<Offset>>? posesPx;
+
+  /// Cada pose: Float32List plano [x0,y0,x1,y1,...] en píxeles.
+  /// Preferido para pintar por rendimiento (cero objetos intermedios).
+  final List<Float32List>? posesPxFlat;
+
+  /// Cantidad de personas en el frame.
+  int get posesCount => posesPxFlat?.length ?? posesPx?.length ?? 0;
+
+  /// Indica si tenemos la ruta plana optimizada.
+  bool get isFlat => posesPxFlat != null;
+
+  PoseFrame copyWith({
+    Size? imageSize,
+    List<List<Offset>>? posesPx,
+    List<Float32List>? posesPxFlat,
+  }) {
+    return PoseFrame(
+      imageSize: imageSize ?? this.imageSize,
+      posesPx: posesPx ?? this.posesPx,
+      posesPxFlat: posesPxFlat ?? this.posesPxFlat,
+    );
+  }
 }
 
 /// Convierte el JSON del servidor a PoseFrame.
@@ -42,5 +74,6 @@ PoseFrame? poseFrameFromMap(Map<String, dynamic>? m) {
     posesPx.add(pts);
   }
 
+  // JSON → solo Offsets (ruta legacy); plano queda null.
   return PoseFrame(imageSize: Size(w, h), posesPx: posesPx);
 }
