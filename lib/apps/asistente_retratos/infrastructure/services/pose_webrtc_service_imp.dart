@@ -167,8 +167,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return d != 0 && (d & 0x8000) == 0;
   }
 
+  // ── Add fields ───────────────────────────────────────────────────────────────
+  final Map<String, Uint8List?> _pendingBin = {};   // latest pending per task
+  final Set<String> _parsingTasks = {};             // tasks currently parsing
+  int _lastAckSeqSent = -1;
+  DateTime _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
+
   void _log(Object? message) {
     if (!logEverything) return;
+    // ignore: avoid_print
     print(message);
   }
 
@@ -520,14 +527,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         );
       }
 
+      // ── Replace inside _wireResults(ch,...): in onMessage for binary ─────────────
       if (m.isBinary) {
-        try {
-          _handleTaskBinary(task, m.binary);
-        } catch (e) {
-          _log('[client] error parsing results packet (task=$task): $e');
-          _sendCtrlKF();
-        }
+        _enqueueBinary(task, m.binary);
       } else {
+        // unchanged: _handlePoseText(...)
         final txtRaw = m.text ?? '';
         final txt = txtRaw.trim();
         if (txt.toUpperCase() == 'KF') {
@@ -648,7 +652,110 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
 
+  // ── New helpers ──────────────────────────────────────────────────────────────
+  void _enqueueBinary(String task, Uint8List buf) {
+    // keep only the newest packet for this task
+    _pendingBin[task] = buf;
+    if (_parsingTasks.contains(task)) return;
+    _parsingTasks.add(task);
+    // process in microtask to leave DC thread ASAP
+    scheduleMicrotask(() => _drainParseLoop(task));
+  }
+
+  void _drainParseLoop(String task) {
+    // Parse until the queue for this task is empty; always pick the latest.
+    Uint8List? buf = _pendingBin.remove(task);
+    int? lastAckToSend;
+
+    while (buf != null && !_disposed) {
+      try {
+        final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
+        final res = parser.parse(buf);
+
+        if (res is PoseParseOk) {
+          final pkt = res.packet;
+          final int? seq = pkt.seq;
+
+          if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
+            final int? last = _lastSeqPerTask[task];
+            // drop stale PD
+            if (last != null && !_isNewer16(seq, last)) {
+              if (task == _primaryTask && res.ackSeq != null) {
+                lastAckToSend = res.ackSeq!;
+              }
+              buf = _pendingBin.remove(task); // take the newest and continue
+              continue;
+            }
+          }
+
+          _lastW = pkt.w; _lastH = pkt.h;
+          _lastPosesPerTask[task] = pkt.poses;
+          if (pkt.seq != null) _lastSeqPerTask[task] = pkt.seq!;
+
+          // Face: push 2D to the ValueNotifier (small)
+          if (task == 'face') {
+            final twoD = pkt.poses
+                .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
+                .toList(growable: false);
+            _faceLmk.value = LmkState(
+              last: twoD,
+              lastSeq: pkt.seq ?? _faceLmk.value.lastSeq,
+              lastTs: DateTime.now(),
+            );
+          }
+
+          // fuse + emit (throttled below in §2)
+          final fused = _lastPosesPerTask.values
+              .expand((l) => l)
+              .toList(growable: false);
+          _emitBinaryThrottled(pkt.w, pkt.h, fused,
+              kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
+              seq: pkt.seq);
+
+          if (task == _primaryTask && res.ackSeq != null) {
+            lastAckToSend = res.ackSeq!;
+          }
+          if (res.requestKeyframe) _maybeSendKF();
+        } else if (res is PoseParseNeedKF) {
+          _maybeSendKF();
+        }
+      } catch (_) {
+        _maybeSendKF();
+      }
+
+      // get newest pending (drop intermediate)
+      buf = _pendingBin.remove(task);
+    }
+
+    // coalesce ACK: send only the last one seen in this run
+    if (lastAckToSend != null && lastAckToSend != _lastAckSeqSent) {
+      _lastAckSeqSent = lastAckToSend!;
+      _sendCtrlAck(lastAckToSend!);
+    }
+    _parsingTasks.remove(task);
+  }
+
+  void _maybeSendKF() {
+    final now = DateTime.now();
+    if (now.difference(_lastKfReq).inMilliseconds >= 300) {
+      _lastKfReq = now;
+      _sendCtrlKF();
+    }
+  }
+
+  // Minimal passthrough; if you later add FPS throttling, plug it here.
+  void _emitBinaryThrottled(
+    int w,
+    int h,
+    List<List<PosePoint>> poses3d, {
+    required String kind,
+    int? seq,
+  }) {
+    _emitBinary(w, h, poses3d, kind: kind, seq: seq);
+  }
+
   void _handleTaskBinary(String task, Uint8List b) {
+    // NOTE: legacy path kept for reference. New fast-path uses _enqueueBinary.
     final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
     final res = parser.parse(b);
 
