@@ -120,12 +120,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               valueListenable: svc.poseLandmarks, // ⬅️ LmkState con POSE
                               builder: (_, lmk, __) => CustomPaint(
                                 painter: PosePainter.themed(
-                                  context,
-                                  lmk,
-                                  mirror: ctl.mirror,
-                                  // ideal: toma el w,h del frame que generó esos puntos
-                                  srcSize: lmk.imageSize ?? svc.latestFrame.value?.imageSize,
-                                ),
+                                context,
+                                lmk,
+                                mirror: ctl.mirror,
+                                srcSize: svc.latestFrame.value?.imageSize, // ⬅️ OK
+                              ),
                                 isComplex: true,
                                 willChange: true,
                               ),

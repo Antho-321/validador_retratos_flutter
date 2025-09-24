@@ -4,7 +4,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show BuildContext, Theme;
 import '../../domain/model/lmk_state.dart';
 import '../styles/colors.dart';
-import 'dart:ui' as ui;
 
 /// Conexiones del esqueleto (coinciden con PoseGeom.POSE_CONNECTIONS del servidor)
 const List<List<int>> _POSE_EDGES = <List<int>>[
@@ -15,27 +14,35 @@ const List<List<int>> _POSE_EDGES = <List<int>>[
   [28,30],[29,31],[30,32],[27,31],[28,32],
 ];
 
+/// Pintor optimizado SOLO para la ruta rápida (Float32List plano).
+/// Reemplaza por completo la ruta legacy (List<Offset>) e incluye hold-last.
 class PosePainter extends CustomPainter {
-  final LmkState lmk;                 // Debe contener los landmarks de pose
+  final LmkState lmk;            // Debe contener pose en lmk.lastFlat
   final bool mirror;
-  final Size? srcSize;                // Tamaño del frame (w,h) de origen
+  final Size? srcSize;           // Tamaño del frame (w,h) de origen
+  final BoxFit fit;
+  final bool showPoints;
+  final bool showBones;
   final Color skeletonColor;
   final int _seqSnapshot;
 
-  // Pincel reutilizado (evita alloc por frame)
-  final Paint _paint;
+  // Cache hold-last para ruta rápida (no copiamos buffers).
+  List<Float32List>? _holdFlat;
+  Size? _holdImgSize;
+  DateTime _holdTs = DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool get _holdFresh =>
+      DateTime.now().difference(_holdTs) < const Duration(milliseconds: 400);
 
   PosePainter(
     this.lmk, {
     this.mirror = false,
     this.srcSize,
-    this.skeletonColor = AppColors.landmarks, // puedes definir AppColors.pose si lo tienes
-  })  : _seqSnapshot = lmk.lastSeq,
-        _paint = Paint()
-          ..color = skeletonColor
-          ..style = PaintingStyle.stroke
-          ..isAntiAlias = true
-          ..strokeCap = StrokeCap.round;
+    this.fit = BoxFit.cover,
+    this.showPoints = true,
+    this.showBones = true,
+    this.skeletonColor = AppColors.landmarks, // o AppColors.pose si existe
+  }) : _seqSnapshot = lmk.lastSeq;
 
   /// Variante que toma color desde el Theme (si tu CaptureTheme lo provee).
   static PosePainter themed(
@@ -43,115 +50,122 @@ class PosePainter extends CustomPainter {
     LmkState lmk, {
     bool mirror = false,
     Size? srcSize,
+    BoxFit fit = BoxFit.cover,
+    bool showPoints = true,
+    bool showBones = true,
   }) {
     final cap = Theme.of(context).extension<CaptureTheme>();
     final color = cap?.landmarks ?? AppColors.landmarks;
-    return PosePainter(lmk, mirror: mirror, srcSize: srcSize, skeletonColor: color);
+    return PosePainter(
+      lmk,
+      mirror: mirror,
+      srcSize: srcSize,
+      fit: fit,
+      showPoints: showPoints,
+      showBones: showBones,
+      skeletonColor: color,
+    );
   }
 
   @override
-  void paint(Canvas c, Size size) {
-    final flats = lmk.lastFlat;       // List<Float32List> con [x0,y0,x1,y1,...] por persona
-    final posesLegacy = lmk.last;     // List<List<Offset>> por persona
+  void paint(Canvas canvas, Size size) {
+    // Datos actuales (solo ruta rápida)
+    List<Float32List>? flats = lmk.lastFlat;
 
-    final hasFlat = flats != null && flats.isNotEmpty && lmk.isFresh;
-    final hasLegacy = posesLegacy != null && posesLegacy.isNotEmpty && lmk.isFresh;
-    if (!hasFlat && !hasLegacy) return;
+    // Tomamos el tamaño fuente si lo conoces; si no, asumimos el del lienzo.
+    Size imgSize = srcSize ?? size;
 
-    // Tamaño fuente (en px del servidor)
-    final src = srcSize ?? size;
-    final sw = src.width, sh = src.height;
-    if (sw <= 0 || sh <= 0) return;
-
-    // BoxFit.cover: escala + centrado
-    final scale = (size.width / sw > size.height / sh)
-        ? (size.width / sw)
-        : (size.height / sh);
-    final offX = (size.width - sw * scale) / 2.0;
-    final offY = (size.height - sh * scale) / 2.0;
-
-    c.save();
-    c.translate(offX, offY);
-    if (mirror) {
-      c.translate(sw * scale, 0);
-      c.scale(-scale, scale);
-    } else {
-      c.scale(scale, scale);
+    // Actualizar hold-last si llega data válida
+    if (flats != null && flats.isNotEmpty && lmk.isFresh) {
+      _holdFlat = flats;           // guardamos referencias, sin copiar
+      _holdImgSize = imgSize;
+      _holdTs = DateTime.now();
     }
 
-    // grosor “pantalla” ≈ 4px, independiente del zoom
-    _paint
-      ..color = skeletonColor
-      ..strokeWidth = 4.0 / scale;
+    // Si no hay data actual, usar hold-last reciente
+    if ((flats == null || flats.isEmpty) && _holdFresh) {
+      flats = _holdFlat;
+      imgSize = _holdImgSize ?? imgSize;
+    }
 
-    if (hasFlat) {
-      // Ruta rápida (Float32List): componemos Paths sin crear Offsets
-      final Path bones = Path();
-      final Path joints = Path();
-      final double r = 2.0; // radio de la “+” para la unión (≈2px en pantalla)
+    if (flats == null || flats.isEmpty || imgSize.width <= 0 || imgSize.height <= 0) {
+      return;
+    }
 
-      for (final Float32List f in flats!) {
-        final count = f.length >> 1; // N puntos (x,y)
-        if (count == 0) continue;
+    final fw = imgSize.width.toDouble();
+    final fh = imgSize.height.toDouble();
 
-        // Dibujar huesos (líneas)
-        for (final e in _POSE_EDGES) {
-          final int a = e[0], b = e[1];
-          if (a < count && b < count) {
-            final double x1 = f[(a << 1)    ];
-            final double y1 = f[(a << 1) + 1];
-            final double x2 = f[(b << 1)    ];
-            final double y2 = f[(b << 1) + 1];
-            bones.moveTo(x1, y1);
-            bones.lineTo(x2, y2);
-          }
-        }
+    // Escalado tipo BoxFit
+    final scaleW = size.width / fw;
+    final scaleH = size.height / fh;
+    final s = (fit == BoxFit.cover)
+        ? (scaleW > scaleH ? scaleW : scaleH)
+        : (scaleW < scaleH ? scaleW : scaleH);
 
-        // Dibujar juntas (cruces pequeñas, sin alloc de Offsets/Rects)
-        for (int i = 0; i < count; i++) {
-          final double x = f[(i << 1)    ];
-          final double y = f[(i << 1) + 1];
-          joints.moveTo(x - r, y);
-          joints.lineTo(x + r, y);
-          joints.moveTo(x, y - r);
-          joints.lineTo(x, y + r);
-        }
-      }
+    final drawW = fw * s;
+    final drawH = fh * s;
+    final offX = (size.width - drawW) / 2.0;
+    final offY = (size.height - drawH) / 2.0;
 
-      // Huesos un poco más gruesos que juntas
-      c.drawPath(bones, _paint..strokeWidth = 4.0 / scale);
-      c.drawPath(joints, _paint..strokeWidth = 3.0 / scale);
-    } else {
-      // Fallback legado: lista de Offsets por persona
-      for (final pose in posesLegacy!) {
-        if (pose.isEmpty) continue;
+    // Pinceles “baratos”
+    final Paint bonePaint = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = false
+      ..color = skeletonColor;
 
-        // Huesos
-        final Path bones = Path();
-        final n = pose.length;
+    final Paint ptsPaint = Paint()
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = false
+      ..color = skeletonColor;
+
+    double mapX(double x) {
+      final local = x * s + offX;
+      return mirror ? (size.width - local) : local;
+    }
+    double mapY(double y) => y * s + offY;
+
+    // Construimos Paths para minimizar draw calls
+    final Path bones = Path();
+    final Path dots  = Path();
+    const double r = 2.5;
+
+    for (final Float32List p in flats) {
+      if (showBones) {
+        final count = p.length >> 1;
         for (final e in _POSE_EDGES) {
           final a = e[0], b = e[1];
-          if (a < n && b < n) {
-            final p1 = pose[a];
-            final p2 = pose[b];
-            bones.moveTo(p1.dx, p1.dy);
-            bones.lineTo(p2.dx, p2.dy);
+          if (a < count && b < count) {
+            final i0 = a << 1;
+            final i1 = b << 1;
+            final ax = mapX(p[i0]);     final ay = mapY(p[i0 + 1]);
+            final bx = mapX(p[i1]);     final by = mapY(p[i1 + 1]);
+            bones.moveTo(ax, ay);
+            bones.lineTo(bx, by);
           }
         }
-        c.drawPath(bones, _paint..strokeWidth = 4.0 / scale);
-
-        // Juntas (rápido con drawPoints)
-        c.drawPoints(ui.PointMode.points, pose, _paint..strokeWidth = 3.0 / scale);
+      }
+      if (showPoints) {
+        for (int i = 0; i + 1 < p.length; i += 2) {
+          final cx = mapX(p[i]); final cy = mapY(p[i + 1]);
+          dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
+        }
       }
     }
 
-    c.restore();
+    if (showBones) canvas.drawPath(bones, bonePaint);
+    if (showPoints) canvas.drawPath(dots, ptsPaint);
   }
 
   @override
   bool shouldRepaint(covariant PosePainter old) =>
       old._seqSnapshot != _seqSnapshot ||
+      old.lmk != lmk ||                     // <- repinta cuando llega un LmkState nuevo
       old.mirror != mirror ||
       old.skeletonColor != skeletonColor ||
-      old.srcSize != srcSize;
+      old.srcSize != srcSize ||
+      old.fit != fit ||
+      old.showPoints != showPoints ||
+      old.showBones != showBones;
 }

@@ -4,7 +4,6 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show BuildContext, Theme;
 import '../../domain/model/lmk_state.dart';
 import '../styles/colors.dart';
-import 'dart:ui' as ui;
 
 class FacePainter extends CustomPainter {
   final LmkState lmk;
@@ -12,6 +11,13 @@ class FacePainter extends CustomPainter {
   final Size? srcSize;               // frame (w,h) de origen
   final Color landmarksColor;
   final int _seqSnapshot;
+
+  // Hold-last SOLO-flat (evita parpadeos si un frame viene vacío)
+  List<Float32List>? _holdFlat;
+  Size? _holdImgSize;
+  DateTime _holdTs = DateTime.fromMillisecondsSinceEpoch(0);
+  bool get _holdFresh =>
+      DateTime.now().difference(_holdTs) < const Duration(milliseconds: 400);
 
   // Reused paint (no allocation on every frame)
   final Paint _paint;
@@ -41,18 +47,28 @@ class FacePainter extends CustomPainter {
 
   @override
   void paint(Canvas c, Size size) {
-    // Preferimos la ruta plana si está disponible y fresca
-    final flats = lmk.lastFlat;
-    final facesLegacy = lmk.last;
+    // Ruta rápida plana
+    List<Float32List>? flats = lmk.lastFlat;
+    Size imgSize = srcSize ?? size;
 
-    final hasFlat = flats != null && flats.isNotEmpty && lmk.isFresh;
-    final hasLegacy = facesLegacy != null && facesLegacy.isNotEmpty && lmk.isFresh;
+    // Actualiza hold-last cuando llegan datos frescos
+    if (flats != null && flats.isNotEmpty && lmk.isFresh) {
+      _holdFlat = flats;
+      _holdImgSize = imgSize;
+      _holdTs = DateTime.now();
+    }
 
-    if (!hasFlat && !hasLegacy) return;
+    // Si no hay datos actuales, usa el hold-last reciente
+    if ((flats == null || flats.isEmpty) && _holdFresh) {
+      flats = _holdFlat;
+      imgSize = _holdImgSize ?? imgSize;
+    }
 
-    // Tamaño fuente (en px del servidor)
-    final src = srcSize ?? size;
-    final sw = src.width, sh = src.height;
+    if (flats == null || flats.isEmpty) return;
+
+    // Tamaño fuente (en px del servidor o del último frame válido)
+    final sw = imgSize.width;
+    final sh = imgSize.height;
     if (sw <= 0 || sh <= 0) return;
 
     // BoxFit.cover transform (scale + center)
@@ -77,39 +93,23 @@ class FacePainter extends CustomPainter {
       ..color = landmarksColor
       ..strokeWidth = 4.0 / scale;
 
-    if (hasFlat) {
-      // ──────────────────────────────────────────────────────────────
-      // Ruta rápida: Float32List por cara [x0,y0,x1,y1,...] en px
-      // No creamos Offsets; componemos un Path de cruces pequeñas.
-      // (Si tienes topología de aristas, aquí harías moveTo/lineTo).
-      // ──────────────────────────────────────────────────────────────
-      final Path path = Path();
-      final double r = 2.0; // ≈2px en pantalla (el stroke ya compensa con 1/scale)
+    // Ruta rápida: Float32List por cara [x0,y0,x1,y1,...] en px
+    // Componemos un Path de cruces pequeñas (dos segmentos por punto).
+    final Path path = Path();
+    const double r = 2.0; // ≈2px en pantalla (stroke ya compensa con 1/scale)
 
-      for (final Float32List f in flats!) {
-        // f: [x0,y0,x1,y1,...] ya en coordenadas de la imagen fuente
-        for (int i = 0; i < f.length; i += 2) {
-          final double x = f[i];
-          final double y = f[i + 1];
-
-          // dibujamos una “+” mini (2 segmentos) para evitar crear Offsets/Rects
-          path.moveTo(x - r, y);
-          path.lineTo(x + r, y);
-          path.moveTo(x, y - r);
-          path.lineTo(x, y + r);
-        }
-      }
-      c.drawPath(path, _paint);
-    } else {
-      // ──────────────────────────────────────────────────────────────
-      // Fallback legado: lista de Offsets por cara → usamos drawPoints
-      // ──────────────────────────────────────────────────────────────
-      for (final face in facesLegacy!) {
-        if (face.isNotEmpty) {
-          c.drawPoints(ui.PointMode.points, face, _paint);
-        }
+    for (final Float32List f in flats) {
+      for (int i = 0; i + 1 < f.length; i += 2) {
+        final double x = f[i];
+        final double y = f[i + 1];
+        path
+          ..moveTo(x - r, y)
+          ..lineTo(x + r, y)
+          ..moveTo(x, y - r)
+          ..lineTo(x, y + r);
       }
     }
+    c.drawPath(path, _paint);
 
     c.restore();
   }
@@ -117,6 +117,7 @@ class FacePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant FacePainter old) =>
       old._seqSnapshot != _seqSnapshot ||
+      old.lmk != lmk || // repinta cuando llega un LmkState nuevo
       old.mirror != mirror ||
       old.landmarksColor != landmarksColor ||
       old.srcSize != srcSize;

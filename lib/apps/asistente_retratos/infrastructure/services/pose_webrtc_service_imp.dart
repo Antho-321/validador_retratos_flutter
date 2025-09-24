@@ -769,7 +769,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final PoseFrame? raw = poseFrameFromMap(m);
       if (raw == null) return;
 
-      // Tamaño “target” (usa los últimos w/h conocidos o los ideales)
+      // Tamaño “target”
       final int w = _lastW ?? idealWidth;
       final int h = _lastH ?? idealHeight;
 
@@ -795,7 +795,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             posesPx: scaled,
           );
         } else if (raw.imageSize.width <= 4 || raw.imageSize.height <= 4) {
-          // Si ya vienen en px pero el size no está, completa imageSize
+          // Completa imageSize si falta
           out = PoseFrame(
             imageSize: Size(w.toDouble(), h.toDouble()),
             posesPx: raw.posesPx,
@@ -803,10 +803,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         }
       }
 
-      // --- 2) Actualizar faceLandmarks si viene "faces" en el JSON ---
+      // --- 2) Actualizar FACE si viene en el JSON (opcional) ---
       final faces = m['faces'] as List<dynamic>?;
       if (faces != null) {
-        // faces: [ [ {x,y}, {x,y}, ... ],  [ ... ] ]
         final List<Float32List> flat = <Float32List>[];
         for (final face in faces) {
           final List<dynamic> lmk = face as List<dynamic>;
@@ -815,9 +814,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
             final double x = (pt['x'] as num).toDouble();
             final double y = (pt['y'] as num).toDouble();
-            // Detectar normalizado por si acaso
             final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-            f[i * 2] = nrm ? (x * w) : x;
+            f[i * 2]     = nrm ? (x * w) : x;
             f[i * 2 + 1] = nrm ? (y * h) : y;
           }
           flat.add(f);
@@ -840,27 +838,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         );
       }
 
-      // --- 3) Publicar POSE si 'out' trae poses ---
-      if ((out.posesPxFlat != null && out.posesPxFlat!.isNotEmpty) ||
-          (out.posesPx != null && out.posesPx!.isNotEmpty)) {
-        _poseLmk.value = (out.posesPxFlat != null && out.posesPxFlat!.isNotEmpty)
-            ? LmkState.fromFlat(
-                out.posesPxFlat!,
-                lastSeq: _poseLmk.value.lastSeq + 1,
-                imageSize: out.imageSize,
-              )
-            : LmkState.fromLegacy(
-                out.posesPx!,
-                lastSeq: _poseLmk.value.lastSeq + 1,
-                imageSize: out.imageSize,
-              );
-      }
+      // --- 3) Emitir TODO por el mismo throttle que la ruta binaria ---
+      final int? seqFromJson = m['seq'] as int?;
+      _emitBinaryThrottled(out, kind: 'JSON', seq: seqFromJson);
 
-      // Publica frame a los listeners (usa el “out” ya escalado)
-      _latestFrame.value = out;
-      if (!_framesCtrl.isClosed) _framesCtrl.add(out);
-
-      _log('[client] results: JSON pose(s) -> emitted frame (scaled=${out.imageSize.width}x${out.imageSize.height})');
     } catch (e) {
       _log('[client] JSON pose parse error: $e -> requesting KF');
       _sendCtrlKF();
@@ -944,9 +925,24 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
-    final count = frame.posesPx?.length ?? frame.posesPxFlat?.length ?? 0;
+    // Asegura pxFlat a partir de legacy si hace falta
+    List<Float32List>? pxFlat = frame.posesPxFlat;
+    final pxLegacy = frame.posesPx;
+
+    if ((pxFlat == null || pxFlat.isEmpty) && pxLegacy != null && pxLegacy.isNotEmpty) {
+      pxFlat = pxLegacy.map((pose) {
+        final f = Float32List(pose.length * 2);
+        for (var i = 0; i < pose.length; i++) {
+          f[i * 2] = pose[i].dx;
+          f[i * 2 + 1] = pose[i].dy;
+        }
+        return f;
+      }).toList(growable: false);
+    }
+
+    final count = pxFlat?.length ?? pxLegacy?.length ?? 0;
     _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=$count '
-         'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
+        'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
 
     _latestFrame.value = frame;
 
@@ -962,22 +958,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       );
     }
 
-    // --- POSE (nuevo) ---
-    final pxFlat = frame.posesPxFlat;
-    final pxLegacy = frame.posesPx;
-    if ((pxFlat != null && pxFlat.isNotEmpty) ||
-        (pxLegacy != null && pxLegacy.isNotEmpty)) {
-      _poseLmk.value = (pxFlat != null && pxFlat.isNotEmpty)
-          ? LmkState.fromFlat(
-              pxFlat,
-              lastSeq: seq ?? _poseLmk.value.lastSeq,
-              imageSize: frame.imageSize,
-            )
-          : LmkState.fromLegacy(
-              pxLegacy!,
-              lastSeq: seq ?? _poseLmk.value.lastSeq,
-              imageSize: frame.imageSize,
-            );
+    // --- POSE (siempre rápido/flat) ---
+    if (pxFlat != null && pxFlat.isNotEmpty) {
+      // asegura que lastSeq suba si no viene seq
+      final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
+      _poseLmk.value = LmkState.fromFlat(
+        pxFlat,
+        lastSeq: nextSeq,
+        imageSize: frame.imageSize,
+      );
     }
 
     if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
@@ -1053,26 +1042,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     final frame = PoseFrame(
       imageSize: Size(w.toDouble(), h.toDouble()),
-      posesPx: poses2d,
+      posesPx: poses2d, // _doEmit convertirá a flat si hace falta
     );
 
-    _log('[client] emit frame kind=$kind seq=${seq ?? '-'} '
-        'poses=${poses2d.length} size=${w}x$h');
-
-    _latestFrame.value = frame;
-
-    // También actualiza POSE en el fallback (por si este camino se usa)
-    if (poses2d.isNotEmpty) {
-      _poseLmk.value = LmkState.fromLegacy(
-        poses2d,
-        lastSeq: seq ?? _poseLmk.value.lastSeq,
-        imageSize: Size(w.toDouble(), h.toDouble()),
-      );
-    }
-
-    if (!_framesCtrl.isClosed) {
-      _framesCtrl.add(frame);
-    }
+    // Enviar por el mismo camino con control de FPS
+    _emitBinaryThrottled(frame, kind: kind, seq: seq);
   }
 
   void _sendCtrlKF() {
