@@ -177,6 +177,9 @@ Timer? _emitGate;
 PoseFrame? _pendingFrame;
 DateTime _lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
 int get _minEmitIntervalMs => (1000 ~/ idealFps).clamp(8, 1000);
+// Reuse a single ACK buffer to avoid per-send allocations
+final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
+
 
 
   void _log(Object? message) {
@@ -897,19 +900,13 @@ void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
   }
 
   void _sendCtrlAck(int seq) {
-    final c = _ctrl;
-    if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
-
-    final out = Uint8List(5);
-    out[0] = 0x41;
-    out[1] = 0x43;
-    out[2] = 0x4B;
-    out[3] = (seq & 0xFF);
-    out[4] = ((seq >> 8) & 0xFF);
-
-    _log('[client] sending ACK seq=$seq over ctrl');
-    c.send(RTCDataChannelMessage.fromBinary(out));
-  }
+  final c = _ctrl;
+  if (c == null || c.state != RTCDataChannelState.RTCDataChannelOpen) return;
+  _ackBuf[3] = (seq & 0xFF);
+  _ackBuf[4] = ((seq >> 8) & 0xFF);
+  _log('[client] sending ACK seq=$seq over ctrl');
+  c.send(RTCDataChannelMessage.fromBinary(_ackBuf));
+}
 
   void _dumpSdp(String tag, String? sdp) {
     if (!logEverything || sdp == null) return;
