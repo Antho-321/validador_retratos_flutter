@@ -65,6 +65,65 @@ Float32List _remapLiteFlat2D(Float32List src) {
   return out;
 }
 
+bool _isPoseNormalized(Float32List src, {required int stride}) {
+  double minVal = double.infinity;
+  double maxVal = double.negativeInfinity;
+  var hasFinite = false;
+
+  for (var i = 0; i < src.length; i += stride) {
+    final double x = src[i];
+    if (x.isFinite) {
+      hasFinite = true;
+      if (x < minVal) minVal = x;
+      if (x > maxVal) maxVal = x;
+    }
+
+    if (i + 1 < src.length) {
+      final double y = src[i + 1];
+      if (y.isFinite) {
+        hasFinite = true;
+        if (y < minVal) minVal = y;
+        if (y > maxVal) maxVal = y;
+      }
+    }
+  }
+
+  if (!hasFinite) return false;
+
+  const double minThreshold = -0.5;
+  const double maxThreshold = 2.0;
+
+  return minVal >= minThreshold && maxVal <= maxThreshold;
+}
+
+bool _isOffsetPoseNormalized(List<Offset> pose) {
+  double minVal = double.infinity;
+  double maxVal = double.negativeInfinity;
+  var hasFinite = false;
+
+  for (final Offset p in pose) {
+    final double x = p.dx;
+    final double y = p.dy;
+    if (x.isFinite) {
+      hasFinite = true;
+      if (x < minVal) minVal = x;
+      if (x > maxVal) maxVal = x;
+    }
+    if (y.isFinite) {
+      hasFinite = true;
+      if (y < minVal) minVal = y;
+      if (y > maxVal) maxVal = y;
+    }
+  }
+
+  if (!hasFinite) return false;
+
+  const double minThreshold = -0.5;
+  const double maxThreshold = 2.0;
+
+  return minVal >= minThreshold && maxVal <= maxThreshold;
+}
+
 Float32List _remapLiteFlat3D(Float32List src, {required int widthPx, required int heightPx}) {
   final int srcPoints = src.length ~/ 3;
   final bool alreadyMediaPipe = srcPoints == _kMediaPipeLandmarkCount;
@@ -76,11 +135,14 @@ Float32List _remapLiteFlat3D(Float32List src, {required int widthPx, required in
       ? srcPoints
       : math.min(srcPoints, _kMediaPipeLandmarkCount);
 
+  final bool normalizedPose = _isPoseNormalized(src, stride: 3);
+  final double width = widthPx.toDouble();
+  final double height = heightPx.toDouble();
+
   for (var i = 0; i < limit; i++) {
     final double x = src[i * 3];
     final double y = src[i * 3 + 1];
     final double z = src[i * 3 + 2];
-    final bool normalized = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
 
     final int mpIndex = alreadyMediaPipe
         ? i
@@ -89,8 +151,8 @@ Float32List _remapLiteFlat3D(Float32List src, {required int widthPx, required in
             : i);
     if (mpIndex >= _kMediaPipeLandmarkCount) continue;
     final int dst = mpIndex * 3;
-    out[dst] = normalized ? (x * widthPx) : x;
-    out[dst + 1] = normalized ? (y * heightPx) : y;
+    out[dst] = normalizedPose ? (x * width) : x;
+    out[dst + 1] = normalizedPose ? (y * height) : y;
     out[dst + 2] = z;
   }
 
@@ -920,21 +982,34 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       // --- 1) Escalar poses si vienen normalizadas [0..1] ---
       if (raw.posesPx != null && raw.posesPx!.isNotEmpty) {
-        final isNormalized = raw.posesPx!.every(
-          (pose) => pose.every(
-            (p) => p.dx >= 0 && p.dx <= 1.2 && p.dy >= 0 && p.dy <= 1.2,
-          ),
-        );
+        final double width = w.toDouble();
+        final double height = h.toDouble();
 
-        if (isNormalized) {
-          final scaled = raw.posesPx!
-              .map((pose) => pose
-                  .map((p) => Offset(p.dx * w, p.dy * h))
-                  .toList(growable: false))
-              .toList(growable: false);
+        final List<List<Offset>> scaled = <List<Offset>>[];
+        var anyScaled = false;
+        for (final pose in raw.posesPx!) {
+          final bool normalizedPose = _isOffsetPoseNormalized(pose);
+          if (normalizedPose) anyScaled = true;
+          if (!normalizedPose) {
+            scaled.add(pose);
+            continue;
+          }
 
+          scaled.add(
+            List<Offset>.generate(
+              pose.length,
+              (i) {
+                final Offset p = pose[i];
+                return Offset(p.dx * width, p.dy * height);
+              },
+              growable: false,
+            ),
+          );
+        }
+
+        if (anyScaled) {
           out = PoseFrame(
-            imageSize: Size(w.toDouble(), h.toDouble()),
+            imageSize: Size(width, height),
             posesPx: scaled,
           );
         } else if (raw.imageSize.width <= 4 || raw.imageSize.height <= 4) {
@@ -957,9 +1032,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
             final double x = (pt['x'] as num).toDouble();
             final double y = (pt['y'] as num).toDouble();
-            final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-            f[i * 2] = nrm ? (x * w) : x;
-            f[i * 2 + 1] = nrm ? (y * h) : y;
+            f[i * 2] = x;
+            f[i * 2 + 1] = y;
+          }
+
+          if (_isPoseNormalized(f, stride: 2)) {
+            final double width = w.toDouble();
+            final double height = h.toDouble();
+            for (var i = 0; i < lmk.length; i++) {
+              final int dst = i * 2;
+              f[dst] *= width;
+              f[dst + 1] *= height;
+            }
           }
           flat.add(f);
         }
