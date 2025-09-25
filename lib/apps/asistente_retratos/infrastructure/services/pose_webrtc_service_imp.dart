@@ -42,6 +42,59 @@ int _dcIdFromTask(String name, {int mod = 1024}) {
 Map<String, dynamic> _parseJson(String text) =>
     jsonDecode(text) as Map<String, dynamic>;
 
+bool _isFlatPoseNormalized(Float32List flat, {required int stride}) {
+  if (stride < 2 || flat.length < stride) return false;
+  for (var i = 0; i <= flat.length - stride; i += stride) {
+    final double x = flat[i];
+    final double y = flat[i + 1];
+    if (x < 0 || x > 1.2 || y < 0 || y > 1.2) {
+      return false;
+    }
+  }
+  return true;
+}
+
+Float32List _remapLiteFlat2D(Float32List src, int w, int h) {
+  final bool normalized = _isFlatPoseNormalized(src, stride: 2);
+  if (!normalized) {
+    final copy = Float32List(src.length);
+    copy.setAll(0, src);
+    return copy;
+  }
+  final out = Float32List(src.length);
+  for (var i = 0; i < src.length; i += 2) {
+    out[i] = src[i] * w;
+    out[i + 1] = src[i + 1] * h;
+  }
+  return out;
+}
+
+Float32List _remapLiteFlat3D(Float32List src, int w, int h) {
+  final bool normalized = _isFlatPoseNormalized(src, stride: 3);
+  if (!normalized) {
+    final copy = Float32List(src.length);
+    copy.setAll(0, src);
+    return copy;
+  }
+  final out = Float32List(src.length);
+  for (var i = 0; i < src.length; i += 3) {
+    out[i] = src[i] * w;
+    out[i + 1] = src[i + 1] * h;
+    out[i + 2] = src[i + 2];
+  }
+  return out;
+}
+
+Float32List _flat3Dto2D(Float32List src) {
+  final n = src.length ~/ 3;
+  final out = Float32List(n * 2);
+  for (var i = 0; i < n; i++) {
+    out[i * 2] = src[i * 3];
+    out[i * 2 + 1] = src[i * 3 + 1];
+  }
+  return out;
+}
+
 class PoseWebrtcServiceImp implements PoseCaptureService {
   PoseWebrtcServiceImp({
     required this.offerUri,
@@ -636,18 +689,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       // 2) Escala 3D a píxeles si venía normalizado, y úsalo en TODO
       final List<Float32List> poses3dPx = <Float32List>[];
       for (final f3 in poses3dIn) {
-        final n = f3.length ~/ 3;
-        final f3px = Float32List(f3.length);
-        for (var i = 0; i < n; i++) {
-          final double x = f3[i * 3];
-          final double y = f3[i * 3 + 1];
-          final double z = f3[i * 3 + 2];
-          final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-          f3px[i * 3]     = nrm ? (x * w) : x;
-          f3px[i * 3 + 1] = nrm ? (y * h) : y;
-          f3px[i * 3 + 2] = z;
-        }
-        poses3dPx.add(f3px);
+        poses3dPx.add(_remapLiteFlat3D(f3, w, h));
       }
 
       _lastW = w;
@@ -670,13 +712,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       // 4) Deriva 2D a partir del MISMO batch ya en píxeles (para overlay/frame)
       final List<Float32List> poses2d = <Float32List>[];
       for (final f3px in poses3dPx) {
-        final n = f3px.length ~/ 3;
-        final f2 = Float32List(n * 2);
-        for (var i = 0; i < n; i++) {
-          f2[i * 2]     = f3px[i * 3];
-          f2[i * 2 + 1] = f3px[i * 3 + 1];
-        }
-        poses2d.add(f2);
+        poses2d.add(_flat3Dto2D(f3px));
       }
 
       final frame = PoseFrame(
@@ -838,16 +874,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         final List<Float32List> flat = <Float32List>[];
         for (final face in faces) {
           final List<dynamic> lmk = face as List<dynamic>;
-          final f = Float32List(lmk.length * 2);
+          final raw = Float32List(lmk.length * 2);
           for (var i = 0; i < lmk.length; i++) {
             final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
-            final double x = (pt['x'] as num).toDouble();
-            final double y = (pt['y'] as num).toDouble();
-            final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-            f[i * 2] = nrm ? (x * w) : x;
-            f[i * 2 + 1] = nrm ? (y * h) : y;
+            raw[i * 2] = (pt['x'] as num).toDouble();
+            raw[i * 2 + 1] = (pt['y'] as num).toDouble();
           }
-          flat.add(f);
+          flat.add(_remapLiteFlat2D(raw, w, h));
         }
 
         _lastFaceFlat = flat;
@@ -879,29 +912,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
         for (final pose in posesJson) {
           final List<dynamic> lmk = pose as List<dynamic>;
-
-          final f2 = Float32List(lmk.length * 2);
           final f3 = Float32List(lmk.length * 3);
-
           for (var i = 0; i < lmk.length; i++) {
             final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
-            final double x = (pt['x'] as num).toDouble();
-            final double y = (pt['y'] as num).toDouble();
-            final double z = (pt['z'] as num?)?.toDouble() ?? 0.0;
-
-            final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-            final double X = nrm ? (x * w) : x;
-            final double Y = nrm ? (y * h) : y;
-
-            f2[i * 2] = X;
-            f2[i * 2 + 1] = Y;
-
-            f3[i * 3] = X;
-            f3[i * 3 + 1] = Y;
-            f3[i * 3 + 2] = z;
+            f3[i * 3] = (pt['x'] as num).toDouble();
+            f3[i * 3 + 1] = (pt['y'] as num).toDouble();
+            f3[i * 3 + 2] = (pt['z'] as num?)?.toDouble() ?? 0.0;
           }
-          flat2d.add(f2);
-          flat3d.add(f3);
+          final remapped3d = _remapLiteFlat3D(f3, w, h);
+          flat3d.add(remapped3d);
+          flat2d.add(_flat3Dto2D(remapped3d));
         }
 
         _lastPoseFlat3d = flat3d;
