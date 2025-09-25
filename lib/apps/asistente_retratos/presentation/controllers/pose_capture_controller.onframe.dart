@@ -572,6 +572,20 @@ extension _OnFrameLogicExt on PoseCaptureController {
       azHiNow += azExpandNow;
     }
 
+    // // ⬇️ DEBUG: azimut actual (HUD) + banda dinámica
+    // assert(() {
+    //   if (azDegHUD != null) {
+    //     debugPrint(
+    //       '[AZIMUT][HUD] now=${azDegHUD!.toStringAsFixed(1)}° '
+    //       '| band ${azLoNow.toStringAsFixed(1)}..${azHiNow.toStringAsFixed(1)} '
+    //       '| firstDone=${azimutGateNow.firstAttemptDone}',
+    //     );
+    //   } else {
+    //     debugPrint('[AZIMUT][HUD] sin 3D (poseLandmarks3D=null)');
+    //   }
+    //   return true;
+    // }());
+
     // ⬇️ progresos del anillo contextuales a la regla ACTUAL
     final bool doneNow = _isDone;
     final String? curId = doneNow ? null : _currentRule.id;
