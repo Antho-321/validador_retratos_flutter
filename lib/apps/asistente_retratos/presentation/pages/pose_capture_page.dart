@@ -111,23 +111,19 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       ),
                     ),
 
-                    //2) PosePainter
+                    // 2) Pose overlay optimizado (hold-last en State + repaint con Listenable)
                     if (widget.drawLandmarks)
                       Positioned.fill(
                         child: RepaintBoundary(
                           child: IgnorePointer(
-                            child: ValueListenableBuilder<LmkState>(
-                              valueListenable: svc.poseLandmarks, // ⬅️ LmkState con POSE
-                              builder: (_, lmk, __) => CustomPaint(
-                                painter: PosePainter.themed(
-                                context,
-                                lmk,
-                                mirror: ctl.mirror,
-                                srcSize: svc.latestFrame.value?.imageSize, // ⬅️ OK
-                              ),
-                                isComplex: true,
-                                willChange: true,
-                              ),
+                            child: PoseOverlayFast(
+                              listenable: svc.poseLandmarks,                 // ← ValueListenable<LmkState>
+                              mirror: ctl.mirror,
+                              srcSize: svc.latestFrame.value?.imageSize,     // mejor escalado
+                              fit: BoxFit.cover,
+                              showPoints: true,
+                              showBones: true,
+                              // skeletonColor: algún Color si quieres forzar uno
                             ),
                           ),
                         ),
