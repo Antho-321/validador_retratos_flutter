@@ -131,6 +131,9 @@ class SkeletonPainter extends CustomPainter {
 
   // Reusable buffer for edge pairs (A,B,A,B,...)
   final List<Offset> _linePts = <Offset>[];
+  final List<Offset> _pointPts = <Offset>[];
+
+  bool _isFiniteOffset(Offset o) => o.dx.isFinite && o.dy.isFinite;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -178,10 +181,18 @@ class SkeletonPainter extends CustomPainter {
       if (pose.isEmpty) continue;
 
       _linePts.clear();
+      if (drawPoints) {
+        _pointPts.clear();
+      }
       for (final e in kPoseConnections) {
         final a = e[0], b = e[1];
         if (a < pose.length && b < pose.length) {
-          _linePts..add(pose[a])..add(pose[b]);
+          final pa = pose[a];
+          final pb = pose[b];
+          if (!_isFiniteOffset(pa) || !_isFiniteOffset(pb)) {
+            continue;
+          }
+          _linePts..add(pa)..add(pb);
         }
       }
       if (_linePts.isNotEmpty) {
@@ -189,7 +200,14 @@ class SkeletonPainter extends CustomPainter {
       }
 
       if (drawPoints) {
-        canvas.drawPoints(ui.PointMode.points, pose, dot);
+        for (final pt in pose) {
+          if (_isFiniteOffset(pt)) {
+            _pointPts.add(pt);
+          }
+        }
+        if (_pointPts.isNotEmpty) {
+          canvas.drawPoints(ui.PointMode.points, _pointPts, dot);
+        }
       }
     }
 

@@ -257,20 +257,22 @@ class PoseBinaryParser {
       final ptsPx = <PosePoint>[];
 
       for (int k = 0; k < npts; k++) {
-        final xq = _u16le(b, i); i += 2;
-        final yq = _u16le(b, i); i += 2;
+        final rawXq = _u16le(b, i); i += 2;
+        final rawYq = _u16le(b, i); i += 2;
         int? zq;
         if (hasZ) {
           zq = _i16le(b, i); i += 2;
           zq = _clampZq(zq);
         }
 
-        final cxq = _clampQ(xq, wq);
-        final cyq = _clampQ(yq, hq);
+        final cxq = _clampQ(rawXq, wq);
+        final cyq = _clampQ(rawYq, hq);
+        final bool clampX = cxq != rawXq;
+        final bool clampY = cyq != rawYq;
         ptsQ.add(_PtQ(cxq, cyq, zq));
         ptsPx.add(PosePoint(
-          x: cxq / scale,
-          y: cyq / scale,
+          x: clampX ? double.nan : (cxq / scale),
+          y: clampY ? double.nan : (cyq / scale),
           z: zq != null ? (zq / zScale) : null,
         ));
       }
@@ -356,20 +358,22 @@ class PoseBinaryParser {
         final ptsPx = <PosePoint>[];
 
         for (int k = 0; k < npts; k++) {
-          final xq = _u16le(b, i); i += 2;
-          final yq = _u16le(b, i); i += 2;
+          final rawXq = _u16le(b, i); i += 2;
+          final rawYq = _u16le(b, i); i += 2;
           int? zq;
           if (hasZ) {
             zq = _i16le(b, i); i += 2;
             zq = _clampZq(zq);
           }
 
-          final cxq = _clampQ(xq, wq);
-          final cyq = _clampQ(yq, hq);
+          final cxq = _clampQ(rawXq, wq);
+          final cyq = _clampQ(rawYq, hq);
+          final bool clampX = cxq != rawXq;
+          final bool clampY = cyq != rawYq;
           ptsQ.add(_PtQ(cxq, cyq, zq));
           ptsPx.add(PosePoint(
-            x: cxq / scale,
-            y: cyq / scale,
+            x: clampX ? double.nan : (cxq / scale),
+            y: clampY ? double.nan : (cyq / scale),
             z: zq != null ? (zq / zScale) : null,
           ));
         }
@@ -442,13 +446,17 @@ class PoseBinaryParser {
             zq = _clampZq(prevZ + dz);
           }
         }
-        xq = _clampQ(xq, wq);
-        yq = _clampQ(yq, hq);
+        final int rawXq = xq;
+        final int rawYq = yq;
+        final cxq = _clampQ(rawXq, wq);
+        final cyq = _clampQ(rawYq, hq);
+        final bool clampX = cxq != rawXq;
+        final bool clampY = cyq != rawYq;
 
-        outQ.add(_PtQ(xq, yq, zq));
+        outQ.add(_PtQ(cxq, cyq, zq));
         outPx.add(PosePoint(
-          x: xq / scale,
-          y: yq / scale,
+          x: clampX ? double.nan : (cxq / scale),
+          y: clampY ? double.nan : (cyq / scale),
           z: (hasZ && zq != null) ? (zq / zScale) : null,
         ));
       }
@@ -510,13 +518,14 @@ class PoseBinaryParser {
       int w = 0;
 
       for (int k = 0; k < npts; k++) {
-        final xq = _u16le(b, i); i += 2;
-        final yq = _u16le(b, i); i += 2;
+        final rawXq = _u16le(b, i); i += 2;
+        final rawYq = _u16le(b, i); i += 2;
         int? zq; if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
-        final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
+        final int cxq = _clampQ(rawXq, wq), cyq = _clampQ(rawYq, hq);
+        final bool clampX = cxq != rawXq, clampY = cyq != rawYq;
         ptsQ.add(_PtQ(cxq, cyq, zq));
-        arr[w++] = cxq / scale;  // x
-        arr[w++] = cyq / scale;  // y
+        arr[w++] = clampX ? double.nan : (cxq / scale);  // x
+        arr[w++] = clampY ? double.nan : (cyq / scale);  // y
       }
       posesQ.add(ptsQ);
       out.add(arr);
@@ -568,12 +577,14 @@ class PoseBinaryParser {
         int w = 0;
 
         for (int k = 0; k < npts; k++) {
-          final xq = _u16le(b, i); i += 2;
-          final yq = _u16le(b, i); i += 2;
+          final rawXq = _u16le(b, i); i += 2;
+          final rawYq = _u16le(b, i); i += 2;
           int? zq; if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
-          final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
+          final int cxq = _clampQ(rawXq, wq), cyq = _clampQ(rawYq, hq);
+          final bool clampX = cxq != rawXq, clampY = cyq != rawYq;
           ptsQ.add(_PtQ(cxq, cyq, zq));
-          arr[w++] = cxq / scale; arr[w++] = cyq / scale;
+          arr[w++] = clampX ? double.nan : (cxq / scale);
+          arr[w++] = clampY ? double.nan : (cyq / scale);
         }
         posesQ.add(ptsQ);
         out.add(arr);
@@ -619,9 +630,12 @@ class PoseBinaryParser {
             final prevZ = zq ?? 0; zq = _clampZq(prevZ + dz);
           }
         }
-        xq = _clampQ(xq, wq); yq = _clampQ(yq, hq);
-        outQ.add(_PtQ(xq, yq, zq));
-        arr[w++] = xq / scale; arr[w++] = yq / scale;
+        final int rawXq = xq, rawYq = yq;
+        final int cxq = _clampQ(rawXq, wq), cyq = _clampQ(rawYq, hq);
+        final bool clampX = cxq != rawXq, clampY = cyq != rawYq;
+        outQ.add(_PtQ(cxq, cyq, zq));
+        arr[w++] = clampX ? double.nan : (cxq / scale);
+        arr[w++] = clampY ? double.nan : (cyq / scale);
       }
       posesQ.add(outQ);
       out.add(arr);

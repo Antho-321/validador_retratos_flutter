@@ -113,14 +113,22 @@ class _PoseOverlayPainter extends CustomPainter {
       for (final e in _edges) {
         final i0 = e[0] * 2, i1 = e[1] * 2;
         if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
-        final ax = mapX(p[i0]),     ay = mapY(p[i0 + 1]);
-        final bx = mapX(p[i1]),     by = mapY(p[i1 + 1]);
+        final double axRaw = p[i0], ayRaw = p[i0 + 1];
+        final double bxRaw = p[i1], byRaw = p[i1 + 1];
+        if (!axRaw.isFinite || !ayRaw.isFinite ||
+            !bxRaw.isFinite || !byRaw.isFinite) {
+          continue;
+        }
+        final ax = mapX(axRaw), ay = mapY(ayRaw);
+        final bx = mapX(bxRaw), by = mapY(byRaw);
         bones.moveTo(ax, ay);
         bones.lineTo(bx, by);
       }
       // Puntos
       for (int i = 0; i + 1 < p.length; i += 2) {
-        final cx = mapX(p[i]), cy = mapY(p[i + 1]);
+        final double cxRaw = p[i], cyRaw = p[i + 1];
+        if (!cxRaw.isFinite || !cyRaw.isFinite) continue;
+        final cx = mapX(cxRaw), cy = mapY(cyRaw);
         dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
       }
     }
@@ -356,15 +364,23 @@ class _PoseOverlayFastPainter extends CustomPainter {
         for (final e in _edges) {
           final i0 = e[0] * 2, i1 = e[1] * 2;
           if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
-          final ax = mapX(p[i0]),     ay = mapY(p[i0 + 1]);
-          final bx = mapX(p[i1]),     by = mapY(p[i1 + 1]);
+          final double axRaw = p[i0], ayRaw = p[i0 + 1];
+          final double bxRaw = p[i1], byRaw = p[i1 + 1];
+          if (!axRaw.isFinite || !ayRaw.isFinite ||
+              !bxRaw.isFinite || !byRaw.isFinite) {
+            continue;
+          }
+          final ax = mapX(axRaw), ay = mapY(ayRaw);
+          final bx = mapX(bxRaw), by = mapY(byRaw);
           bones.moveTo(ax, ay);
           bones.lineTo(bx, by);
         }
       }
       if (showPoints) {
         for (int i = 0; i + 1 < p.length; i += 2) {
-          final cx = mapX(p[i]), cy = mapY(p[i + 1]);
+          final double cxRaw = p[i], cyRaw = p[i + 1];
+          if (!cxRaw.isFinite || !cyRaw.isFinite) continue;
+          final cx = mapX(cxRaw), cy = mapY(cyRaw);
           dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
         }
       }

@@ -73,6 +73,10 @@ double? calcularAnguloHombros(
   if (puntosPose.length > maxIndex) {
     final izq = puntosPose[idxHombroIzq];
     final der = puntosPose[idxHombroDer];
+    if (!izq.dx.isFinite || !izq.dy.isFinite ||
+        !der.dx.isFinite || !der.dy.isFinite) {
+      return null;
+    }
     final dy = izq.dy - der.dy;
     final dx = izq.dx - der.dx;
     return math.atan2(dy, dx) * 180.0 / math.pi; // (-180..180]
@@ -98,6 +102,7 @@ double? estimateAzimutBiacromial3D({
   final double? rz = (rs.z as num?)?.toDouble();
   final double? lz = (ls.z as num?)?.toDouble();
   if (rx == null || lx == null || rz == null || lz == null) return null;
+  if (!rx.isFinite || !lx.isFinite || !rz.isFinite || !lz.isFinite) return null;
 
   final double dxPx = (rx - lx).abs();
   if (dxPx <= 1e-6) return 0.0;
