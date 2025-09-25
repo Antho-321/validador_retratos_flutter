@@ -5,13 +5,17 @@ import 'package:flutter/material.dart' show BuildContext, Theme;
 import '../../domain/model/lmk_state.dart';
 import '../styles/colors.dart';
 
-/// Conexiones del esqueleto (coinciden con PoseGeom.POSE_CONNECTIONS del servidor)
+/// Subconjunto “lite” de MediaPipe Pose (hombros–brazos y caderas–piernas).
+const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
+const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
+
 const List<List<int>> _POSE_EDGES = <List<int>>[
-  [0,1],[1,2],[2,3],[3,7],[0,4],[4,5],[5,6],[6,8],[9,10],
-  [11,12],[11,13],[13,15],[15,17],[15,19],[15,21],[17,19],
-  [12,14],[14,16],[16,18],[16,20],[16,22],[18,20],[11,23],
-  [12,24],[23,24],[23,25],[24,26],[25,27],[26,28],[27,29],
-  [28,30],[29,31],[30,32],[27,31],[28,32],
+  [LS, RS],
+  [LS, LE], [LE, LW],
+  [RS, RE], [RE, RW],
+  [LH, RH],
+  [LH, LK], [LK, LA],
+  [RH, RK], [RK, RA],
 ];
 
 /// Pintor optimizado SOLO para la ruta rápida (Float32List plano).
