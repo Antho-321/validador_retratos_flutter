@@ -215,8 +215,18 @@ class PosePainter extends CustomPainter {
           final a = e[0], b = e[1];
           if (a < count && b < count) {
             final i0 = a << 1, i1 = b << 1;
-            final ax = mapX(p[i0]);     final ay = mapY(p[i0 + 1]);
-            final bx = mapX(p[i1]);     final by = mapY(p[i1 + 1]);
+            final double axRaw = p[i0];
+            final double ayRaw = p[i0 + 1];
+            final double bxRaw = p[i1];
+            final double byRaw = p[i1 + 1];
+            if (!axRaw.isFinite || !ayRaw.isFinite ||
+                !bxRaw.isFinite || !byRaw.isFinite) {
+              continue;
+            }
+            final ax = mapX(axRaw);
+            final ay = mapY(ayRaw);
+            final bx = mapX(bxRaw);
+            final by = mapY(byRaw);
             bones.moveTo(ax, ay);
             bones.lineTo(bx, by);
           }
@@ -224,7 +234,10 @@ class PosePainter extends CustomPainter {
       }
       if (showPoints) {
         for (int i = 0; i + 1 < p.length; i += 2) {
-          final cx = mapX(p[i]); final cy = mapY(p[i + 1]);
+          final double xRaw = p[i];
+          final double yRaw = p[i + 1];
+          if (!xRaw.isFinite || !yRaw.isFinite) continue;
+          final cx = mapX(xRaw); final cy = mapY(yRaw);
           dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
         }
       }

@@ -2,9 +2,10 @@
 
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
+import 'dart:isolate';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
-import 'dart:isolate';
 
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -17,6 +18,100 @@ import '../webrtc/rtc_video_encoder.dart';
 import '../model/pose_point.dart';
 import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
+
+const int _kMediaPipeLandmarkCount = 33;
+const List<int> _kLiteToMediaPipeIndex = <int>[
+  11, // left shoulder
+  12, // right shoulder
+  13, // left elbow
+  14, // right elbow
+  15, // left wrist
+  16, // right wrist
+  23, // left hip
+  24, // right hip
+  25, // left knee
+  26, // right knee
+  27, // left ankle
+  28, // right ankle
+];
+
+Float32List _allocNaNList(int length) {
+  final out = Float32List(length);
+  for (var i = 0; i < length; i++) {
+    out[i] = double.nan;
+  }
+  return out;
+}
+
+Float32List _remapLiteFlat2D(Float32List src) {
+  final int srcPoints = src.length ~/ 2;
+  if (srcPoints == _kMediaPipeLandmarkCount) {
+    final out = Float32List(src.length);
+    out.setAll(0, src);
+    return out;
+  }
+
+  final out = _allocNaNList(_kMediaPipeLandmarkCount * 2);
+  final int limit = math.min(srcPoints, _kMediaPipeLandmarkCount);
+  for (var i = 0; i < limit; i++) {
+    final int mp = (i < _kLiteToMediaPipeIndex.length)
+        ? _kLiteToMediaPipeIndex[i]
+        : i;
+    if (mp >= _kMediaPipeLandmarkCount) continue;
+    final int dst = mp * 2;
+    out[dst] = src[i * 2];
+    out[dst + 1] = src[i * 2 + 1];
+  }
+  return out;
+}
+
+Float32List _remapLiteFlat3D(Float32List src, {required int widthPx, required int heightPx}) {
+  final int srcPoints = src.length ~/ 3;
+  final bool alreadyMediaPipe = srcPoints == _kMediaPipeLandmarkCount;
+  final Float32List out = alreadyMediaPipe
+      ? Float32List(src.length)
+      : _allocNaNList(_kMediaPipeLandmarkCount * 3);
+
+  final int limit = alreadyMediaPipe
+      ? srcPoints
+      : math.min(srcPoints, _kMediaPipeLandmarkCount);
+
+  for (var i = 0; i < limit; i++) {
+    final double x = src[i * 3];
+    final double y = src[i * 3 + 1];
+    final double z = src[i * 3 + 2];
+    final bool normalized = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
+
+    final int mpIndex = alreadyMediaPipe
+        ? i
+        : ((i < _kLiteToMediaPipeIndex.length)
+            ? _kLiteToMediaPipeIndex[i]
+            : i);
+    if (mpIndex >= _kMediaPipeLandmarkCount) continue;
+    final int dst = mpIndex * 3;
+    out[dst] = normalized ? (x * widthPx) : x;
+    out[dst + 1] = normalized ? (y * heightPx) : y;
+    out[dst + 2] = z;
+  }
+
+  return out;
+}
+
+Float32List _deriveFlat2DFrom3D(Float32List src3d) {
+  final int points = src3d.length ~/ 3;
+  final out = _allocNaNList(_kMediaPipeLandmarkCount * 2);
+  final int limit = math.min(points, _kMediaPipeLandmarkCount);
+  for (var i = 0; i < limit; i++) {
+    final int src = i * 3;
+    final int dst = i * 2;
+    final double x = src3d[src];
+    final double y = src3d[src + 1];
+    if (!x.isFinite || !y.isFinite) continue;
+    out[dst] = x;
+    out[dst + 1] = y;
+  }
+  return out;
+}
 
 Uint8List _pad8(String s) {
   final src = utf8.encode(s);
@@ -171,7 +266,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final n = f.length ~/ 3;
       return List<PosePoint>.generate(
         n,
-        (i) => PosePoint(x: f[i * 3], y: f[i * 3 + 1], z: f[i * 3 + 2]),
+        (i) {
+          final double x = f[i * 3];
+          final double y = f[i * 3 + 1];
+          final double z = f[i * 3 + 2];
+          return PosePoint(
+            x: x.isFinite ? x : double.nan,
+            y: y.isFinite ? y : double.nan,
+            z: z.isFinite ? z : null,
+          );
+        },
         growable: false,
       );
     }
@@ -181,7 +285,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final n = f.length ~/ 2;
       return List<PosePoint>.generate(
         n,
-        (i) => PosePoint(x: f[i * 2], y: f[i * 2 + 1], z: 0),
+        (i) {
+          final double x = f[i * 2];
+          final double y = f[i * 2 + 1];
+          return PosePoint(
+            x: x.isFinite ? x : double.nan,
+            y: y.isFinite ? y : double.nan,
+            z: 0,
+          );
+        },
         growable: false,
       );
     }
@@ -544,7 +656,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final n = f.length ~/ 2;
       out.add(List<PosePoint>.generate(
         n,
-        (i) => PosePoint(x: f[i * 2], y: f[i * 2 + 1], z: 0),
+        (i) {
+          final double x = f[i * 2];
+          final double y = f[i * 2 + 1];
+          return PosePoint(
+            x: x.isFinite ? x : double.nan,
+            y: y.isFinite ? y : double.nan,
+            z: 0,
+          );
+        },
         growable: false,
       ));
     }
@@ -557,7 +677,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final n = f.length ~/ 3;
       out.add(List<PosePoint>.generate(
         n,
-        (i) => PosePoint(x: f[i * 3], y: f[i * 3 + 1], z: f[i * 3 + 2]),
+        (i) {
+          final double x = f[i * 3];
+          final double y = f[i * 3 + 1];
+          final double z = f[i * 3 + 2];
+          return PosePoint(
+            x: x.isFinite ? x : double.nan,
+            y: y.isFinite ? y : double.nan,
+            z: z.isFinite ? z : null,
+          );
+        },
         growable: false,
       ));
     }
@@ -592,8 +721,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       final int? seq = msg['seq'] as int?;
       final bool kf = (msg['keyframe'] as bool?) ?? false;
-      final List<Float32List> poses2d =
+      final List<Float32List> poses2dRaw =
           (msg['poses2d'] as List).cast<Float32List>();
+      final List<Float32List> poses2d = poses2dRaw
+          .map(_remapLiteFlat2D)
+          .toList(growable: false);
 
       _lastW = w;
       _lastH = h;
@@ -634,21 +766,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           (msg['poses3d'] as List).cast<Float32List>();
 
       // 2) Escala 3D a píxeles si venía normalizado, y úsalo en TODO
-      final List<Float32List> poses3dPx = <Float32List>[];
-      for (final f3 in poses3dIn) {
-        final n = f3.length ~/ 3;
-        final f3px = Float32List(f3.length);
-        for (var i = 0; i < n; i++) {
-          final double x = f3[i * 3];
-          final double y = f3[i * 3 + 1];
-          final double z = f3[i * 3 + 2];
-          final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-          f3px[i * 3]     = nrm ? (x * w) : x;
-          f3px[i * 3 + 1] = nrm ? (y * h) : y;
-          f3px[i * 3 + 2] = z;
-        }
-        poses3dPx.add(f3px);
-      }
+      final List<Float32List> poses3dPx = poses3dIn
+          .map((f3) =>
+              _remapLiteFlat3D(f3, widthPx: w, heightPx: h))
+          .toList(growable: false);
 
       _lastW = w;
       _lastH = h;
@@ -668,16 +789,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       // }).toList(growable: false);
 
       // 4) Deriva 2D a partir del MISMO batch ya en píxeles (para overlay/frame)
-      final List<Float32List> poses2d = <Float32List>[];
-      for (final f3px in poses3dPx) {
-        final n = f3px.length ~/ 3;
-        final f2 = Float32List(n * 2);
-        for (var i = 0; i < n; i++) {
-          f2[i * 2]     = f3px[i * 3];
-          f2[i * 2 + 1] = f3px[i * 3 + 1];
-        }
-        poses2d.add(f2);
-      }
+      final List<Float32List> poses2d = poses3dPx
+          .map(_deriveFlat2DFrom3D)
+          .toList(growable: false);
 
       final frame = PoseFrame(
         imageSize: Size(w.toDouble(), h.toDouble()),
@@ -874,35 +988,30 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       // --- 2b) POSE (XYZ) opcional ---
       final posesJson = m['poses'] as List<dynamic>?;
       if (posesJson != null) {
-        final List<Float32List> flat2d = <Float32List>[];
-        final List<Float32List> flat3d = <Float32List>[];
+        final List<Float32List> raw3d = <Float32List>[];
 
         for (final pose in posesJson) {
           final List<dynamic> lmk = pose as List<dynamic>;
-
-          final f2 = Float32List(lmk.length * 2);
           final f3 = Float32List(lmk.length * 3);
-
           for (var i = 0; i < lmk.length; i++) {
             final Map<String, dynamic> pt = lmk[i] as Map<String, dynamic>;
             final double x = (pt['x'] as num).toDouble();
             final double y = (pt['y'] as num).toDouble();
             final double z = (pt['z'] as num?)?.toDouble() ?? 0.0;
-
-            final bool nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-            final double X = nrm ? (x * w) : x;
-            final double Y = nrm ? (y * h) : y;
-
-            f2[i * 2] = X;
-            f2[i * 2 + 1] = Y;
-
-            f3[i * 3] = X;
-            f3[i * 3 + 1] = Y;
+            f3[i * 3] = x;
+            f3[i * 3 + 1] = y;
             f3[i * 3 + 2] = z;
           }
-          flat2d.add(f2);
-          flat3d.add(f3);
+          raw3d.add(f3);
         }
+
+        final List<Float32List> flat3d = raw3d
+            .map((f3) =>
+                _remapLiteFlat3D(f3, widthPx: w, heightPx: h))
+            .toList(growable: false);
+        final List<Float32List> flat2d = flat3d
+            .map(_deriveFlat2DFrom3D)
+            .toList(growable: false);
 
         _lastPoseFlat3d = flat3d;
         // Alimentar legacy solo desde fast-path
