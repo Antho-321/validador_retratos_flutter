@@ -128,24 +128,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                           ),
                         ),
                       ),
-                    // 2b) Face landmarks (hold-last, sin parpadeo) — ÚNICA capa de puntos
+                    // 2b) Face landmarks (hold-last + repaint con Listenable)
                     if (widget.drawLandmarks)
                       Positioned.fill(
                         child: RepaintBoundary(
                           child: IgnorePointer(
-                            child: ValueListenableBuilder<LmkState>(
-                              valueListenable: svc.faceLandmarks,
-                              builder: (_, lmk, __) => CustomPaint(
-                                painter: FacePainter.themed(
-                                  context,
-                                  lmk,
-                                  mirror: ctl.mirror,
-                                  srcSize: svc.latestFrame.value?.imageSize,
-                                ),
-                                isComplex: true,
-                                willChange: true,
-                                // no 'size:' here — Stack/Positioned.fill provides constraints
-                              ),
+                            child: FaceOverlayFast(
+                              listenable: svc.faceLandmarks,                  // ← ValueListenable<LmkState>
+                              mirror: ctl.mirror,
+                              // landmarksColor: ...                           // si quieres forzar color
                             ),
                           ),
                         ),

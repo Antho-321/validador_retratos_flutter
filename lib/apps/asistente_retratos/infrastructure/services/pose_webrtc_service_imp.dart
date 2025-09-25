@@ -835,6 +835,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           lastFlat: _lastFaceFlat,
           lastSeq: _faceLmk.value.lastSeq + 1,
           lastTs: DateTime.now(),
+          imageSize: Size(w.toDouble(), h.toDouble()), // ← AÑADE ESTO
         );
       }
 
@@ -955,6 +956,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         lastFlat: lff,
         lastSeq: seq ?? _faceLmk.value.lastSeq,
         lastTs: DateTime.now(),
+        imageSize: frame.imageSize, // ← AÑADE ESTO
       );
     }
 
