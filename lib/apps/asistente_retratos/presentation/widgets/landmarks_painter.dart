@@ -45,6 +45,9 @@ class LandmarksPainter extends CustomPainter {
           ..color = color ?? const Color(0xFFFFFFFF),
         super(repaint: service.overlayTick) {
     _ensurePoseCapacity();
+    // Preasignación de buffers de cara (kMaxFaces = 1)
+    _facePointBuf = Float32List(_maxFacePointFloats);
+    _faceCrossBuf = Float32List(_maxFaceCrossFloats);
   }
 
   // Fuente de datos
@@ -69,6 +72,12 @@ class LandmarksPainter extends CustomPainter {
   Float32List _poseLineBuf = Float32List(0);
   int _poseLineFloats = 0;
   int _lastPoseSeq = -1;
+
+  // Face (parámetros de tamaño máximo esperados)
+  static const int kFacePts = 468;
+  static const int kMaxFaces = 1;
+  late final int _maxFacePointFloats = kFacePts * kMaxFaces * 2; // x,y
+  late final int _maxFaceCrossFloats = kFacePts * kMaxFaces * 8; // 4 segs * 2
 
   // Face (cruces y puntos)
   Float32List _faceCrossBuf = Float32List(0);
