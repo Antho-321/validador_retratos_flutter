@@ -521,24 +521,49 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
     final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
 
-    final poses2d = (msg['poses'] as List?)?.cast<Float32List>() ??
-                    (msg['poses2d'] as List?)?.cast<Float32List>() ?? const <Float32List>[];
-
+    // ───── AFTER (support both old lists and new packed buffers) ─────
     _lastW = w; _lastH = h;
-    if (seq != null) _lastSeqPerTask[t] = seq;
+    if (seq != null) {
+      final last = _lastSeqPerTask[t];
+      if (last != null && !_isNewer16(seq, last)) return; // drop stale PDs
+      _lastSeqPerTask[t] = seq;
+    }
 
-    if (t == 'face') {
-      _publishFaceLmk(w, h, poses2d, seq: seq);
+    final Float32List? positions = msg['positions'] as Float32List?;
+    final Int32List? ranges = msg['ranges'] as Int32List?;
+    final bool hasZ = (msg['hasZ'] as bool?) ?? false;
+    final Float32List? zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
+
+    List<Float32List> poses2d;
+    if (positions != null && ranges != null) {
+      // build zero-copy views from packed buffers
+      poses2d = <Float32List>[];
+      for (int i = 0; i < ranges.length; i += 2) {
+        final startPt = ranges[i];        // in points
+        final countPt = ranges[i + 1];    // in points
+        final startF = startPt * 2;       // floats index
+        final endF = startF + countPt * 2;
+        poses2d.add(Float32List.sublistView(positions, startF, endF));
+      }
+      // (opcional) si mantienes cache 3D, adapta mkPose3D a Z empaquetado
       _lastPosesPerTask[t] = mkPose3D(poses2d, null);
     } else {
-      final hasZ = (msg['hasZ'] as bool?) ?? false;
-      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
-      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
+      // legacy path from isolate
+      poses2d = (msg['poses'] as List?)?.cast<Float32List>() ??
+                (msg['poses2d'] as List?)?.cast<Float32List>() ??
+                const <Float32List>[];
+      if (t == 'face') {
+        _publishFaceLmk(w, h, poses2d, seq: seq);
+        _lastPosesPerTask[t] = mkPose3D(poses2d, null);
+      } else {
+        final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
+        _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
+      }
     }
 
     if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
 
-    final frame = PoseFrame(imageSize: _szWH(w, h), posesPxFlat: poses2d);
+    final frame = PoseFrame(imageSize: _szWHCached(w, h), posesPxFlat: poses2d);
     _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
   }
 
@@ -839,7 +864,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         final p = pose[i];
         f[i * 2] = p.x;
         f[i * 2 + 1] = p.y;
-        }
+      }
       return f;
     }).toList(growable: false);
 
