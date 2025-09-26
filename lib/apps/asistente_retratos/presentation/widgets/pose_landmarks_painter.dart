@@ -1,8 +1,10 @@
 // lib/apps/asistente_retratos/presentation/widgets/pose_landmarks_painter.dart
 import 'dart:typed_data' show Float32List;
+import 'dart:ui' as ui show PointMode; // ← for ui.PointMode
 import 'package:flutter/widgets.dart';
 import 'package:flutter/material.dart' show BuildContext, Theme;
 import 'package:flutter/foundation.dart' show ValueListenable;
+
 import '../../domain/model/lmk_state.dart';
 import '../styles/colors.dart';
 
@@ -19,19 +21,17 @@ const List<List<int>> _POSE_EDGES = <List<int>>[
   [RH, RK], [RK, RA],
 ];
 
-/// ─────────────────────────────────────────────────────────────────────────
-/// Overlay con hold-last en el State y hints al engine.
-/// Se engancha al ValueListenable<LmkState> que trae datos de pose.
-class PoseOverlayFast extends StatefulWidget {
+/// Overlay de pose que NO hace rebuild por frame; el painter escucha cambios.
+class PoseOverlayFast extends StatelessWidget {
   const PoseOverlayFast({
     super.key,
-    required this.listenable,        // p.ej. poseService.poseLandmarks
+    required this.listenable,
     this.mirror = false,
-    this.srcSize,                    // si lo conoces: tamaño frame origen
+    this.srcSize,
     this.fit = BoxFit.cover,
     this.showPoints = true,
     this.showBones = true,
-    this.skeletonColor,              // si null, toma de Theme/AppColors
+    this.skeletonColor,
   });
 
   final ValueListenable<LmkState> listenable;
@@ -43,231 +43,244 @@ class PoseOverlayFast extends StatefulWidget {
   final Color? skeletonColor;
 
   @override
-  State<PoseOverlayFast> createState() => _PoseOverlayFastState();
-}
-
-class _PoseOverlayFastState extends State<PoseOverlayFast> {
-  // Snapshot que realmente pintaremos (con hold-last ya aplicado).
-  late LmkState _toPaint;
-
-  // Parámetros del hold-last
-  List<Float32List>? _holdFlat;
-  Size? _holdImgSize; // ← mantener tamaño de imagen del frame
-  DateTime _holdTs = DateTime.fromMillisecondsSinceEpoch(0);
-
-  bool get _holdFresh =>
-      DateTime.now().difference(_holdTs) < const Duration(milliseconds: 400);
-
-  void _onData() {
-    final v = widget.listenable.value;
-
-    // Si llega data válida y fresca, refrescamos el hold
-    if (v.lastFlat != null && v.lastFlat!.isNotEmpty && v.isFresh) {
-      _holdFlat = v.lastFlat;
-      _holdTs   = v.lastTs ?? _holdTs;                 // evitar null
-      _holdImgSize = v.imageSize ?? _holdImgSize;      // guardar imageSize
-    }
-
-    // Construimos el snapshot a pintar: actual o hold-last
-    final flats = (v.lastFlat != null && v.lastFlat!.isNotEmpty && v.isFresh)
-        ? v.lastFlat
-        : (_holdFresh ? _holdFlat : null);
-
-    _toPaint = LmkState(
-      last: null,
-      lastFlat: flats,
-      imageSize: (v.imageSize ?? _holdImgSize),        // ← pasar imageSize
-      lastSeq: v.lastSeq,
-      lastTs:  _holdFresh ? _holdTs : (v.lastTs ?? _holdTs),
-    );
-
-    // Necesitamos rebuild para pasar el nuevo snapshot al painter
-    setState(() {});
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _toPaint = widget.listenable.value;
-
-    // Iniciar hold si ya hay algo
-    if (_toPaint.lastFlat != null && _toPaint.lastFlat!.isNotEmpty) {
-      _holdFlat = _toPaint.lastFlat;
-      _holdTs   = _toPaint.lastTs ?? _holdTs;
-      _holdImgSize = _toPaint.imageSize;               // inicializa si ya vino
-    }
-
-    widget.listenable.addListener(_onData);
-  }
-
-  @override
-  void didUpdateWidget(covariant PoseOverlayFast oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (!identical(oldWidget.listenable, widget.listenable)) {
-      oldWidget.listenable.removeListener(_onData);
-      widget.listenable.addListener(_onData);
-      _onData();
-    }
-  }
-
-  @override
-  void dispose() {
-    widget.listenable.removeListener(_onData);
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
     final cap = Theme.of(context).extension<CaptureTheme>();
-    final color = widget.skeletonColor ?? cap?.landmarks ?? AppColors.landmarks;
+    final color = skeletonColor ?? cap?.landmarks ?? AppColors.landmarks;
 
-    return CustomPaint(
-      isComplex: true,     // hint: paths complejos
-      willChange: true,    // hint: cambia con frecuencia
-      painter: PosePainter(
-        _toPaint,
-        mirror: widget.mirror,
-        srcSize: widget.srcSize,
-        fit: widget.fit,
-        showPoints: widget.showPoints,
-        showBones: widget.showBones,
-        skeletonColor: color,
-        // repintar cuando el listenable cambie
-        repaint: widget.listenable,
+    return RepaintBoundary(
+      child: CustomPaint(
+        painter: _PosePainterFast(
+          listenable: listenable,
+          mirror: mirror,
+          srcSize: srcSize,
+          fit: fit,
+          showPoints: showPoints,
+          showBones: showBones,
+          color: color,
+        ),
       ),
     );
   }
 }
 
-/// ─────────────────────────────────────────────────────────────────────────
-/// Pintor optimizado SOLO para la ruta rápida (Float32List plano).
-/// Sin hold-last (ahora vive en el State). Repinta vía `repaint`.
-class PosePainter extends CustomPainter {
-  PosePainter(
-    this.lmk, {
-    this.mirror = false,
-    this.srcSize,
-    this.fit = BoxFit.cover,
-    this.showPoints = true,
-    this.showBones = true,
-    this.skeletonColor = AppColors.landmarks,
-    Listenable? repaint,
-  }) : super(repaint: repaint);
+/// Painter optimizado: hold-last interno, buffers reutilizables y drawRawPoints.
+class _PosePainterFast extends CustomPainter {
+  _PosePainterFast({
+    required this.listenable,
+    required this.mirror,
+    required this.srcSize,
+    required this.fit,
+    required this.showPoints,
+    required this.showBones,
+    required this.color,
+  })  : _bonePaint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..isAntiAlias = false
+          ..color = color,
+        _ptPaint = Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..isAntiAlias = false
+          ..color = color,
+        super(repaint: listenable);
 
-  final LmkState lmk;            // Debe traer pose en lmk.lastFlat (px)
+  final ValueListenable<LmkState> listenable;
   final bool mirror;
-  final Size? srcSize;           // Tamaño del frame (w,h) de origen
+  final Size? srcSize;
   final BoxFit fit;
   final bool showPoints;
   final bool showBones;
-  final Color skeletonColor;
+  final Color color;
+
+  final Paint _bonePaint;
+  final Paint _ptPaint;
+
+  // ── Hold-last cache ─────────────────────────────────────────────────────
+  List<Float32List>? _holdFlat;
+  Size? _holdImgSize;
+  DateTime _holdTs = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _freshWindow = Duration(milliseconds: 400);
+
+  // ── Buffers reutilizables ───────────────────────────────────────────────
+  Float32List _lineBuf = Float32List(0);
+  int _lineFloatCount = 0;
+
+  Float32List _ptBuf = Float32List(0);
+  int _ptFloatCount = 0;
+
+  // Cache de transformaciones
+  Size? _lastCanvasSize;
+  Size? _lastImgSize;
+  bool? _lastMirror;
+  BoxFit? _lastFit;
+  double _scale = 1.0, _offX = 0.0, _offY = 0.0;
 
   @override
-  void paint(Canvas canvas, Size size) {
-    final flats = lmk.lastFlat;
+  void paint(Canvas c, Size size) {
+    final v = listenable.value;
+    final now = DateTime.now();
+
+    // Actualiza hold-last si hay datos frescos válidos
+    if (v.lastFlat != null && v.lastFlat!.isNotEmpty && v.isFresh) {
+      _holdFlat = v.lastFlat;
+      _holdImgSize = v.imageSize ?? _holdImgSize;
+      _holdTs = v.lastTs ?? _holdTs; // ← nullable-safe
+    }
+
+    // Selección de datos (nuevo vs hold-last)
+    final bool holdFresh = now.difference(_holdTs) < _freshWindow;
+    final List<Float32List>? flats = (v.lastFlat != null &&
+            v.lastFlat!.isNotEmpty &&
+            v.isFresh)
+        ? v.lastFlat
+        : (holdFresh ? _holdFlat : null);
+
     if (flats == null || flats.isEmpty) return;
 
-    // Usa el tamaño fuente del State si está, luego srcSize, y por último el lienzo.
-    final Size imgSize = srcSize ?? lmk.imageSize ?? size; // ← clave para evitar corrimientos
+    // Tamaño fuente
+    final Size imgSize = srcSize ?? v.imageSize ?? _holdImgSize ?? size;
     if (imgSize.width <= 0 || imgSize.height <= 0) return;
 
-    final fw = imgSize.width.toDouble();
-    final fh = imgSize.height.toDouble();
+    // Transform
+    if (_lastCanvasSize != size ||
+        _lastImgSize != imgSize ||
+        _lastMirror != mirror ||
+        _lastFit != fit) {
+      final sw = imgSize.width, sh = imgSize.height;
+      final scaleW = size.width / sw;
+      final scaleH = size.height / sh;
+      _scale = (fit == BoxFit.cover)
+          ? ((scaleW > scaleH) ? scaleW : scaleH)
+          : ((scaleW < scaleH) ? scaleW : scaleH);
+      _offX = (size.width - sw * _scale) / 2.0;
+      _offY = (size.height - sh * _scale) / 2.0;
 
-    // Escalado tipo BoxFit
-    final scaleW = size.width / fw;
-    final scaleH = size.height / fh;
-    final s = (fit == BoxFit.cover)
-        ? (scaleW > scaleH ? scaleW : scaleH)
-        : (scaleW < scaleH ? scaleW : scaleH);
-
-    final drawW = fw * s;
-    final drawH = fh * s;
-    final offX = (size.width - drawW) / 2.0;
-    final offY = (size.height - drawH) / 2.0;
-
-    final Paint bonePaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
-      ..strokeCap = StrokeCap.round
-      ..isAntiAlias = false
-      ..color = skeletonColor;
-
-    final Paint ptsPaint = Paint()
-      ..style = PaintingStyle.fill
-      ..isAntiAlias = false
-      ..color = skeletonColor;
-
-    double mapX(double x) {
-      final local = x * s + offX;
-      return mirror ? (size.width - local) : local;
+      _lastCanvasSize = size;
+      _lastImgSize = imgSize;
+      _lastMirror = mirror;
+      _lastFit = fit;
     }
-    double mapY(double y) => y * s + offY;
 
-    final Path bones = Path();
-    final Path dots = Path();
-    const double r = 2.5;
+    _bonePaint
+      ..color = color
+      ..strokeWidth = 2.0 / _scale;
+    _ptPaint
+      ..color = color
+      ..strokeWidth = 5.0 / _scale; // diámetro ~5 px
 
-    for (final Float32List p in flats) {
-      if (showBones) {
+    c.save();
+    c.translate(_offX, _offY);
+    if (mirror) {
+      c.translate(imgSize.width * _scale, 0);
+      c.scale(-_scale, _scale);
+    } else {
+      c.scale(_scale, _scale);
+    }
+
+    // ── LÍNEAS (huesos) ───────────────────────────────────────────────────
+    if (showBones) {
+      int segments = 0;
+      for (final p in flats) {
+        final count = p.length >> 1;
+        for (final e in _POSE_EDGES) {
+          if (e[0] < count && e[1] < count) segments++;
+        }
+      }
+      final neededLineFloats = segments * 4; // (x0,y0,x1,y1)
+      if (_lineBuf.length < neededLineFloats) {
+        _lineBuf = Float32List(neededLineFloats);
+      }
+
+      int k = 0;
+      for (final p in flats) {
         final count = p.length >> 1;
         for (final e in _POSE_EDGES) {
           final a = e[0], b = e[1];
           if (a < count && b < count) {
             final i0 = a << 1, i1 = b << 1;
-            final ax = mapX(p[i0]);     final ay = mapY(p[i0 + 1]);
-            final bx = mapX(p[i1]);     final by = mapY(p[i1 + 1]);
-            bones.moveTo(ax, ay);
-            bones.lineTo(bx, by);
+            _lineBuf[k++] = p[i0];
+            _lineBuf[k++] = p[i0 + 1];
+            _lineBuf[k++] = p[i1];
+            _lineBuf[k++] = p[i1 + 1];
           }
         }
       }
-      if (showPoints) {
-        for (int i = 0; i + 1 < p.length; i += 2) {
-          final cx = mapX(p[i]); final cy = mapY(p[i + 1]);
-          dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-        }
+      _lineFloatCount = k;
+
+      if (_lineFloatCount > 0) {
+        final linesToDraw = (_lineBuf.length == _lineFloatCount)
+            ? _lineBuf
+            : Float32List.view(_lineBuf.buffer, 0, _lineFloatCount);
+        c.drawRawPoints(ui.PointMode.lines, linesToDraw, _bonePaint);
       }
+    } else {
+      _lineFloatCount = 0;
     }
 
-    if (showBones) canvas.drawPath(bones, bonePaint);
-    if (showPoints) canvas.drawPath(dots, ptsPaint);
+    // ── PUNTOS (articulaciones) ───────────────────────────────────────────
+    if (showPoints) {
+      int totalPts = 0;
+      for (final p in flats) {
+        totalPts += (p.length >> 1);
+      }
+      final neededPtFloats = totalPts * 2; // (x,y)
+      if (_ptBuf.length < neededPtFloats) {
+        _ptBuf = Float32List(neededPtFloats);
+      }
+
+      int k = 0;
+      for (final p in flats) {
+        for (int i = 0; i + 1 < p.length; i += 2) {
+          _ptBuf[k++] = p[i];
+          _ptBuf[k++] = p[i + 1];
+        }
+      }
+      _ptFloatCount = k;
+
+      if (_ptFloatCount > 0) {
+        final ptsToDraw = (_ptBuf.length == _ptFloatCount)
+            ? _ptBuf
+            : Float32List.view(_ptBuf.buffer, 0, _ptFloatCount);
+        c.drawRawPoints(ui.PointMode.points, ptsToDraw, _ptPaint);
+      }
+    } else {
+      _ptFloatCount = 0;
+    }
+
+    c.restore();
   }
 
   @override
-  bool shouldRepaint(covariant PosePainter old) {
-    // El repintado por datos lo gestiona `repaint` (Listenable).
-    // Aquí solo repintamos por cambios de configuración/estilo.
+  bool shouldRepaint(covariant _PosePainterFast old) {
     return old.mirror != mirror ||
-        old.skeletonColor != skeletonColor ||
+        old.color != color ||
         old.srcSize != srcSize ||
         old.fit != fit ||
         old.showPoints != showPoints ||
-        old.showBones != showBones;
+        old.showBones != showBones ||
+        !identical(old.listenable, listenable);
   }
 
-  /// Variante “temable” (opcional).
-  static PosePainter themed(
-    BuildContext context,
-    LmkState lmk, {
+  static _PosePainterFast themed(
+    BuildContext context, {
+    required ValueListenable<LmkState> listenable,
     bool mirror = false,
     Size? srcSize,
     BoxFit fit = BoxFit.cover,
     bool showPoints = true,
     bool showBones = true,
-    Listenable? repaint,
   }) {
     final cap = Theme.of(context).extension<CaptureTheme>();
     final color = cap?.landmarks ?? AppColors.landmarks;
-    return PosePainter(
-      lmk,
+    return _PosePainterFast(
+      listenable: listenable,
       mirror: mirror,
       srcSize: srcSize,
       fit: fit,
       showPoints: showPoints,
       showBones: showBones,
-      skeletonColor: color,
-      repaint: repaint,
+      color: color,
     );
   }
 }
