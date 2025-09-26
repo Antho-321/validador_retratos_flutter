@@ -193,17 +193,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   DateTime _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
-  void _log(Object? message) {
-    // No-op: logs removed
-  }
-
   String _forceTurnUdp(String url) {
     return url.contains('?') ? url : '$url?transport=udp';
   }
 
   @override
   Future<void> init() async {
-    _log('[client] init()');
     await _localRenderer.initialize();
     await _remoteRenderer.initialize();
 
@@ -397,7 +392,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     );
 
     final ansSdp = (ansMap['sdp'] as String?) ?? '';
-    _dumpSdp('remote-answer', ansSdp);
 
     _startRtpStatsProbe();
     _startNoResultsGuard();
@@ -1024,12 +1018,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     c.send(RTCDataChannelMessage.fromBinary(_ackBuf));
   }
 
-  void _dumpSdp(String tag, String? sdp) {
-    // No-op: logs removed
-  }
-
   void _startRtpStatsProbe() {
-    // No-op: logs removed
     _rtpStatsTimer?.cancel();
   }
 
