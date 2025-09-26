@@ -215,8 +215,15 @@ class PosePainter extends CustomPainter {
           final a = e[0], b = e[1];
           if (a < count && b < count) {
             final i0 = a << 1, i1 = b << 1;
-            final ax = mapX(p[i0]);     final ay = mapY(p[i0 + 1]);
-            final bx = mapX(p[i1]);     final by = mapY(p[i1 + 1]);
+            final axRaw = p[i0];
+            final ayRaw = p[i0 + 1];
+            final bxRaw = p[i1];
+            final byRaw = p[i1 + 1];
+            if (!_isFinitePair(axRaw, ayRaw) || !_isFinitePair(bxRaw, byRaw)) {
+              continue;
+            }
+            final ax = mapX(axRaw);     final ay = mapY(ayRaw);
+            final bx = mapX(bxRaw);     final by = mapY(byRaw);
             bones.moveTo(ax, ay);
             bones.lineTo(bx, by);
           }
@@ -224,7 +231,12 @@ class PosePainter extends CustomPainter {
       }
       if (showPoints) {
         for (int i = 0; i + 1 < p.length; i += 2) {
-          final cx = mapX(p[i]); final cy = mapY(p[i + 1]);
+          final cxRaw = p[i];
+          final cyRaw = p[i + 1];
+          if (!_isFinitePair(cxRaw, cyRaw)) {
+            continue;
+          }
+          final cx = mapX(cxRaw); final cy = mapY(cyRaw);
           dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
         }
       }
@@ -245,6 +257,8 @@ class PosePainter extends CustomPainter {
         old.showPoints != showPoints ||
         old.showBones != showBones;
   }
+
+  static bool _isFinitePair(double x, double y) => x.isFinite && y.isFinite;
 
   /// Variante “temable” (opcional).
   static PosePainter themed(
