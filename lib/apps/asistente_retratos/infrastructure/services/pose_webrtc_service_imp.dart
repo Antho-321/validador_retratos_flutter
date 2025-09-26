@@ -105,6 +105,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   RTCDataChannel? _dc;
   RTCDataChannel? _ctrl;
   final Map<String, RTCDataChannel> _resultsPerTask = {};
+  final Map<String, Timer?> _emitGateByTask = {};
+  final Map<String, PoseFrame?> _pendingFrameByTask = {};
+  final Map<String, DateTime> _lastEmitByTask = {};
+
+  int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
   MediaStream? _localStream;
   @override
@@ -653,7 +658,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       // Si el parser pidió KF, notifícalo (además del emit normal)
       if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
 
-      _emitBinaryThrottled(frame, kind: emitKind, seq: seq);
+      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t); // t = 'pose' | 'face'
       return;
     }
 
@@ -698,7 +703,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         imageSize: Size(w.toDouble(), h.toDouble()),
         posesPxFlat: poses2d,
       );
-      _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
+      _emitBinaryThrottled(
+        frame,
+        kind: kf ? 'PD(KF)' : 'PD',
+        seq: seq,
+        task: t,          // ← importante
+      );
       return;
     }
 
@@ -918,7 +928,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       // --- 3) Emitir TODO por el mismo throttle que la ruta binaria ---
       final int? seqFromJson = m['seq'] as int?;
-      _emitBinaryThrottled(out, kind: 'JSON', seq: seqFromJson);
+      _emitBinaryThrottled(out, kind: 'JSON', seq: seqFromJson, task: 'pose');
 
     } catch (e) {
       _log('[client] JSON pose parse error: $e -> requesting KF');
@@ -997,74 +1007,70 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     PoseFrame frame, {
     required String kind,
     int? seq,
+    required String task,        // ← nuevo
   }) {
     if (_disposed) return;
 
     final now = DateTime.now();
-    final elapsed = now.difference(_lastEmit).inMilliseconds;
+    final last = _lastEmitByTask[task] ?? DateTime.fromMillisecondsSinceEpoch(0);
+    final elapsed = now.difference(last).inMilliseconds;
+    final minInterval = _minEmitIntervalMsFor(task);
 
-    if (elapsed >= _minEmitIntervalMs && _emitGate == null) {
-      _lastEmit = now;
-      _doEmit(frame, kind: kind, seq: seq);
+    if (_emitGateByTask[task] == null && elapsed >= minInterval) {
+      _lastEmitByTask[task] = now;
+      _doEmit(frame, kind: kind, seq: seq, task: task);   // ← pasa task
       return;
     }
 
-    final waitMs = (_minEmitIntervalMs - elapsed) > 0 ? (_minEmitIntervalMs - elapsed) : 0;
-    _pendingFrame = frame;
-    _emitGate ??= Timer(Duration(milliseconds: waitMs), () {
-      _emitGate = null;
-      final f = _pendingFrame;
-      _pendingFrame = null;
+    final waitMs = (minInterval - elapsed).clamp(0, 1000);
+    _pendingFrameByTask[task] = frame;
+
+    _emitGateByTask[task] ??= Timer(Duration(milliseconds: waitMs), () {
+      _emitGateByTask[task] = null;
+      final f = _pendingFrameByTask[task];
+      _pendingFrameByTask[task] = null;
       if (f != null && !_disposed) {
-        _lastEmit = DateTime.now();
-        _doEmit(f, kind: kind, seq: seq);
+        _lastEmitByTask[task] = DateTime.now();
+        _doEmit(f, kind: kind, seq: seq, task: task);     // ← pasa task
       }
     });
   }
 
-  void _doEmit(PoseFrame frame, {required String kind, int? seq}) {
-    // Asegura pxFlat a partir de legacy si hace falta
+  void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
     List<Float32List>? pxFlat = frame.posesPxFlat;
     final pxLegacy = frame.posesPx;
-
     if ((pxFlat == null || pxFlat.isEmpty) && pxLegacy != null && pxLegacy.isNotEmpty) {
       pxFlat = pxLegacy.map((pose) {
         final f = Float32List(pose.length * 2);
-        for (var i = 0; i < pose.length; i++) {
-          f[i * 2] = pose[i].dx;
-          f[i * 2 + 1] = pose[i].dy;
-        }
+        for (var i = 0; i < pose.length; i++) { f[i*2] = pose[i].dx; f[i*2+1] = pose[i].dy; }
         return f;
       }).toList(growable: false);
     }
 
-    final count = pxFlat?.length ?? pxLegacy?.length ?? 0;
-    _log('[client] emit frame kind=$kind seq=${seq ?? '-'} poses=$count '
-        'size=${frame.imageSize.width.toInt()}x${frame.imageSize.height.toInt()}');
-
     _latestFrame.value = frame;
 
-    // --- FACE (ya existente) ---
-    final lf  = _lastFace2D;
-    final lff = _lastFaceFlat;
-    if (lf != null || lff != null) {
-      _faceLmk.value = LmkState(
-        last: lf,
-        lastFlat: lff,
-        lastFlatZ: null,                // ⬅️ asegúrate que sea null
-        lastSeq: seq ?? _faceLmk.value.lastSeq,
-        lastTs: DateTime.now(),
-        imageSize: frame.imageSize,
-      );
+    // FACE: solo cuando task == 'face'
+    if (task == 'face') {
+      final lf  = _lastFace2D;
+      final lff = _lastFaceFlat;
+      if (lf != null || lff != null) {
+        _faceLmk.value = LmkState(
+          last: lf,
+          lastFlat: lff,
+          lastFlatZ: null,
+          lastSeq: seq ?? _faceLmk.value.lastSeq,
+          lastTs: DateTime.now(),
+          imageSize: frame.imageSize,
+        );
+      }
     }
 
-    // 2) POSE: si aquí no llega Z, reutiliza el último Z ya publicado
-    if (pxFlat != null && pxFlat.isNotEmpty) {
+    // POSE: solo cuando task == 'pose'
+    if (task == 'pose' && pxFlat != null && pxFlat.isNotEmpty) {
       final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
-      final zReuse = _poseLmk.value.lastFlatZ;   // ⬅️ preserva Z de pose
       _poseLmk.value = LmkState.fromFlat(
         pxFlat,
-        z: zReuse,                                // ⬅️ importante
+        z: _poseLmk.value.lastFlatZ, // reutiliza Z si la tienes
         lastSeq: nextSeq,
         imageSize: frame.imageSize,
       );
@@ -1106,13 +1112,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
                 .toList(growable: false);
       }
 
-      final fused = _lastPosesPerTask.values.expand((l) => l).toList(growable: false);
       _emitBinary(
         pkt.w,
         pkt.h,
-        fused,
+        pkt.poses,       // ← solo el set de la tarea actual
         kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
         seq: pkt.seq,
+        task: task,
       );
 
       if (task == _primaryTask && res.ackSeq != null) {
@@ -1134,6 +1140,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     List<List<PosePoint>> poses3d, {
     required String kind,
     int? seq,
+    required String task,
   }) {
     if (_disposed) return;
 
@@ -1147,7 +1154,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     );
 
     // Enviar por el mismo camino con control de FPS
-    _emitBinaryThrottled(frame, kind: kind, seq: seq);
+    _emitBinaryThrottled(frame, kind: kind, seq: seq, task: task);
   }
 
   void _sendCtrlKF() {
