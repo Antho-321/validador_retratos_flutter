@@ -124,7 +124,7 @@ class FacePainter extends CustomPainter {
   })  : _paint = Paint()
           ..color = landmarksColor
           ..style = PaintingStyle.stroke
-          ..isAntiAlias = true
+          ..isAntiAlias = false
           ..strokeCap = StrokeCap.round,
         super(repaint: repaint);
 
@@ -135,6 +135,9 @@ class FacePainter extends CustomPainter {
 
   // Reused paint (evita alloc por frame)
   final Paint _paint;
+
+  // Reused path (evita alloc por frame)
+  final Path _path = Path();
 
   static FacePainter themed(
     BuildContext context,
@@ -186,14 +189,14 @@ class FacePainter extends CustomPainter {
       ..strokeWidth = 4.0 / scale;
 
     // Cruces pequeñas por landmark (dos segmentos por punto)
-    final Path path = Path();
+    _path.reset();
     const double r = 2.0;
 
     for (final Float32List f in flats) {
       for (int i = 0; i + 1 < f.length; i += 2) {
         final double x = f[i];
         final double y = f[i + 1];
-        path
+        _path
           ..moveTo(x - r, y)
           ..lineTo(x + r, y)
           ..moveTo(x, y - r)
@@ -201,7 +204,7 @@ class FacePainter extends CustomPainter {
       }
     }
 
-    c.drawPath(path, _paint);
+    c.drawPath(_path, _paint);
     c.restore();
   }
 
