@@ -14,10 +14,12 @@ import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
 import '../model/pose_frame.dart' show PoseFrame, poseFrameFromMap;
 import '../webrtc/rtc_video_encoder.dart';
-import '../parsers/pose_binary_parser.dart';
+import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
 import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
+import '../parsers/pose_binary_parser.dart';
+import '../parsers/pose_utils.dart';
 
 // ======================= Helpers y extensiones compactas =======================
 
@@ -42,42 +44,6 @@ Size _szWH(int w, int h) => Size(w.toDouble(), h.toDouble());
 
 T? _silence<T>(T Function() f) { try { return f(); } catch (_) { return null; } }
 Future<void> _silenceAsync(Future<void> Function() f) async { try { await f(); } catch (_) {} }
-
-typedef F32 = Float32List;
-
-List<List<Offset>> _toOffsets2D(List<F32> flats) => flats
-    .map((f) => List<Offset>.generate(f.length >> 1, (i) => Offset(f[i << 1], f[(i << 1) + 1]), growable: false))
-    .toList(growable: false);
-
-List<F32> _faces2DFromJson(List<dynamic> faces, int w, int h) {
-  final out = <F32>[];
-  for (final face in faces) {
-    final lmk = face as List<dynamic>;
-    final f = F32(lmk.length * 2);
-    for (var i = 0; i < lmk.length; i++) {
-      final pt = lmk[i] as Map<String, dynamic>;
-      final x = (pt['x'] as num).toDouble();
-      final y = (pt['y'] as num).toDouble();
-      final nrm = (x >= 0 && x <= 1.2 && y >= 0 && y <= 1.2);
-      f[i << 1] = nrm ? (x * w) : x;
-      f[(i << 1) + 1] = nrm ? (y * h) : y;
-    }
-    out.add(f);
-  }
-  return out;
-}
-
-List<List<PosePoint>> _mkPose3D(List<F32> xy, List<F32>? z) {
-  final out = <List<PosePoint>>[];
-  for (var i = 0; i < xy.length; i++) {
-    final f = xy[i]; final n = f.length >> 1; final zf = (z != null && i < z.length) ? z[i] : null;
-    out.add(List<PosePoint>.generate(n, (j) => PosePoint(
-      x: f[j << 1], y: f[(j << 1) + 1],
-      z: (zf != null && j < zf.length) ? zf[j] : null
-    ), growable: false));
-  }
-  return out;
-}
 
 // ==============================================================================
 
@@ -369,11 +335,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     });
 
     var sdp = RtcVideoEncoder.mungeH264BitrateHints(offer.sdp!, kbps: maxBitrateKbps);
-    if (stripFecFromSdp) sdp = _stripVideoFec(sdp);
+    if (stripFecFromSdp) sdp = stripVideoFec(sdp);
     if (stripRtxAndNackFromSdp) {
-      sdp = _stripVideoRtxNackAndRemb(sdp, dropNack: true, dropRtx: true, keepTransportCcOnly: keepTransportCcOnly);
+      sdp = stripVideoRtxNackAndRemb(sdp, dropNack: true, dropRtx: true, keepTransportCcOnly: keepTransportCcOnly);
     }
-    sdp = _keepOnlyVideoCodecs(sdp, preferHevc ? const ['h265'] : const ['h264']);
+    sdp = keepOnlyVideoCodecs(sdp, preferHevc ? const ['h265'] : const ['h264']);
     offer = RTCSessionDescription(sdp, offer.type);
 
     await _pc!.setLocalDescription(offer);
@@ -520,9 +486,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return c.future;
   }
 
-  void _publishFaceLmk(int w, int h, List<F32> faces2d, {int? seq}) {
+  void _publishFaceLmk(int w, int h, List<Float32List> faces2d, {int? seq}) {
     _lastFaceFlat = faces2d;
-    _lastFace2D = _toOffsets2D(faces2d);
+    _lastFace2D = toOffsets2D(faces2d);
     _faceLmk.value = LmkState(
       last: _lastFace2D,
       lastFlat: _lastFaceFlat,
@@ -544,19 +510,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
     final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
 
-    final poses2d = (msg['poses'] as List?)?.cast<F32>() ??
-                    (msg['poses2d'] as List?)?.cast<F32>() ?? const <F32>[];
+    final poses2d = (msg['poses'] as List?)?.cast<Float32List>() ??
+                    (msg['poses2d'] as List?)?.cast<Float32List>() ?? const <Float32List>[];
 
     _lastW = w; _lastH = h;
     if (seq != null) _lastSeqPerTask[t] = seq;
 
     if (t == 'face') {
       _publishFaceLmk(w, h, poses2d, seq: seq);
-      _lastPosesPerTask[t] = _mkPose3D(poses2d, null);
+      _lastPosesPerTask[t] = mkPose3D(poses2d, null);
     } else {
       final hasZ = (msg['hasZ'] as bool?) ?? false;
-      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<F32>() : null;
-      _lastPosesPerTask[t] = _mkPose3D(poses2d, posesZ);
+      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
+      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
     }
 
     if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
@@ -678,7 +644,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       final faces = m['faces'] as List<dynamic>?;
       if (faces != null) {
-        final flats = _faces2DFromJson(faces, w, h);
+        final flats = faces2DFromJson(faces, w, h);
         _publishFaceLmk(w, h, flats, seq: m['seq'] as int?);
       }
 
@@ -900,130 +866,5 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         await _recreateNegotiatedChannels();
       },
     );
-  }
-
-  String _stripVideoFec(String sdp) {
-    final lines = sdp.split(RegExp(r'\r?\n'));
-    final fecNames = {'red', 'ulpfec', 'flexfec-03'};
-    final fecPts = <String>{};
-
-    for (final l in lines) {
-      final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
-      if (m != null) {
-        final pt = m.group(1)!;
-        final codec = (m.group(2) ?? '').toLowerCase();
-        if (fecNames.contains(codec)) fecPts.add(pt);
-      }
-    }
-    if (fecPts.isEmpty) return sdp;
-
-    final out = <String>[];
-    for (final l in lines) {
-      if (l.startsWith('m=video')) {
-        final parts = l.split(' ');
-        final head = parts.take(3);
-        final payloads = parts.skip(3).where((pt) => !fecPts.contains(pt));
-        out.add([...head, ...payloads].join(' '));
-        continue;
-      }
-
-      bool isFecSpecific = false;
-      for (final prefix in ['a=rtpmap:', 'a=fmtp:', 'a=rtcp-fb:']) {
-        final m = RegExp('^' + RegExp.escape(prefix) + r'(\d+)').firstMatch(l);
-        if (m != null && fecPts.contains(m.group(1)!)) {
-          isFecSpecific = true;
-          break;
-        }
-      }
-      if (!isFecSpecific) out.add(l);
-    }
-    return out.join('\r\n');
-  }
-
-  String _stripVideoRtxNackAndRemb(String sdp,
-      {bool dropNack = true, bool dropRtx = true, bool keepTransportCcOnly = true}) {
-    final lines = sdp.split(RegExp(r'\r?\n'));
-    final rtxPts = <String>{};
-
-    for (final l in lines) {
-      final m = RegExp(r'^a=rtpmap:(\d+)\s+rtx/').firstMatch(l);
-      if (m != null) rtxPts.add(m.group(1)!);
-    }
-
-    bool inVideo = false;
-    final out = <String>[];
-    for (final l in lines) {
-      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
-
-      if (inVideo) {
-        if (dropRtx && l.startsWith('m=video')) {
-          final parts = l.split(' ');
-          final head = parts.take(3);
-          final payloads = parts.skip(3).where((pt) => !rtxPts.contains(pt));
-          out.add([...head, ...payloads].join(' '));
-          continue;
-        }
-
-        if (dropRtx && RegExp(r'^a=(rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
-          final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
-          if (m != null && rtxPts.contains(m.group(1)!)) continue;
-        }
-
-        if (dropNack && l.startsWith('a=rtcp-fb:')) {
-          if (keepTransportCcOnly) {
-            if (l.contains('transport-cc')) {
-              out.add(l);
-              continue;
-            }
-            continue;
-          } else {
-            if (l.contains('nack') || l.contains('ccm fir') || l.contains('pli')) {
-              continue;
-            }
-          }
-        }
-      }
-      out.add(l);
-    }
-    return out.join('\r\n');
-  }
-
-  String _keepOnlyVideoCodecs(String sdp, List<String> codecNamesLower) {
-    final lines = sdp.split(RegExp(r'\r?\n'));
-    final keepPts = <String>{};
-
-    for (final l in lines) {
-      final m = RegExp(r'^a=rtpmap:(\d+)\s+([A-Za-z0-9\-]+)/').firstMatch(l);
-      if (m != null) {
-        final pt = m.group(1)!;
-        final codec = (m.group(2) ?? '').toLowerCase();
-        if (codecNamesLower.contains(codec)) keepPts.add(pt);
-      }
-    }
-    if (keepPts.isEmpty) return sdp;
-
-    final out = <String>[];
-    var inVideo = false;
-
-    for (final l in lines) {
-      if (l.startsWith('m=')) inVideo = l.startsWith('m=video');
-
-      if (inVideo && l.startsWith('m=video')) {
-        final parts = l.split(' ');
-        final head = parts.take(3);
-        final pay = parts.skip(3).where((pt) => keepPts.contains(pt));
-        out.add([...head, ...pay].join(' '));
-        continue;
-      }
-
-      if (inVideo && RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').hasMatch(l)) {
-        final m = RegExp(r'^a=(?:rtpmap|fmtp|rtcp-fb):(\d+)').firstMatch(l);
-        if (m != null && !keepPts.contains(m.group(1))) continue;
-      }
-
-      out.add(l);
-    }
-
-    return out.join('\r\n');
   }
 }
