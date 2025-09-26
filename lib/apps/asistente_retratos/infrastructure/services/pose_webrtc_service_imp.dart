@@ -42,6 +42,17 @@ extension _DCX on RTCDataChannel? {
 
 Size _szWH(int w, int h) => Size(w.toDouble(), h.toDouble());
 
+// Cache de Size para evitar micro-allocs en rutas calientes
+Size? _cachedSize;
+Size _szWHCached(int w, int h) {
+  final dw = w.toDouble(), dh = h.toDouble();
+  final s = _cachedSize;
+  if (s != null && s.width == dw && s.height == dh) return s;
+  final n = Size(dw, dh);
+  _cachedSize = n;
+  return n;
+}
+
 T? _silence<T>(T Function() f) { try { return f(); } catch (_) { return null; } }
 Future<void> _silenceAsync(Future<void> Function() f) async { try { await f(); } catch (_) {} }
 
@@ -821,13 +832,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }) {
     if (_disposed) return;
 
-    final poses2d = poses3d
-        .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-        .toList(growable: false);
+    // AFTER (build Float32List once per person)
+    final List<Float32List> pxFlat = poses3d.map((pose) {
+      final f = Float32List(pose.length * 2);
+      for (var i = 0; i < pose.length; i++) {
+        final p = pose[i];
+        f[i * 2] = p.x;
+        f[i * 2 + 1] = p.y;
+        }
+      return f;
+    }).toList(growable: false);
 
     final frame = PoseFrame(
-      imageSize: _szWH(w, h),
-      posesPx: poses2d,
+      imageSize: _szWHCached(w, h),
+      posesPxFlat: pxFlat,
     );
 
     _emitBinaryThrottled(frame, kind: kind, seq: seq, task: task);
