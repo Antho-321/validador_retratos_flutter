@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
 
+import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
@@ -190,6 +191,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final ValueNotifier<LmkState> _poseLmk = ValueNotifier<LmkState>(LmkState());
   @override
   ValueListenable<LmkState> get poseLandmarks => _poseLmk;
+  ValueListenable<LmkState> get poseLmk => _poseLmk;
+  ValueListenable<LmkState> get faceLmk => _faceLmk;
 
   @override
   List<List<Offset>>? get latestFaceLandmarks {
@@ -233,6 +236,25 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
   String _forceTurnUdp(String url) => url.contains('?') ? url : '$url?transport=udp';
+
+  // ====== Overlay repaint coalescing =========================================
+  final ValueNotifier<int> overlayTick = ValueNotifier<int>(0);
+  bool _overlayScheduled = false;
+  Duration _minGap = const Duration(milliseconds: 0); // o 33 ms (≈30 fps)
+  DateTime _lastTick = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _bumpOverlay() {
+    if (_overlayScheduled) return;
+    final now = DateTime.now();
+    if (now.difference(_lastTick) < _minGap) return;
+    _overlayScheduled = true;
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _overlayScheduled = false;
+      _lastTick = DateTime.now();
+      overlayTick.value++;
+    });
+  }
+  // ===========================================================================
 
   @override
   Future<void> init() async {
@@ -467,6 +489,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _parseIsolate = null;
     _parseRx = null;
     _parseSendPort = null;
+
+    // >>> new
+    overlayTick.dispose();
+    // <<<
   }
 
   Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
@@ -512,6 +538,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         lastTs: now,
         imageSize: _szWHCached(w, h),
       );
+      // >>> new: asegura repaint aunque solo llegue "face"
+      _bumpOverlay();
+      // <<<
     }
   }
 
@@ -550,8 +579,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         final endF = startF + countPt * 2;
         poses2d.add(Float32List.sublistView(positions, startF, endF));
       }
-      // (opcional) si mantienes cache 3D, adapta mkPose3D a Z empaquetado
       _lastPosesPerTask[t] = mkPose3D(poses2d, null);
+      if (t == 'face') {
+        _publishFaceLmk(w, h, poses2d, seq: seq);
+      }
     } else {
       // legacy path from isolate
       poses2d = (msg['poses'] as List?)?.cast<Float32List>() ??
@@ -808,6 +839,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
+
+    // >>> new: coalesce repaint una vez por ciclo de emisión
+    _bumpOverlay();
+    // <<<
   }
 
   void _handleTaskBinary(String task, Uint8List b) {

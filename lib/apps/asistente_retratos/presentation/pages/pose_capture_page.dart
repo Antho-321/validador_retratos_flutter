@@ -10,9 +10,13 @@ import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../domain/service/pose_capture_service.dart';
-import '../../domain/model/lmk_state.dart';              // ⬅️ nuevo
-import '../widgets/pose_landmarks_painter.dart';
-import '../widgets/face_landmarks_painter.dart';        // ⬅️ nuevo
+
+// ✅ agrega:
+import '../widgets/landmarks_painter.dart' show LandmarksPainter, FaceStyle;
+// (si tu painter usa directamente la impl del servicio)
+import '../../infrastructure/services/pose_webrtc_service_imp.dart'
+    show PoseWebrtcServiceImp;
+
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
@@ -98,49 +102,46 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
               body: Stack(
                 children: [
                   if (!ctl.isCapturing && ctl.capturedPng == null) ...[
-                    // 1) Preview
+                    // ÚNICO bloque preview + overlay unificado
                     Positioned.fill(
                       child: RepaintBoundary(
                         key: _previewKey,
-                        child: RTCVideoView(
-                          svc.localRenderer,
-                          mirror: ctl.mirror,
-                          objectFit:
-                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                        child: IgnorePointer(
+                          child: Builder(
+                            builder: (_) {
+                              // si el servicio concreto es PoseWebrtcServiceImp, úsalo directo
+                              final impl = widget.poseService is PoseWebrtcServiceImp
+                                  ? widget.poseService as PoseWebrtcServiceImp
+                                  : null;
+
+                              return CustomPaint(
+                                isComplex: true,
+                                // Usa el painter solo si queremos dibujar y tenemos impl con overlayTick
+                                foregroundPainter: (widget.drawLandmarks && impl != null)
+                                    ? LandmarksPainter(
+                                        impl,
+                                        mirror: ctl.mirror,
+                                        srcSize: impl.latestFrame.value?.imageSize, // mejor escalado
+                                        fit: BoxFit.cover,
+                                        showPoseBones: true,
+                                        showPosePoints: true,
+                                        showFacePoints: true,
+                                        faceStyle: FaceStyle.cross, // o FaceStyle.points
+                                        // color: AppColors.landmarks, // opcional
+                                      )
+                                    : null,
+                                child: RTCVideoView(
+                                  svc.localRenderer,
+                                  mirror: ctl.mirror,
+                                  objectFit: RTCVideoViewObjectFit
+                                      .RTCVideoViewObjectFitCover,
+                                ),
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
-
-                    // 2) Pose overlay optimizado (hold-last en State + repaint con Listenable)
-                    if (widget.drawLandmarks)
-                      Positioned.fill(
-                        child: RepaintBoundary(
-                          child: IgnorePointer(
-                            child: PoseOverlayFast(
-                              listenable: svc.poseLandmarks,                 // ← ValueListenable<LmkState>
-                              mirror: ctl.mirror,
-                              srcSize: svc.latestFrame.value?.imageSize,     // mejor escalado
-                              fit: BoxFit.cover,
-                              showPoints: true,
-                              showBones: true,
-                              // skeletonColor: algún Color si quieres forzar uno
-                            ),
-                          ),
-                        ),
-                      ),
-                    // 2b) Face landmarks (hold-last + repaint con Listenable)
-                    if (widget.drawLandmarks)
-                      Positioned.fill(
-                        child: RepaintBoundary(
-                          child: IgnorePointer(
-                            child: FaceOverlayFast(
-                              listenable: svc.faceLandmarks,                  // ← ValueListenable<LmkState>
-                              mirror: ctl.mirror,
-                              // landmarksColor: ...                           // si quieres forzar color
-                            ),
-                          ),
-                        ),
-                      ),
 
                     // 3) HUD
                     Positioned.fill(
@@ -199,8 +200,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         child: RTCVideoView(
                           svc.remoteRenderer,
                           mirror: ctl.mirror,
-                          objectFit:
-                              RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                          objectFit: RTCVideoViewObjectFit
+                              .RTCVideoViewObjectFitCover,
                         ),
                       ),
                     ),
