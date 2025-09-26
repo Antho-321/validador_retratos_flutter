@@ -685,12 +685,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       );
 
       // 5) (Recomendado) Actualiza _poseLmk con este mismo batch para evitar “drift”
-      final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
-      _poseLmk.value = LmkState.fromFlat3d(
-        poses3dPx,
-        lastSeq: nextSeq,
-        imageSize: frame.imageSize,
-      ).copyWith(lastFlat: poses2d);
+      if (task == 'pose') {
+        final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
+        _poseLmk.value = LmkState.fromFlat3d(
+          poses3dPx,
+          lastSeq: nextSeq,
+          imageSize: frame.imageSize,
+        ).copyWith(lastFlat: poses2d);
+      }
 
       _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
     } else if (type == 'need_kf') {
