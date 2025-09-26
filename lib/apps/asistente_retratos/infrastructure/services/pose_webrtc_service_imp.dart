@@ -795,13 +795,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     if (task == 'pose' && pxFlat != null && pxFlat.isNotEmpty) {
-      final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
-      _poseLmk.value = LmkState.fromFlat(
-        pxFlat,
-        z: _poseLmk.value.lastFlatZ,
-        lastSeq: nextSeq,
-        imageSize: frame.imageSize,
-      );
+      final current = _poseLmk.value;
+      final nextSeq = seq ?? (current.lastSeq + 1);
+      if (nextSeq != current.lastSeq || !identical(current.lastFlat, pxFlat)) {
+        _poseLmk.value = LmkState.fromFlat(
+          pxFlat,
+          z: current.lastFlatZ,
+          lastSeq: nextSeq,
+          imageSize: frame.imageSize,
+        );
+      }
     }
 
     if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
