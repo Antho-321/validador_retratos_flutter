@@ -500,14 +500,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _publishFaceLmk(int w, int h, List<Float32List> faces2d, {int? seq}) {
     _lastFaceFlat = faces2d;
     _lastFace2D = toOffsets2D(faces2d);
-    _faceLmk.value = LmkState(
-      last: _lastFace2D,
-      lastFlat: _lastFaceFlat,
-      lastFlatZ: null,
-      lastSeq: (seq ?? _faceLmk.value.lastSeq) + 1,
-      lastTs: DateTime.now(),
-      imageSize: _szWH(w, h),
-    );
+    final current = _faceLmk.value;
+    final nextSeq = seq ?? (current.lastSeq + 1);
+    if (nextSeq != current.lastSeq || !identical(current.lastFlat, _lastFaceFlat)) {
+      final now = DateTime.now();
+      _faceLmk.value = LmkState(
+        last: _lastFace2D,
+        lastFlat: _lastFaceFlat,
+        lastFlatZ: null,
+        lastSeq: nextSeq,
+        lastTs: now,
+        imageSize: _szWHCached(w, h),
+      );
+    }
   }
 
   void _handleParsed2D(Map msg, {String? fallbackTask}) {
