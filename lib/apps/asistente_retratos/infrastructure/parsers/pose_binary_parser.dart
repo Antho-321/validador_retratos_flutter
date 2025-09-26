@@ -73,16 +73,19 @@ class PosePacket2D {
     required this.kind,
     required this.w,
     required this.h,
-    required this.poses2d,
+    required this.poses2d,        // [x0,y0,x1,y1,...] por persona
+    this.posesZ,                  // [z0,z1,...] por persona (normalizado)
+    this.hasZ = true,            // true si el stream tiene Z
     this.seq,
     this.keyframe = false,
   });
 
   final PacketKind kind;
-  final int w; // px
-  final int h; // px
-  /// Por persona: [x0,y0,x1,y1,...] en px
+  final int w;
+  final int h;
   final List<Float32List> poses2d;
+  final List<Float32List>? posesZ; // null si no hay Z
+  final bool hasZ;
   final int? seq;
   final bool keyframe;
 }
@@ -138,7 +141,8 @@ class PoseBinaryParser {
   bool? _hasZ;
 
   // ---- Reuso de buffers (ruta plana) ----
-  List<Float32List>? _lastFlat; // por pose
+  List<Float32List>? _lastFlat;   // XY por pose
+  List<Float32List>? _lastFlatZ;  // Z por pose (si existe)
 
   List<List<PosePoint>>? get lastPoses => _lastPoses;
   int get parseErrors => _errors;
@@ -152,6 +156,7 @@ class PoseBinaryParser {
     _errors = 0;
     _hasZ = null;
     _lastFlat = null;
+    _lastFlatZ = null;
   }
 
   PoseParseResult parse(Uint8List b) {
@@ -180,7 +185,7 @@ class PoseBinaryParser {
     }
   }
 
-  /// Variante rápida que evita crear `PosePoint` y devuelve arreglos planos XY.
+  /// Variante rápida que evita crear `PosePoint` y devuelve arreglos planos XY (y Z separado si existe).
   PoseParseResult parseFlat2D(Uint8List b) {
     try {
       if (b.length < 2) {
@@ -482,6 +487,14 @@ class PoseBinaryParser {
     return Float32List(len);
   }
 
+  Float32List _reuseOrAllocZ(int poseIdx, int len) {
+    final prev = _lastFlatZ;
+    if (prev != null && poseIdx < prev.length && prev[poseIdx].length == len) {
+      return prev[poseIdx];
+    }
+    return Float32List(len);
+  }
+
   PosePacket2D _parsePO_Flat(Uint8List b) {
     int i = 2;
     _require(i + 1 <= b.length, 'PO missing ver'); final ver = b[i]; i += 1;
@@ -492,7 +505,7 @@ class PoseBinaryParser {
     final scale = _deriveScale(ver, wq, hq);
     final wpx = wq ~/ scale, hpx = hq ~/ scale;
 
-    // Pre-scan para Z (sticky)
+    // Pre-scan Z (sticky)
     int j = i, totalPts = 0;
     for (int p = 0; p < nposes; p++) { _require(j + 2 <= b.length, 'PO pre-scan npts'); final npts = _u16le(b, j); j += 2; totalPts += npts; }
     final expectedXY = j + totalPts * 4, expectedXYZ = j + totalPts * 6;
@@ -500,32 +513,45 @@ class PoseBinaryParser {
     _hasZ = hasZ;
 
     final posesQ = <List<_PtQ>>[];
-    final out = <Float32List>[];
+    final outXY = <Float32List>[];
+    final outZ  = hasZ ? <Float32List>[] : null;
+
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PO pose[$p] npts'); final npts = _u16le(b, i); i += 2;
       final need = npts * (hasZ ? 6 : 4); _require(i + need <= b.length, 'PO pose[$p] short');
 
       final ptsQ = <_PtQ>[];
-      final arr = _reuseOrAlloc(p, npts * 2); // x,y
-      int w = 0;
+      final arr = _reuseOrAlloc(p, npts * 2);
+      final arrZ = hasZ ? _reuseOrAllocZ(p, npts) : null;
+      int w = 0, wz = 0;
 
       for (int k = 0; k < npts; k++) {
         final xq = _u16le(b, i); i += 2;
         final yq = _u16le(b, i); i += 2;
-        int? zq; if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
+        int? zq;
+        if (hasZ) { zq = _i16le(b, i); i += 2; zq = _clampZq(zq); }
         final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
         ptsQ.add(_PtQ(cxq, cyq, zq));
-        arr[w++] = cxq / scale;  // x
-        arr[w++] = cyq / scale;  // y
+        arr[w++] = cxq / scale;   // x
+        arr[w++] = cyq / scale;   // y
+        if (hasZ) { arrZ![wz++] = (zq ?? 0) / zScale; }
       }
       posesQ.add(ptsQ);
-      out.add(arr);
+      outXY.add(arr);
+      if (hasZ) outZ!.add(arrZ!);
     }
 
     _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
-    _lastFlat = out;
+    _lastFlat = outXY; _lastFlatZ = outZ;
 
-    return PosePacket2D(kind: PacketKind.po, w: wpx, h: hpx, poses2d: out, keyframe: true);
+    return PosePacket2D(
+      kind: PacketKind.po,
+      w: wpx, h: hpx,
+      poses2d: outXY,
+      posesZ: outZ,
+      hasZ: hasZ,
+      keyframe: true,
+    );
   }
 
   PosePacket2D _parsePD_Flat(Uint8List b) {
@@ -548,7 +574,7 @@ class PoseBinaryParser {
       throw StateError('PD: Q/dims changed without keyframe');
     }
 
-    // KF o sin baseline: absolutas
+    // KF o sin baseline
     if (isKey || noBaseline) {
       int j = i, totalPts = 0;
       for (int p = 0; p < nposes; p++) { _require(j + 2 <= b.length, 'PD(KF) pre-scan npts'); final npts = _u16le(b, j); j += 2; totalPts += npts; }
@@ -557,7 +583,8 @@ class PoseBinaryParser {
       _hasZ = hasZ;
 
       final posesQ = <List<_PtQ>>[];
-      final out = <Float32List>[];
+      final outXY = <Float32List>[];
+      final outZ  = hasZ ? <Float32List>[] : null;
 
       for (int p = 0; p < nposes; p++) {
         _require(i + 2 <= b.length, 'PD(KF) pose[$p] npts'); final npts = _u16le(b, i); i += 2;
@@ -565,7 +592,8 @@ class PoseBinaryParser {
 
         final ptsQ = <_PtQ>[];
         final arr = _reuseOrAlloc(p, npts * 2);
-        int w = 0;
+        final arrZ = hasZ ? _reuseOrAllocZ(p, npts) : null;
+        int w = 0, wz = 0;
 
         for (int k = 0; k < npts; k++) {
           final xq = _u16le(b, i); i += 2;
@@ -574,24 +602,35 @@ class PoseBinaryParser {
           final cxq = _clampQ(xq, wq), cyq = _clampQ(yq, hq);
           ptsQ.add(_PtQ(cxq, cyq, zq));
           arr[w++] = cxq / scale; arr[w++] = cyq / scale;
+          if (hasZ) { arrZ![wz++] = (zq ?? 0) / zScale; }
         }
         posesQ.add(ptsQ);
-        out.add(arr);
+        outXY.add(arr);
+        if (hasZ) outZ!.add(arrZ!);
       }
 
       _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
-      _lastFlat = out;
+      _lastFlat = outXY; _lastFlatZ = outZ;
 
-      return PosePacket2D(kind: PacketKind.pd, w: wpx, h: hpx, poses2d: out, seq: seq, keyframe: true);
+      return PosePacket2D(
+        kind: PacketKind.pd,
+        w: wpx, h: hpx,
+        poses2d: outXY,
+        posesZ: outZ,
+        hasZ: hasZ,
+        seq: seq,
+        keyframe: true,
+      );
     }
 
-    // Δ: relativiza contra baseline existente
+    // Δ
     if (_hasZ == null) throw StateError('PD(Δ): unknown Z presence (need keyframe)');
     final bool hasZ = _hasZ!;
     final prevQ = _lastQ!; _require(prevQ.length == nposes, 'PD(Δ) nposes mismatch');
 
     final posesQ = <List<_PtQ>>[];
-    final out = <Float32List>[];
+    final outXY = <Float32List>[];
+    final outZ  = hasZ ? <Float32List>[] : null;
 
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PD(Δ) pose[$p] npts'); final npts = _u16le(b, i); i += 2;
@@ -602,7 +641,8 @@ class PoseBinaryParser {
 
       final outQ = <_PtQ>[];
       final arr = _reuseOrAlloc(p, npts * 2);
-      int w = 0;
+      final arrZ = hasZ ? _reuseOrAllocZ(p, npts) : null;
+      int w = 0, wz = 0;
 
       for (int j2 = 0; j2 < npts; j2++) {
         final mb = j2 >> 3, bb = j2 & 7;
@@ -622,15 +662,25 @@ class PoseBinaryParser {
         xq = _clampQ(xq, wq); yq = _clampQ(yq, hq);
         outQ.add(_PtQ(xq, yq, zq));
         arr[w++] = xq / scale; arr[w++] = yq / scale;
+        if (hasZ) { arrZ![wz++] = (zq ?? 0) / zScale; }
       }
       posesQ.add(outQ);
-      out.add(arr);
+      outXY.add(arr);
+      if (hasZ) outZ!.add(arrZ!);
     }
 
     _lastQ = posesQ; _lastScale = scale; _lastWq = wq; _lastHq = hq;
-    _lastFlat = out;
+    _lastFlat = outXY; _lastFlatZ = outZ;
 
-    return PosePacket2D(kind: PacketKind.pd, w: wpx, h: hpx, poses2d: out, seq: seq, keyframe: false);
+    return PosePacket2D(
+      kind: PacketKind.pd,
+      w: wpx, h: hpx,
+      poses2d: outXY,
+      posesZ: outZ,
+      hasZ: hasZ,
+      seq: seq,
+      keyframe: false,
+    );
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

@@ -150,6 +150,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   ValueListenable<LmkState> get poseLandmarks => _poseLmk;
 
+  // ⬇️ AÑADE ESTA LÍNEA (cacheamos Z por persona para pose)
+  List<Float32List>? _lastPoseFlatZ;
+
   @override
   List<List<Offset>>? get latestFaceLandmarks {
     final faces3d = _lastPosesPerTask['face'];
@@ -578,6 +581,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     final String? task = msg['task'] as String?;
     final String? type = msg['type'] as String?;
+    final String? status = msg['status'] as String?;
 
     // libera el flag y relanza si quedó algo
     if (task != null) {
@@ -587,28 +591,49 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
     }
 
-    // ⬇️ ACK opcional desde el isolate
-    final int? ack = msg['ack'] as int?;
+    // ⬇️ ACK opcional desde el isolate (compat)
+    final int? ack = (msg['ack'] as int?) ?? (msg['ackSeq'] as int?);
     if (ack != null) _sendCtrlAck(ack);
 
-    if (type == 'ok2d') {
-      // Usa w/h del mensaje; si no, cae a las últimas conocidas; si no, al renderer
-      final int? w =
-          (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
-      final int? h =
-          (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
-      if (w == null || h == null || w == 0 || h == 0) return; // aún no sabemos el tamaño
+    // Acepta tanto el esquema nuevo {status:'ok'} como el compat {type:'ok2d'}
+    final bool isOk = (status == 'ok') || (type == 'ok2d');
+    if (isOk) {
+      // Tamaño
+      final int? w = (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
+      final int? h = (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
+      if (w == null || h == null || w == 0 || h == 0) return;
 
       final int? seq = msg['seq'] as int?;
       final bool kf = (msg['keyframe'] as bool?) ?? false;
-      final List<Float32List> poses2d =
-          (msg['poses2d'] as List).cast<Float32List>();
+      final String kindLabel = (msg['kind'] as String?) ?? (kf ? 'PD(KF)' : 'PD');
 
+      // XY planos (acepta 'poses' nuevo y 'poses2d' antiguo)
+      final List<Float32List> poses2d = ((msg['poses'] ?? msg['poses2d']) as List).cast<Float32List>();
+
+      // Z opcional (solo si task == 'pose')
+      final bool hasZ = (msg['hasZ'] as bool?) ?? false;
+      final List<Float32List>? posesZ =
+          (hasZ && task == 'pose') ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
+
+      // Actualiza secuencia y tamaño conocidos
       _lastW = w;
       _lastH = h;
       if (seq != null && task != null) _lastSeqPerTask[task] = seq;
 
-      if (task == 'face') {
+      // Mantén _lastPosesPerTask actualizado (con Z solo en 'pose')
+      final String key = (task == null || task.isEmpty) ? _primaryTask : task;
+      if (poses2d.isEmpty) {
+        _lastPosesPerTask[key] = const <List<PosePoint>>[];
+      } else {
+        if (key == 'pose' && posesZ != null) {
+          _lastPosesPerTask[key] = _posePointsFromFlat2DWithZ(poses2d, posesZ);
+        } else {
+          _lastPosesPerTask[key] = _posePointsFromFlat2D(poses2d /* , defaultZ: null */);
+        }
+      }
+
+      // Si es 'face', preserva rutas antiguas (sin Z)
+      if (key == 'face') {
         _lastFaceFlat = poses2d;
         _lastFace2D = poses2d
             .map((f) => List<Offset>.generate(
@@ -617,14 +642,31 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
                   growable: false,
                 ))
             .toList(growable: false);
+        _lastPosesPerTask['face'] = _lastPosesPerTask[key]!;
       }
 
+      // Cachea Z de pose para poder reenviarlo en _doEmit()
+      if (key == 'pose') {
+        _lastPoseFlatZ = posesZ;
+        // Publica estado inmediato de pose con Z (UI reactiva)
+        _poseLmk.value = LmkState.fromFlat(
+          poses2d,
+          z: _lastPoseFlatZ,
+          lastSeq: seq ?? (_poseLmk.value.lastSeq + 1),
+          imageSize: Size(w.toDouble(), h.toDouble()),
+        );
+      }
+
+      // Construye frame (no porta Z) y emite con throttling
       final frame = PoseFrame(
         imageSize: Size(w.toDouble(), h.toDouble()),
         posesPxFlat: poses2d,
       );
-      _emitBinaryThrottled(frame, kind: kf ? 'PD(KF)' : 'PD', seq: seq);
-    } else if (type == 'need_kf') {
+      _emitBinaryThrottled(frame, kind: kindLabel, seq: seq);
+      return;
+    }
+
+    if (status == 'need_kf' || type == 'need_kf') {
       _maybeSendKF();
     }
   }
@@ -703,6 +745,43 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _log('[client] ctrl nudge: HELLO + KF');
     c.send(RTCDataChannelMessage('HELLO'));
     c.send(RTCDataChannelMessage('KF'));
+  }
+
+  // Convierte listas planas [x0,y0,x1,y1,...] a List<List<PosePoint>>.
+  // Si prefieres forzar z=0.0, pasa defaultZ: 0.0; si no, déjalo en null.
+  List<List<PosePoint>> _posePointsFromFlat2D(
+    List<Float32List> poses2d, {
+    double? defaultZ,
+  }) {
+    return List<List<PosePoint>>.generate(poses2d.length, (pi) {
+      final f = poses2d[pi];
+      final n = f.length >> 1; // /2
+      return List<PosePoint>.generate(n, (i) {
+        final double x = f[i * 2].toDouble();
+        final double y = f[i * 2 + 1].toDouble();
+        return PosePoint(x: x, y: y, z: defaultZ); // z es opcional
+      }, growable: false);
+    }, growable: false);
+  }
+
+  // Convierte listas planas [x0,y0,...] + Z opcional [z0,z1,...] a List<List<PosePoint>>.
+  List<List<PosePoint>> _posePointsFromFlat2DWithZ(
+    List<Float32List> poses2d,
+    List<Float32List>? zLists,
+  ) {
+    final hasZ = zLists != null && zLists.isNotEmpty;
+    return List<List<PosePoint>>.generate(poses2d.length, (pi) {
+      final f = poses2d[pi];
+      final n = f.length >> 1;
+      final zf = (hasZ && pi < zLists!.length) ? zLists[pi] : null;
+      return List<PosePoint>.generate(n, (i) {
+        final double x = f[i * 2].toDouble();
+        final double y = f[i * 2 + 1].toDouble();
+        final double? z =
+            (zf != null && i < zf.length) ? zf[i].toDouble() : null;
+        return PosePoint(x: x, y: y, z: z);
+      }, growable: false);
+    }, growable: false);
   }
 
   Future<void> _recreateNegotiatedChannels() async {
@@ -829,7 +908,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
                   growable: false,
                 ))
             .toList(growable: false);
-
+        // Mantener compatibilidad con getters antiguos
+        _lastPosesPerTask['face'] = flat.isEmpty
+            ? const <List<PosePoint>>[]
+            : _posePointsFromFlat2D(flat /* , defaultZ: 0.0 */);
         _faceLmk.value = LmkState(
           last: _lastFace2D,
           lastFlat: _lastFaceFlat,
@@ -841,6 +923,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
       // --- 3) Emitir TODO por el mismo throttle que la ruta binaria ---
       final int? seqFromJson = m['seq'] as int?;
+      // Mantener _lastPosesPerTask['pose'] alineado también en la ruta JSON
+      if (out.posesPxFlat != null && out.posesPxFlat!.isNotEmpty) {
+        _lastPosesPerTask['pose'] = _posePointsFromFlat2D(out.posesPxFlat!);
+      } else if (out.posesPx != null && out.posesPx!.isNotEmpty) {
+        _lastPosesPerTask['pose'] = out.posesPx!.map((pose) {
+          return pose.map((p) => PosePoint(x: p.dx, y: p.dy /* , z: 0.0 */)).toList(growable: false);
+        }).toList(growable: false);
+      } else {
+        _lastPosesPerTask['pose'] = const <List<PosePoint>>[];
+      }
       _emitBinaryThrottled(out, kind: 'JSON', seq: seqFromJson);
 
     } catch (e) {
@@ -947,7 +1039,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     _latestFrame.value = frame;
 
-    // --- FACE (ya existente) ---
+    // --- FACE (sin Z) ---
     final lf  = _lastFace2D;
     final lff = _lastFaceFlat;
     if (lf != null || lff != null) {
@@ -956,16 +1048,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         lastFlat: lff,
         lastSeq: seq ?? _faceLmk.value.lastSeq,
         lastTs: DateTime.now(),
-        imageSize: frame.imageSize, // ← AÑADE ESTO
+        imageSize: frame.imageSize,
       );
     }
 
-    // --- POSE (siempre rápido/flat) ---
+    // --- POSE (rápido/flat) — añade Z si lo tenemos cacheado ---
     if (pxFlat != null && pxFlat.isNotEmpty) {
-      // asegura que lastSeq suba si no viene seq
       final nextSeq = (seq ?? _poseLmk.value.lastSeq) + 1;
       _poseLmk.value = LmkState.fromFlat(
         pxFlat,
+        z: _lastPoseFlatZ, // ⬅️ solo pose usa Z
         lastSeq: nextSeq,
         imageSize: frame.imageSize,
       );
