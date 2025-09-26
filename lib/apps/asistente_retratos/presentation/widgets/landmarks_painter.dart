@@ -10,13 +10,14 @@ import '../../infrastructure/services/pose_webrtc_service_imp.dart';
 const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
 const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
 
-const List<List<int>> _POSE_EDGES = [
-  [LS, RS],
-  [LS, LE], [LE, LW],
-  [RS, RE], [RE, RW],
-  [LH, RH],
-  [LH, LK], [LK, LA],
-  [RH, RK], [RK, RA],
+// Lista plana de índices (pares consecutivos forman segmentos)
+const List<int> _POSE_EDGE_IDX = <int>[
+  LS, RS,
+  LS, LE,  LE, LW,
+  RS, RE,  RE, RW,
+  LH, RH,
+  LH, LK,  LK, LA,
+  RH, RK,  RK, RA,
 ];
 
 enum FaceStyle { cross, points }
@@ -35,14 +36,16 @@ class LandmarksPainter extends CustomPainter {
   })  : _line = Paint()
           ..style = PaintingStyle.stroke
           ..isAntiAlias = false
-          ..strokeCap = StrokeCap.round
+          ..strokeCap = StrokeCap.round // cambia a .butt si te vale visualmente
           ..color = color ?? const Color(0xFFFFFFFF),
         _dots = Paint()
           ..style = PaintingStyle.stroke
           ..isAntiAlias = false
-          ..strokeCap = StrokeCap.round
+          ..strokeCap = StrokeCap.round // cambia a .butt si te vale
           ..color = color ?? const Color(0xFFFFFFFF),
-        super(repaint: service.overlayTick);
+        super(repaint: service.overlayTick) {
+    _ensurePoseCapacity();
+  }
 
   // Fuente de datos
   final PoseWebrtcServiceImp service;
@@ -60,17 +63,21 @@ class LandmarksPainter extends CustomPainter {
   final Paint _line;
   final Paint _dots;
 
-  // Cache y buffers reutilizables
-  // Pose
-  final List<List<int>> _edges = _POSE_EDGES;
+  // ================== Cache y buffers reutilizables =========================
+  // Pose (líneas)
+  late final int _maxPoseLineFloats = (_POSE_EDGE_IDX.length ~/ 2) * 4; // x0,y0,x1,y1 por segmento
   Float32List _poseLineBuf = Float32List(0);
   int _poseLineFloats = 0;
   int _lastPoseSeq = -1;
 
-  // Face
-  Float32List _faceCrossBuf = Float32List(0); // para cruces
+  // Face (cruces y puntos)
+  Float32List _faceCrossBuf = Float32List(0);
   int _faceCrossFloats = 0;
+  double _lastCrossR = -1;
   int _lastFaceSeq = -1;
+
+  Float32List _facePointBuf = Float32List(0);
+  int _facePointFloats = 0;
 
   // Transform
   Size? _lastCanvasSize, _lastImgSize;
@@ -78,7 +85,7 @@ class LandmarksPainter extends CustomPainter {
   BoxFit? _lastFit;
   double _scale = 1, _offX = 0, _offY = 0;
 
-  // Util: prepara transform según fit/espacio
+  // =========================== Transform ====================================
   void _updateTransform(Size canvas, Size img) {
     if (_lastCanvasSize == canvas &&
         _lastImgSize == img &&
@@ -98,25 +105,23 @@ class LandmarksPainter extends CustomPainter {
     _lastFit = fit;
   }
 
-  // ====== Pose helpers ======================================================
-
-  // Llena _poseLineBuf a partir de un Float32List de puntos (x,y normalizados o en px).
-  void _fillPoseLines(final Float32List pts, final int seq) {
-    if (seq == _lastPoseSeq) return;
-
-    final count = pts.length >> 1;
-    // Cuenta segmentos válidos
-    int segs = 0;
-    for (final e in _edges) {
-      final a = e[0], b = e[1];
-      if (a < count && b < count) segs++;
+  // ============================ Pose helpers ================================
+  void _ensurePoseCapacity() {
+    if (_poseLineBuf.length < _maxPoseLineFloats) {
+      _poseLineBuf = Float32List(_maxPoseLineFloats);
     }
-    final needed = segs * 4; // x0,y0,x1,y1
-    if (_poseLineBuf.length < needed) _poseLineBuf = Float32List(needed);
+  }
 
+  // Llena _poseLineBuf desde pts (Float32List: x0,y0,x1,y1, ...).
+  void _fillPoseLines(final Float32List pts, final int seq) {
+    if (seq == _lastPoseSeq && _poseLineFloats != 0) return;
+
+    _ensurePoseCapacity();
+    final count = pts.length >> 1; // número de puntos (x,y)
     int k = 0;
-    for (final e in _edges) {
-      final a = e[0], b = e[1];
+    for (int e = 0; e < _POSE_EDGE_IDX.length; e += 2) {
+      final int a = _POSE_EDGE_IDX[e];
+      final int b = _POSE_EDGE_IDX[e + 1];
       if (a < count && b < count) {
         final i0 = a << 1, i1 = b << 1;
         _poseLineBuf[k++] = pts[i0];
@@ -129,13 +134,13 @@ class LandmarksPainter extends CustomPainter {
     _lastPoseSeq = seq;
   }
 
-  // ====== Face helpers ======================================================
-
-  // Genera cruces de tamaño fijo en pantalla (2 px de radio)
+  // ============================ Face helpers ================================
+  // Cruces de tamaño fijo en pantalla (r en px de pantalla, p.ej. 2/_scale)
   void _fillFaceCrosses(final List<Float32List> faces, final double r, final int faceSeq) {
-    if (faceSeq == _lastFaceSeq && _faceCrossFloats > 0) return;
+    final bool needsUpdate = (faceSeq != _lastFaceSeq) || (_faceCrossFloats == 0) || (r != _lastCrossR);
+    if (!needsUpdate) return;
 
-    // Calcula floats requeridos (8 por landmark)
+    // 8 floats por landmark (dos segmentos por cruz)
     int floats = 0;
     for (final f in faces) floats += (f.length >> 1) * 8;
     if (_faceCrossBuf.length < floats) _faceCrossBuf = Float32List(floats);
@@ -154,21 +159,40 @@ class LandmarksPainter extends CustomPainter {
     }
     _faceCrossFloats = k;
     _lastFaceSeq = faceSeq;
+    _lastCrossR = r;
   }
 
+  // Empaqueta todos los puntos de todas las caras en un único buffer
+  void _fillFacePoints(final List<Float32List> faces, final int faceSeq) {
+    if (faceSeq == _lastFaceSeq && _facePointFloats != 0) return;
+
+    int needed = 0;
+    for (final f in faces) needed += f.length;
+    if (_facePointBuf.length < needed) _facePointBuf = Float32List(needed);
+
+    int k = 0;
+    for (final f in faces) {
+      _facePointBuf.setRange(k, k + f.length, f);
+      k += f.length;
+    }
+    _facePointFloats = k;
+    _lastFaceSeq = faceSeq;
+  }
+
+  // =============================== Paint ====================================
   @override
   void paint(Canvas c, Size size) {
-    // Lee estados actuales (o “hold” si tu LmkState ya lo maneja internamente)
+    // Estados actuales (ideal: ya tipados en el modelo)
     final LmkState poseS = service.poseLmk.value;
     final LmkState faceS = service.faceLmk.value;
 
-    // Determina el tamaño fuente (usa el del frame si viene, o el canvas)
+    // Tamaño fuente (frame → face → canvas)
     final Size imgSize = srcSize ?? poseS.imageSize ?? faceS.imageSize ?? size;
     if (imgSize.width <= 0 || imgSize.height <= 0) return;
 
     _updateTransform(size, imgSize);
 
-    // Ajusta grosores aprox. fijos en pantalla
+    // Grosores ~constantes en pantalla
     _line.strokeWidth = 2.0 / _scale;
     _dots.strokeWidth = 4.0 / _scale;
 
@@ -182,14 +206,7 @@ class LandmarksPainter extends CustomPainter {
     }
 
     // ================= POSE =================
-    // Asumimos que poseS.lastFlat es un Float32List? con un solo esqueleto.
-    // Si en tu implementación es List<Float32List>, toma el primero.
-    final Float32List? poseFlat = (poseS.lastFlat is Float32List)
-        ? (poseS.lastFlat as Float32List?)
-        : (poseS.lastFlat is List && (poseS.lastFlat as List).isNotEmpty
-            ? (poseS.lastFlat as List).first as Float32List
-            : null);
-
+    final Float32List? poseFlat = _extractPoseFlat(poseS.lastFlat);
     if (poseFlat != null) {
       _fillPoseLines(poseFlat, poseS.lastSeq);
       if (showPoseBones && _poseLineFloats > 0) {
@@ -202,20 +219,16 @@ class LandmarksPainter extends CustomPainter {
     }
 
     // ================= FACE =================
-    // Múltiples caras: esperamos List<Float32List> en faceS.lastFlat
-    final List<Float32List>? faces = (faceS.lastFlat is List<Float32List>)
-        ? faceS.lastFlat as List<Float32List>
-        : (faceS.lastFlat == null ? null : <Float32List>[]);
-
+    final List<Float32List>? faces = _extractFaces(faceS.lastFlat);
     if (showFacePoints && faces != null && faces.isNotEmpty) {
       if (faceStyle == FaceStyle.points) {
-        // Dibuja cada set de puntos directamente
-        for (final f in faces) {
-          c.drawRawPoints(ui.PointMode.points, f, _dots);
+        _fillFacePoints(faces, faceS.lastSeq);
+        if (_facePointFloats > 0) {
+          final view = Float32List.view(_facePointBuf.buffer, 0, _facePointFloats);
+          c.drawRawPoints(ui.PointMode.points, view, _dots);
         }
       } else {
-        // Cruces pequeñas por landmark (radio fijo en pantalla)
-        final double r = 2.0 / _scale;
+        final double r = 2.0 / _scale; // radio fijo en pantalla
         _fillFaceCrosses(faces, r, faceS.lastSeq);
         if (_faceCrossFloats > 0) {
           final view = Float32List.view(_faceCrossBuf.buffer, 0, _faceCrossFloats);
@@ -227,6 +240,27 @@ class LandmarksPainter extends CustomPainter {
     c.restore();
   }
 
+  // =========================== Util casting ================================
+  // Mantiene el branching fuera del path caliente del pintado principal.
+  Float32List? _extractPoseFlat(Object? src) {
+    if (src is Float32List) return src;
+    if (src is List && src.isNotEmpty) {
+      final first = src.first;
+      if (first is Float32List) return first;
+    }
+    return null;
+    // Ideal: que poseS.lastFlat ya sea Float32List? en el modelo/servicio.
+  }
+
+  List<Float32List>? _extractFaces(Object? src) {
+    if (src is List<Float32List>) return src;
+    if (src == null) return null;
+    // Si llega en otro formato, evita allocs: no lo fuerces aquí.
+    return const <Float32List>[];
+    // Ideal: que faceS.lastFlat ya sea List<Float32List>? en el modelo/servicio.
+  }
+
+  // ============================ Repaint rule ===============================
   @override
   bool shouldRepaint(covariant LandmarksPainter old) {
     return old.mirror != mirror ||
