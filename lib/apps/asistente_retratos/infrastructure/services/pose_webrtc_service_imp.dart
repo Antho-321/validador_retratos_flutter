@@ -103,6 +103,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'],
+    this.kfMinGapMs = 500, // configurable KF pacing
     RtcVideoEncoder? encoder,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
@@ -129,6 +130,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool stripRtxAndNackFromSdp;
   final bool keepTransportCcOnly;
   final List<String> requestedTasks;
+  final int kfMinGapMs;
 
   String get _primaryTask =>
       (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
@@ -178,7 +180,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   ValueListenable<PoseFrame?> get latestFrame => _latestFrame;
 
-  final _framesCtrl = StreamController<PoseFrame>.broadcast();
+  // sync:true para evitar microtasks innecesarias
+  final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
 
@@ -285,8 +288,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final vw = _localRenderer.videoWidth;
       final vh = _localRenderer.videoHeight;
       if (vw > 0 && vh > 0) {
-        _lastW = vw;
-        _lastH = vh;
+        if (_lastW != vw) _lastW = vw;
+        if (_lastH != vh) _lastH = vh;
       }
     }
 
@@ -490,9 +493,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _parseRx = null;
     _parseSendPort = null;
 
-    // >>> new
     overlayTick.dispose();
-    // <<<
   }
 
   Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
@@ -523,26 +524,25 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return c.future;
   }
 
+  // ==================== Face publish (Lazy Offsets) ===========================
   void _publishFaceLmk(int w, int h, List<Float32List> faces2d, {int? seq}) {
     _lastFaceFlat = faces2d;
-    _lastFace2D = toOffsets2D(faces2d);
+    _lastFace2D = null; // evitar construir Offsets por frame
     final current = _faceLmk.value;
     final nextSeq = seq ?? (current.lastSeq + 1);
     if (nextSeq != current.lastSeq || !identical(current.lastFlat, _lastFaceFlat)) {
-      final now = DateTime.now();
       _faceLmk.value = LmkState(
-        last: _lastFace2D,
-        lastFlat: _lastFaceFlat,
+        last: null,                 // lazy
+        lastFlat: _lastFaceFlat,    // source of truth
         lastFlatZ: null,
         lastSeq: nextSeq,
-        lastTs: now,
+        lastTs: DateTime.now(),
         imageSize: _szWHCached(w, h),
       );
-      // >>> new: asegura repaint aunque solo llegue "face"
       _bumpOverlay();
-      // <<<
     }
   }
+  // ===========================================================================
 
   void _handleParsed2D(Map msg, {String? fallbackTask}) {
     final t = (msg['task'] as String? ?? fallbackTask ?? 'pose').toLowerCase();
@@ -555,7 +555,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
     final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
 
-    // ───── AFTER (support both old lists and new packed buffers) ─────
     _lastW = w; _lastH = h;
     if (seq != null) {
       final last = _lastSeqPerTask[t];
@@ -677,6 +676,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
 
+  // ======= O(1) sampler para detectar normalizado vs pixeles ================
+  bool _looksNormalized(List<List<Offset>> poses) {
+    if (poses.isEmpty || poses.first.isEmpty) return false;
+    final p = poses.first;
+    final len = p.length;
+    final sampleIdx = <int>{0, len ~/ 2, len - 1};
+    for (final i in sampleIdx) {
+      final v = p[i];
+      if (v.dx < -0.1 || v.dx > 1.1 || v.dy < -0.1 || v.dy > 1.1) return false;
+    }
+    return true;
+  }
+  // ==========================================================================
+
   void _handlePoseText(String text) {
     try {
       final m = _parseJson(text);
@@ -689,11 +702,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       PoseFrame out = raw;
 
       if (raw.posesPx != null && raw.posesPx!.isNotEmpty) {
-        final isNormalized = raw.posesPx!.every(
-          (pose) => pose.every(
-            (p) => p.dx >= 0 && p.dx <= 1.2 && p.dy >= 0 && p.dy <= 1.2,
-          ),
-        );
+        final isNormalized = _looksNormalized(raw.posesPx!);
 
         if (isNormalized) {
           final scaled = raw.posesPx!
@@ -703,12 +712,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               .toList(growable: false);
 
           out = PoseFrame(
-            imageSize: _szWH(w, h),
+            imageSize: _szWHCached(w, h),
             posesPx: scaled,
           );
         } else if (raw.imageSize.width <= 4 || raw.imageSize.height <= 4) {
           out = PoseFrame(
-            imageSize: _szWH(w, h),
+            imageSize: _szWHCached(w, h),
             posesPx: raw.posesPx,
           );
         }
@@ -758,7 +767,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _maybeSendKF() {
     final now = DateTime.now();
-    if (now.difference(_lastKfReq).inMilliseconds >= 300) {
+    if (now.millisecondsSinceEpoch - _lastKfReq.millisecondsSinceEpoch >= kfMinGapMs) {
       _lastKfReq = now;
       _sendCtrlKF();
     }
@@ -797,21 +806,64 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     });
   }
 
+  // ===== Pose flat reuse ======================================================
+  List<Float32List>? _flatPoolPose;
+  static const int _POSE_LANDMARKS = 33;
+
+  void _ensurePoseFlatPool(int persons, int perPoseLen) {
+    final neededLen = perPoseLen * 2; // x,y per landmark
+    if (_flatPoolPose != null &&
+        _flatPoolPose!.length == persons &&
+        _flatPoolPose!.first.length == neededLen) return;
+
+    _flatPoolPose = List.generate(
+      persons,
+      (_) => Float32List(neededLen),
+      growable: false,
+    );
+  }
+
+  void _copyOffsetsToFlat(List<Offset> src, Float32List dst) {
+    // assume lengths are matched
+    for (int i = 0, j = 0; i < src.length; i++) {
+      final p = src[i];
+      dst[j++] = p.dx; dst[j++] = p.dy;
+    }
+  }
+  // ===========================================================================
+
   void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
     List<Float32List>? pxFlat = frame.posesPxFlat;
     final pxLegacy = frame.posesPx;
+
     if ((pxFlat == null || pxFlat.isEmpty) && pxLegacy != null && pxLegacy.isNotEmpty) {
-      pxFlat = pxLegacy.map((pose) {
-        final f = Float32List(pose.length * 2);
-        for (var i = 0; i < pose.length; i++) { f[i*2] = pose[i].dx; f[i*2+1] = pose[i].dy; }
-        return f;
-      }).toList(growable: false);
+      final persons = pxLegacy.length;
+      final perPoseLen = pxLegacy[0].length; // ej. 33 para MediaPipe Pose
+      _ensurePoseFlatPool(persons, perPoseLen);
+
+      final reused = List<Float32List>.generate(persons, (i) {
+        final dst = _flatPoolPose![i];
+        final src = pxLegacy[i];
+        if (src.length * 2 != dst.length) {
+          // forma atípica; caer a una copia única
+          final f = Float32List(src.length * 2);
+          for (int k = 0, j = 0; k < src.length; k++) {
+            final p = src[k];
+            f[j++] = p.dx; f[j++] = p.dy;
+          }
+          return f;
+        }
+        _copyOffsetsToFlat(src, dst);
+        return dst;
+      }, growable: false);
+
+      pxFlat = reused;
     }
 
     _latestFrame.value = frame;
 
     if (task == 'face') {
-      final lf  = _lastFace2D;
+      final lf  = _lastFace2D;   // puede ser null por lazy
       final lff = _lastFaceFlat;
       if (lf != null || lff != null) {
         _faceLmk.value = LmkState(
@@ -835,14 +887,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           lastSeq: nextSeq,
           imageSize: frame.imageSize,
         );
+        _bumpOverlay();
       }
     }
 
-    if (!_framesCtrl.isClosed) _framesCtrl.add(frame);
-
-    // >>> new: coalesce repaint una vez por ciclo de emisión
-    _bumpOverlay();
-    // <<<
+    if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
+      _framesCtrl.add(frame);
+    }
   }
 
   void _handleTaskBinary(String task, Uint8List b) {
@@ -900,7 +951,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }) {
     if (_disposed) return;
 
-    // AFTER (build Float32List once per person)
+    // construir Float32List (si viene 3D) una vez por persona
     final List<Float32List> pxFlat = poses3d.map((pose) {
       final f = Float32List(pose.length * 2);
       for (var i = 0; i < pose.length; i++) {
