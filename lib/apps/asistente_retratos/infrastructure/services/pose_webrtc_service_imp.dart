@@ -788,19 +788,28 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   // ===== Pose flat reuse ======================================================
   List<Float32List>? _flatPoolPose;
+  List<Float32List>? _flatListWrapper;
   static const int _POSE_LANDMARKS = 33;
 
   void _ensurePoseFlatPool(int persons, int perPoseLen) {
     final neededLen = perPoseLen * 2; // x,y per landmark
-    if (_flatPoolPose != null &&
-        _flatPoolPose!.length == persons &&
-        (persons == 0 || _flatPoolPose!.first.length == neededLen)) return;
+    final changed = _flatPoolPose == null ||
+        _flatPoolPose!.length != persons ||
+        (persons > 0 && _flatPoolPose!.first.length != neededLen);
+
+    if (!changed) {
+      if (_flatPoolPose != null && _flatListWrapper == null) {
+        _flatListWrapper = List<Float32List>.unmodifiable(_flatPoolPose!);
+      }
+      return;
+    }
 
     _flatPoolPose = List.generate(
       persons,
       (_) => Float32List(neededLen),
       growable: false,
     );
+    _flatListWrapper = List<Float32List>.unmodifiable(_flatPoolPose!);
   }
 
   void _copyOffsetsToFlat(List<Offset> src, Float32List dst) {
@@ -829,23 +838,28 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final perPoseLen = pxLegacy[0].length; // ej. 33 para MediaPipe Pose
       _ensurePoseFlatPool(persons, perPoseLen);
 
-      final reused = List<Float32List>.generate(persons, (i) {
+      final reusedWrapper = _flatListWrapper!;
+      List<Float32List>? fallback;
+
+      for (int i = 0; i < persons; i++) {
         final dst = _flatPoolPose![i];
         final src = pxLegacy[i];
         if (src.length * 2 != dst.length) {
           // forma atípica; caer a una copia única
+          fallback ??= List<Float32List>.from(reusedWrapper, growable: false);
           final f = Float32List(src.length * 2);
           for (int k = 0, j = 0; k < src.length; k++) {
             final p = src[k];
-            f[j++] = p.dx; f[j++] = p.dy;
+            f[j++] = p.dx;
+            f[j++] = p.dy;
           }
-          return f;
+          fallback[i] = f;
+          continue;
         }
         _copyOffsetsToFlat(src, dst);
-        return dst;
-      }, growable: false);
+      }
 
-      pxFlat = reused;
+      pxFlat = fallback ?? reusedWrapper;
     }
 
     _latestFrame.value = frame;
