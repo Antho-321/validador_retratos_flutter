@@ -53,3 +53,32 @@ List<List<PosePoint>> mkPose3D(List<F32> xy, [List<F32>? z]) {
   }
   return out;
 }
+
+/// Crea PosePoint desde buffers empaquetados.
+List<List<PosePoint>> mkPose3DFromPacked(
+  Float32List positions,
+  Int32List ranges, [
+  Float32List? zPositions,
+]) {
+  final out = <List<PosePoint>>[];
+  for (int i = 0; i + 1 < ranges.length; i += 2) {
+    final int startPt = ranges[i];
+    final int countPt = ranges[i + 1];
+    final int startF = startPt << 1; // *2
+    final int endF = startF + (countPt << 1);
+    out.add(List<PosePoint>.generate(countPt, (j) {
+      final int idx = startF + (j << 1);
+      final double x = positions[idx];
+      final double y = positions[idx + 1];
+      double? z;
+      if (zPositions != null) {
+        final int zIdx = startPt + j;
+        if (zIdx < zPositions.length) {
+          z = zPositions[zIdx];
+        }
+      }
+      return PosePoint(x: x, y: y, z: z);
+    }, growable: false));
+  }
+  return out;
+}

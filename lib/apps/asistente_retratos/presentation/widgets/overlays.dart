@@ -1,5 +1,6 @@
 // lib/apps/asistente_retratos/presentation/widgets/overlays.dart
 import 'package:flutter/material.dart';
+import 'dart:typed_data' show Float32List, Int32List;
 import 'dart:ui' as ui show PointMode; // ⬅️ PointMode
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame; // ⬅️ ruta corregida
 import '../styles/colors.dart' show CaptureTheme; // ⬅️ para faceOval/pipBorder, etc.
@@ -174,22 +175,62 @@ class SkeletonPainter extends CustomPainter {
       canvas.scale(s, s);
     }
 
-    for (final pose in frame.posesPx) {
-      if (pose.isEmpty) continue;
+    final Float32List? packedPos = frame.packedPositions;
+    final Int32List? packedRanges = frame.packedRanges;
+    final bool hasPacked =
+        packedPos != null && packedRanges != null && packedRanges.isNotEmpty;
 
-      _linePts.clear();
-      for (final e in kPoseConnections) {
-        final a = e[0], b = e[1];
-        if (a < pose.length && b < pose.length) {
-          _linePts..add(pose[a])..add(pose[b]);
+    if (hasPacked) {
+      for (int i = 0; i + 1 < packedRanges!.length; i += 2) {
+        final int startPt = packedRanges[i];
+        final int countPt = packedRanges[i + 1];
+        if (countPt <= 0) continue;
+
+        _linePts.clear();
+        for (final e in kPoseConnections) {
+          final int a = e[0], b = e[1];
+          if (a >= countPt || b >= countPt) continue;
+          final int idxA = (startPt + a) << 1;
+          final int idxB = (startPt + b) << 1;
+          if (idxA + 1 >= packedPos!.length || idxB + 1 >= packedPos.length) {
+            continue;
+          }
+          final Offset pa = Offset(packedPos[idxA], packedPos[idxA + 1]);
+          final Offset pb = Offset(packedPos[idxB], packedPos[idxB + 1]);
+          _linePts..add(pa)..add(pb);
+        }
+        if (_linePts.isNotEmpty) {
+          canvas.drawPoints(ui.PointMode.lines, _linePts, line);
+        }
+
+        if (drawPoints) {
+          final int startF = startPt << 1;
+          final int endF = startF + (countPt << 1);
+          if (startF >= 0 && endF <= packedPos!.length) {
+            final Float32List view =
+                Float32List.sublistView(packedPos, startF, endF);
+            canvas.drawRawPoints(ui.PointMode.points, view, dot);
+          }
         }
       }
-      if (_linePts.isNotEmpty) {
-        canvas.drawPoints(ui.PointMode.lines, _linePts, line);
-      }
+    } else {
+      for (final pose in frame.posesPx ?? const <List<Offset>>[]) {
+        if (pose.isEmpty) continue;
 
-      if (drawPoints) {
-        canvas.drawPoints(ui.PointMode.points, pose, dot);
+        _linePts.clear();
+        for (final e in kPoseConnections) {
+          final int a = e[0], b = e[1];
+          if (a < pose.length && b < pose.length) {
+            _linePts..add(pose[a])..add(pose[b]);
+          }
+        }
+        if (_linePts.isNotEmpty) {
+          canvas.drawPoints(ui.PointMode.lines, _linePts, line);
+        }
+
+        if (drawPoints) {
+          canvas.drawPoints(ui.PointMode.points, pose, dot);
+        }
       }
     }
 

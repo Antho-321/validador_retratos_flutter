@@ -1,5 +1,5 @@
 // lib/apps/asistente_retratos/domain/model/lmk_state.dart
-import 'dart:typed_data' show Float32List;
+import 'dart:typed_data' show Float32List, Int32List;
 import 'dart:ui' show Offset, Size;
 
 /// Estado ligero para landmarks (cara/pose) publicado a la UI.
@@ -25,6 +25,15 @@ class LmkState {
   /// Marca de tiempo del último update (para `isFresh`).
   final DateTime? lastTs;
 
+  /// Buffer plano (packed) [x0,y0, x1,y1, ...] compartido entre todas las caras/personas.
+  final Float32List? packedPositions;
+
+  /// Rango de puntos por cara/persona en `packedPositions`: [start0, count0, start1, count1, ...].
+  final Int32List? packedRanges;
+
+  /// Buffer Z (packed) [z0, z1, ...] si está disponible.
+  final Float32List? packedZPositions;
+
   const LmkState({
     this.last,
     this.lastFlat,
@@ -32,11 +41,20 @@ class LmkState {
     this.imageSize,
     this.lastSeq = 0,
     this.lastTs,
+    this.packedPositions,
+    this.packedRanges,
+    this.packedZPositions,
   });
 
   /// Estado vacío.
-  factory LmkState.empty() =>
-      const LmkState(last: null, lastFlat: null, lastFlatZ: null);
+  factory LmkState.empty() => const LmkState(
+        last: null,
+        lastFlat: null,
+        lastFlatZ: null,
+        packedPositions: null,
+        packedRanges: null,
+        packedZPositions: null,
+      );
 
   /// Construye desde Float32List por persona/cara.
   /// `z` es opcional y debe tener el mismo número de personas y puntos.
@@ -53,6 +71,9 @@ class LmkState {
       imageSize: imageSize,
       lastSeq: lastSeq ?? 0,
       lastTs: DateTime.now(),
+      packedPositions: null,
+      packedRanges: null,
+      packedZPositions: null,
     );
   }
 
@@ -71,11 +92,35 @@ class LmkState {
       imageSize: imageSize,
       lastSeq: lastSeq ?? 0,
       lastTs: DateTime.now(),
+      packedPositions: null,
+      packedRanges: null,
+      packedZPositions: null,
+    );
+  }
+
+  /// Construye desde buffers empaquetados.
+  factory LmkState.fromPacked({
+    required Float32List positions,
+    required Int32List ranges,
+    Float32List? zPositions,
+    required int lastSeq,
+    required Size imageSize,
+  }) {
+    return LmkState(
+      last: null,
+      lastFlat: null,
+      lastFlatZ: null,
+      imageSize: imageSize,
+      lastSeq: lastSeq,
+      lastTs: DateTime.now(),
+      packedPositions: positions,
+      packedRanges: ranges,
+      packedZPositions: zPositions,
     );
   }
 
   /// Indica si hay canal Z disponible.
-  bool get hasZ => lastFlatZ != null;
+  bool get hasZ => (lastFlatZ != null) || (packedZPositions != null);
 
   /// Heurística de frescura para evitar parpadeos en la UI.
   bool get isFresh {

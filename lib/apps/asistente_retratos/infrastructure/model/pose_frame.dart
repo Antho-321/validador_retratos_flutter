@@ -14,9 +14,14 @@ class PoseFrame {
     required this.imageSize,
     this.posesPx,
     this.posesPxFlat,
+    this.packedPositions,
+    this.packedRanges,
+    this.packedZPositions,
   }) : assert(
-          posesPx != null || posesPxFlat != null,
-          'Debes proveer posesPx o posesPxFlat',
+          posesPx != null ||
+              posesPxFlat != null ||
+              (packedPositions != null && packedRanges != null),
+          'Debes proveer posesPx, posesPxFlat o packedPositions+packedRanges',
         );
 
   /// (w, h) de la imagen del servidor
@@ -29,21 +34,56 @@ class PoseFrame {
   /// Preferido para pintar por rendimiento (cero objetos intermedios).
   final List<Float32List>? posesPxFlat;
 
+  /// Buffer plano (packed) [x0,y0,x1,y1,...] con todas las poses.
+  final Float32List? packedPositions;
+
+  /// Rango por persona dentro de `packedPositions`: [startPts, countPts, ...].
+  final Int32List? packedRanges;
+
+  /// Buffer opcional con coordenadas Z (packed) si el servidor las envía.
+  final Float32List? packedZPositions;
+
   /// Cantidad de personas en el frame.
-  int get posesCount => posesPxFlat?.length ?? posesPx?.length ?? 0;
+  int get posesCount {
+    if (packedRanges != null) return packedRanges!.length ~/ 2;
+    return posesPxFlat?.length ?? posesPx?.length ?? 0;
+  }
 
   /// Indica si tenemos la ruta plana optimizada.
-  bool get isFlat => posesPxFlat != null;
+  bool get isFlat => posesPxFlat != null || (packedPositions != null && packedRanges != null);
 
   PoseFrame copyWith({
     Size? imageSize,
     List<List<Offset>>? posesPx,
     List<Float32List>? posesPxFlat,
+    Float32List? packedPositions,
+    Int32List? packedRanges,
+    Float32List? packedZPositions,
   }) {
     return PoseFrame(
       imageSize: imageSize ?? this.imageSize,
       posesPx: posesPx ?? this.posesPx,
       posesPxFlat: posesPxFlat ?? this.posesPxFlat,
+      packedPositions: packedPositions ?? this.packedPositions,
+      packedRanges: packedRanges ?? this.packedRanges,
+      packedZPositions: packedZPositions ?? this.packedZPositions,
+    );
+  }
+
+  /// Crea un frame a partir de buffers empaquetados.
+  factory PoseFrame.packed(
+    Size imageSize,
+    Float32List positions,
+    Int32List ranges, {
+    Float32List? zPositions,
+  }) {
+    return PoseFrame(
+      imageSize: imageSize,
+      posesPx: null,
+      posesPxFlat: null,
+      packedPositions: positions,
+      packedRanges: ranges,
+      packedZPositions: zPositions,
     );
   }
 }
