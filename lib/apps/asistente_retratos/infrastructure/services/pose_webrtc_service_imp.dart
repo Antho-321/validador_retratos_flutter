@@ -22,6 +22,14 @@ import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_utils.dart';
 
+class _PendingEmit {
+  final PoseFrame frame;
+  final String kind;
+  final int? seq;
+
+  const _PendingEmit(this.frame, this.kind, this.seq);
+}
+
 // ======================= Helpers y extensiones compactas =======================
 
 extension _DCX on RTCDataChannel? {
@@ -148,7 +156,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   RTCDataChannel? _ctrl;
   final Map<String, RTCDataChannel> _resultsPerTask = {};
   final Map<String, Timer?> _emitGateByTask = {};
-  final Map<String, PoseFrame?> _pendingFrameByTask = {};
+  final Map<String, _PendingEmit?> _pendingByTask = {};
   final Map<String, DateTime> _lastEmitByTask = {};
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
@@ -827,15 +835,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     final waitMs = (minInterval - elapsed).clamp(0, 1000);
-    _pendingFrameByTask[task] = frame;
+    _pendingByTask[task] = _PendingEmit(frame, kind, seq);
 
     _emitGateByTask[task] ??= Timer(Duration(milliseconds: waitMs), () {
       _emitGateByTask[task] = null;
-      final f = _pendingFrameByTask[task];
-      _pendingFrameByTask[task] = null;
-      if (f != null && !_disposed) {
+      final p = _pendingByTask[task];
+      _pendingByTask[task] = null;
+      if (p != null && !_disposed) {
         _lastEmitByTask[task] = DateTime.now();
-        _doEmit(f, kind: kind, seq: seq, task: task);
+        _doEmit(p.frame, kind: p.kind, seq: p.seq, task: task);
       }
     });
   }
@@ -848,7 +856,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final neededLen = perPoseLen * 2; // x,y per landmark
     if (_flatPoolPose != null &&
         _flatPoolPose!.length == persons &&
-        _flatPoolPose!.first.length == neededLen) return;
+        (persons == 0 || _flatPoolPose!.first.length == neededLen)) return;
 
     _flatPoolPose = List.generate(
       persons,
@@ -867,6 +875,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // ===========================================================================
 
   void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
+    if (frame.packedPositions != null && frame.packedRanges != null) {
+      _latestFrame.value = frame;
+      if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
+        _framesCtrl.add(frame);
+      }
+      return;
+    }
+
     List<Float32List>? pxFlat = frame.posesPxFlat;
     final pxLegacy = frame.posesPx;
 
@@ -985,16 +1001,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }) {
     if (_disposed) return;
 
-    // construir Float32List (si viene 3D) una vez por persona
-    final List<Float32List> pxFlat = poses3d.map((pose) {
-      final f = Float32List(pose.length * 2);
-      for (var i = 0; i < pose.length; i++) {
-        final p = pose[i];
-        f[i * 2] = p.x;
-        f[i * 2 + 1] = p.y;
+    final persons = poses3d.length;
+    final perPoseLen = persons == 0 ? 0 : poses3d[0].length;
+    _ensurePoseFlatPool(persons, perPoseLen);
+
+    final List<Float32List> pxFlat = List.generate(persons, (i) {
+      final dst = _flatPoolPose![i];
+      final src = poses3d[i];
+      for (int k = 0, j = 0; k < src.length; k++) {
+        final p = src[k];
+        dst[j++] = p.x;
+        dst[j++] = p.y;
       }
-      return f;
-    }).toList(growable: false);
+      return dst;
+    }, growable: false);
 
     final frame = PoseFrame(
       imageSize: _szWHCached(w, h),
