@@ -119,7 +119,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               idealFps: idealFps,
               maxBitrateKbps: maxBitrateKbps,
               preferHevc: preferHevc,
-            );
+            ) {
+    final fps = idealFps <= 0 ? 1 : idealFps;
+    final gapMs = (1000 ~/ fps).clamp(1, 1000);
+    _minGap = Duration(milliseconds: gapMs);
+  }
 
   final Uri offerUri;
   final String facingMode;
@@ -152,8 +156,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   RTCDataChannel? _dc;
   RTCDataChannel? _ctrl;
   final Map<String, RTCDataChannel> _resultsPerTask = {};
-  final Map<String, Timer?> _emitGateByTask = {};
-  final Map<String, _PendingEmit?> _pendingByTask = {};
+  final Map<String, _PendingEmit> _pendingByTask = {};
+  final Set<String> _emitScheduled = {};
   final Map<String, DateTime> _lastEmitByTask = {};
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
@@ -248,7 +252,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // ====== Overlay repaint coalescing =========================================
   final ValueNotifier<int> overlayTick = ValueNotifier<int>(0);
   bool _overlayScheduled = false;
-  Duration _minGap = const Duration(milliseconds: 0); // o 33 ms (≈30 fps)
+  late Duration _minGap;
   DateTime _lastTick = DateTime.fromMillisecondsSinceEpoch(0);
 
   void _bumpOverlay() {
@@ -751,28 +755,34 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }) {
     if (_disposed) return;
 
-    final now = DateTime.now();
-    final last = _lastEmitByTask[task] ?? DateTime.fromMillisecondsSinceEpoch(0);
-    final elapsed = now.difference(last).inMilliseconds;
-    final minInterval = _minEmitIntervalMsFor(task);
-
-    if (_emitGateByTask[task] == null && elapsed >= minInterval) {
-      _lastEmitByTask[task] = now;
-      _doEmit(frame, kind: kind, seq: seq, task: task);
-      return;
-    }
-
-    final waitMs = (minInterval - elapsed).clamp(0, 1000);
     _pendingByTask[task] = _PendingEmit(frame, kind, seq);
+    _scheduleEmitFlush(task);
+  }
 
-    _emitGateByTask[task] ??= Timer(Duration(milliseconds: waitMs), () {
-      _emitGateByTask[task] = null;
-      final p = _pendingByTask[task];
-      _pendingByTask[task] = null;
-      if (p != null && !_disposed) {
-        _lastEmitByTask[task] = DateTime.now();
-        _doEmit(p.frame, kind: p.kind, seq: p.seq, task: task);
+  void _scheduleEmitFlush(String task) {
+    if (_emitScheduled.contains(task)) return;
+    _emitScheduled.add(task);
+    SchedulerBinding.instance.scheduleFrameCallback((_) {
+      _emitScheduled.remove(task);
+      if (_disposed) return;
+
+      final pending = _pendingByTask[task];
+      if (pending == null) return;
+
+      final now = DateTime.now();
+      final last =
+          _lastEmitByTask[task] ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final minIntervalMs = _minEmitIntervalMsFor(task);
+
+      if (now.difference(last).inMilliseconds < minIntervalMs) {
+        _scheduleEmitFlush(task);
+        return;
       }
+
+      _pendingByTask.remove(task);
+      _lastEmitByTask[task] = now;
+      _doEmit(pending.frame,
+          kind: pending.kind, seq: pending.seq, task: task);
     });
   }
 
