@@ -19,8 +19,6 @@ import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
 import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
-import '../parsers/pose_binary_parser.dart';
-import '../parsers/pose_utils.dart';
 
 class _PendingEmit {
   final PoseFrame frame;
@@ -193,8 +191,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
   ValueListenable<LmkState> get faceLandmarks => _faceLmk;
-  List<List<Offset>>? _lastFace2D;
-  List<Float32List>? _lastFaceFlat;
 
   final ValueNotifier<LmkState> _poseLmk = ValueNotifier<LmkState>(LmkState());
   @override
@@ -204,29 +200,21 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   @override
   List<List<Offset>>? get latestFaceLandmarks {
-    final faces3d = _lastPosesPerTask['face'];
-    if (faces3d == null) return null;
-    return faces3d
-        .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-        .toList(growable: false);
+    return _stateToOffsets(_faceLmk.value);
   }
 
   @override
   List<PosePoint>? get latestPoseLandmarks3D {
-    final poses = _lastPosesPerTask['pose'];
-    if (poses == null || poses.isEmpty) return null;
-    return poses.first;
+    return _stateToPosePoints(_poseLmk.value);
   }
 
   @override
   List<Offset>? get latestPoseLandmarks {
-    final ps = latestPoseLandmarks3D;
-    if (ps == null) return null;
-    return ps.map((p) => Offset(p.x, p.y)).toList(growable: false);
+    final pose = _stateToOffsets(_poseLmk.value);
+    if (pose == null || pose.isEmpty) return null;
+    return pose.first;
   }
 
-  final Map<String, PoseBinaryParser> _parsers = {};
-  final Map<String, List<List<PosePoint>>> _lastPosesPerTask = {};
   int? _lastW;
   int? _lastH;
 
@@ -469,8 +457,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   Future<void> dispose() async {
     _disposed = true;
-    _lastFace2D = null;
-    _lastFaceFlat = null;
 
     await _dc.safeClose();
     await _ctrl.safeClose();
@@ -487,7 +473,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     await _framesCtrl.close();
 
     _lastSeqPerTask.clear();
-    _lastPosesPerTask.clear();
 
     await _silenceAsync(() async { await _parseRxSub?.cancel(); });
     _silence(() => _parseRx?.close());
@@ -529,116 +514,77 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return c.future;
   }
 
-  // ==================== Face publish (Lazy Offsets) ===========================
-  void _publishFaceLmk(int w, int h, List<Float32List> faces2d, {int? seq}) {
-    _lastFaceFlat = faces2d;
-    _lastFace2D = null; // evitar construir Offsets por frame
-    final current = _faceLmk.value;
-    final nextSeq = seq ?? (current.lastSeq + 1);
-    if (nextSeq != current.lastSeq || !identical(current.lastFlat, _lastFaceFlat)) {
-      _faceLmk.value = LmkState(
-        last: null,                 // lazy
-        lastFlat: _lastFaceFlat,    // source of truth
-        lastFlatZ: null,
-        lastSeq: nextSeq,
-        lastTs: DateTime.now(),
-        imageSize: _szWHCached(w, h),
-      );
-      _bumpOverlay();
-    }
-  }
-  // ===========================================================================
-
   void _handleParsed2D(Map msg, {String? fallbackTask}) {
     final t = (msg['task'] as String? ?? fallbackTask ?? 'pose').toLowerCase();
     final int w = (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
     final int h = (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
     if (w == 0 || h == 0) return;
 
-    final int? seq = msg['seq'] as int?;
+    final seq = msg['seq'] as int?;
+    final positions = msg['positions'] as Float32List?;
+    final ranges = msg['ranges'] as Int32List?;
+    final hasZ = (msg['hasZ'] as bool?) ?? false;
+    final zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
+
+    if (positions == null || ranges == null) return;
+
+    _lastW = w;
+    _lastH = h;
+    if (seq != null) {
+      final last = _lastSeqPerTask[t];
+      if (last != null && !_isNewer16(seq, last)) return;
+      _lastSeqPerTask[t] = seq;
+    }
+
+    final imageSize = _szWHCached(w, h);
+
+    final nextSeqFace = (seq ?? (_faceLmk.value.lastSeq + 1));
+    final nextSeqPose = (seq ?? (_poseLmk.value.lastSeq + 1));
+
+    if (t == 'face') {
+      final cur = _faceLmk.value;
+      if (nextSeqFace != cur.lastSeq ||
+          !identical(cur.packedPositions, positions) ||
+          !identical(cur.packedRanges, ranges)) {
+        _faceLmk.value = LmkState.fromPacked(
+          positions: positions,
+          ranges: ranges,
+          zPositions: null,
+          lastSeq: nextSeqFace,
+          imageSize: imageSize,
+        );
+        _bumpOverlay();
+      }
+    } else {
+      final cur = _poseLmk.value;
+      if (nextSeqPose != cur.lastSeq ||
+          !identical(cur.packedPositions, positions) ||
+          !identical(cur.packedRanges, ranges) ||
+          !identical(cur.packedZPositions, zPositions)) {
+        _poseLmk.value = LmkState.fromPacked(
+          positions: positions,
+          ranges: ranges,
+          zPositions: zPositions,
+          lastSeq: nextSeqPose,
+          imageSize: imageSize,
+        );
+        _bumpOverlay();
+      }
+    }
+
     final bool kf = (msg['keyframe'] as bool?) ?? false;
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
     final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
 
-    _lastW = w; _lastH = h;
-    if (seq != null) {
-      final last = _lastSeqPerTask[t];
-      if (last != null && !_isNewer16(seq, last)) return; // drop stale PDs
-      _lastSeqPerTask[t] = seq;
-    }
-
-    final Float32List? positions = msg['positions'] as Float32List?;
-    final Int32List? ranges = msg['ranges'] as Int32List?;
-    final bool hasZ = (msg['hasZ'] as bool?) ?? false;
-    final Float32List? zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
-
-    if (positions != null && ranges != null) {
-      final imageSize = _szWHCached(w, h);
-      _lastPosesPerTask[t] = mkPose3DFromPacked(positions, ranges, zPositions);
-
-      if (t == 'face') {
-        final current = _faceLmk.value;
-        final nextSeq = seq ?? (current.lastSeq + 1);
-        if (nextSeq != current.lastSeq ||
-            !identical(current.packedPositions, positions) ||
-            !identical(current.packedRanges, ranges)) {
-          _lastFaceFlat = null;
-          _lastFace2D = null;
-          _faceLmk.value = LmkState.fromPacked(
-            positions: positions,
-            ranges: ranges,
-            zPositions: null,
-            lastSeq: nextSeq,
-            imageSize: imageSize,
-          );
-          _bumpOverlay();
-        }
-      } else if (t == 'pose') {
-        final current = _poseLmk.value;
-        final nextSeq = seq ?? (current.lastSeq + 1);
-        if (nextSeq != current.lastSeq ||
-            !identical(current.packedPositions, positions) ||
-            !identical(current.packedRanges, ranges) ||
-            !identical(current.packedZPositions, zPositions)) {
-          _poseLmk.value = LmkState.fromPacked(
-            positions: positions,
-            ranges: ranges,
-            zPositions: zPositions,
-            lastSeq: nextSeq,
-            imageSize: imageSize,
-          );
-          _bumpOverlay();
-        }
-      }
-
-      final frame = PoseFrame.packed(
-        imageSize,
-        positions,
-        ranges,
-        zPositions: zPositions,
-      );
-      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
-      if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
-      return;
-    }
-
-    // legacy path from isolate
-    final List<Float32List> poses2d =
-        (msg['poses'] as List?)?.cast<Float32List>() ??
-        (msg['poses2d'] as List?)?.cast<Float32List>() ??
-        const <Float32List>[];
-    if (t == 'face') {
-      _publishFaceLmk(w, h, poses2d, seq: seq);
-      _lastPosesPerTask[t] = mkPose3D(poses2d, null);
-    } else {
-      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
-      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
-    }
+    final frame = PoseFrame.packed(
+      imageSize,
+      positions,
+      ranges,
+      zPositions: zPositions,
+    );
+    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
 
     if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
-
-    final frame = PoseFrame(imageSize: _szWHCached(w, h), posesPxFlat: poses2d);
-    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
   }
 
   void _onParseResultFromIsolate(dynamic msg) {
@@ -776,180 +722,103 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     });
   }
 
-  // ===== Pose flat reuse ======================================================
-  List<Float32List>? _flatPoolPose;
-  static const int _POSE_LANDMARKS = 33;
-
-  void _ensurePoseFlatPool(int persons, int perPoseLen) {
-    final neededLen = perPoseLen * 2; // x,y per landmark
-    if (_flatPoolPose != null &&
-        _flatPoolPose!.length == persons &&
-        (persons == 0 || _flatPoolPose!.first.length == neededLen)) return;
-
-    _flatPoolPose = List.generate(
-      persons,
-      (_) => Float32List(neededLen),
-      growable: false,
-    );
-  }
-
-  void _copyOffsetsToFlat(List<Offset> src, Float32List dst) {
-    // assume lengths are matched
-    for (int i = 0, j = 0; i < src.length; i++) {
-      final p = src[i];
-      dst[j++] = p.dx; dst[j++] = p.dy;
-    }
-  }
-  // ===========================================================================
-
   void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
-    if (frame.packedPositions != null && frame.packedRanges != null) {
-      _latestFrame.value = frame;
-      if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
-        _framesCtrl.add(frame);
-      }
-      return;
-    }
-
-    List<Float32List>? pxFlat = frame.posesPxFlat;
-    final pxLegacy = frame.posesPx;
-
-    if ((pxFlat == null || pxFlat.isEmpty) && pxLegacy != null && pxLegacy.isNotEmpty) {
-      final persons = pxLegacy.length;
-      final perPoseLen = pxLegacy[0].length; // ej. 33 para MediaPipe Pose
-      _ensurePoseFlatPool(persons, perPoseLen);
-
-      final reused = List<Float32List>.generate(persons, (i) {
-        final dst = _flatPoolPose![i];
-        final src = pxLegacy[i];
-        if (src.length * 2 != dst.length) {
-          // forma atípica; caer a una copia única
-          final f = Float32List(src.length * 2);
-          for (int k = 0, j = 0; k < src.length; k++) {
-            final p = src[k];
-            f[j++] = p.dx; f[j++] = p.dy;
-          }
-          return f;
-        }
-        _copyOffsetsToFlat(src, dst);
-        return dst;
-      }, growable: false);
-
-      pxFlat = reused;
-    }
-
     _latestFrame.value = frame;
-
-    if (task == 'face') {
-      final lf  = _lastFace2D;   // puede ser null por lazy
-      final lff = _lastFaceFlat;
-      if (lf != null || lff != null) {
-        _faceLmk.value = LmkState(
-          last: lf,
-          lastFlat: lff,
-          lastFlatZ: null,
-          lastSeq: seq ?? _faceLmk.value.lastSeq,
-          lastTs: DateTime.now(),
-          imageSize: frame.imageSize,
-        );
-      }
-    }
-
-    if (task == 'pose' && pxFlat != null && pxFlat.isNotEmpty) {
-      final current = _poseLmk.value;
-      final nextSeq = seq ?? (current.lastSeq + 1);
-      if (nextSeq != current.lastSeq || !identical(current.lastFlat, pxFlat)) {
-        _poseLmk.value = LmkState.fromFlat(
-          pxFlat,
-          z: current.lastFlatZ,
-          lastSeq: nextSeq,
-          imageSize: frame.imageSize,
-        );
-        _bumpOverlay();
-      }
-    }
-
     if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
       _framesCtrl.add(frame);
     }
   }
 
-  void _handleTaskBinary(String task, Uint8List b) {
-    final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-    final res = parser.parse(b);
+  List<List<Offset>>? _stateToOffsets(LmkState state) {
+    final cached = state.last;
+    if (cached != null) return cached;
 
-    if (res is PoseParseOk) {
-      final pkt = res.packet;
-      final int? seq = pkt.seq;
-
-      if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
-        final int? last = _lastSeqPerTask[task];
-        if (last != null && !_isNewer16(seq, last)) {
-          if (task == _primaryTask && res.ackSeq != null) _sendCtrlAck(res.ackSeq!);
-          return;
-        }
-      }
-
-      _lastW = pkt.w;
-      _lastH = pkt.h;
-      _lastPosesPerTask[task] = pkt.poses;
-      if (seq != null) _lastSeqPerTask[task] = seq;
-
-      if (task == 'face') {
-        _lastFace2D = pkt.poses.isEmpty
-            ? const <List<Offset>>[]
-            : pkt.poses
-                .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-                .toList(growable: false);
-      }
-
-      _emitBinary(
-        pkt.w,
-        pkt.h,
-        pkt.poses,
-        kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
-        seq: pkt.seq,
-        task: task,
-      );
-
-      if (task == _primaryTask && res.ackSeq != null) _sendCtrlAck(res.ackSeq!);
-      if (res.requestKeyframe) _sendCtrlKF();
-    } else if (res is PoseParseNeedKF) {
-      _sendCtrlKF();
+    final packedPositions = state.packedPositions;
+    final packedRanges = state.packedRanges;
+    if (packedPositions != null && packedRanges != null && packedRanges.isNotEmpty) {
+      final people = packedRanges.length >> 1;
+      return List<List<Offset>>.generate(people, (person) {
+        final int startPt = packedRanges[person << 1];
+        final int countPt = packedRanges[(person << 1) + 1];
+        final int startF = startPt << 1;
+        return List<Offset>.generate(countPt, (i) {
+          final int idx = startF + (i << 1);
+          return Offset(packedPositions[idx], packedPositions[idx + 1]);
+        }, growable: false);
+      }, growable: false);
     }
+
+    final flats = state.lastFlat;
+    if (flats != null) {
+      return flats
+          .map((f) => List<Offset>.generate(
+                f.length >> 1,
+                (i) => Offset(f[i << 1], f[(i << 1) + 1]),
+                growable: false,
+              ))
+          .toList(growable: false);
+    }
+
+    return null;
   }
 
-  void _emitBinary(
-    int w,
-    int h,
-    List<List<PosePoint>> poses3d, {
-    required String kind,
-    int? seq,
-    required String task,
-  }) {
-    if (_disposed) return;
+  List<PosePoint>? _stateToPosePoints(LmkState state) {
+    final packedPositions = state.packedPositions;
+    final packedRanges = state.packedRanges;
+    if (packedPositions != null && packedRanges != null && packedRanges.length >= 2) {
+      final int startPt = packedRanges[0];
+      final int countPt = packedRanges[1];
+      final int startF = startPt << 1;
+      final packedZ = state.packedZPositions;
+      final fallbackFlatZ = state.lastFlatZ;
+      final List<PosePoint> out = List<PosePoint>.generate(countPt, (i) {
+        final int idx = startF + (i << 1);
+        double? z;
+        if (packedZ != null) {
+          final int zi = startPt + i;
+          if (zi < packedZ.length) z = packedZ[zi];
+        } else if (fallbackFlatZ != null && fallbackFlatZ.isNotEmpty) {
+          final firstZ = fallbackFlatZ.first;
+          if (i < firstZ.length) z = firstZ[i];
+        }
+        return PosePoint(
+          x: packedPositions[idx],
+          y: packedPositions[idx + 1],
+          z: z,
+        );
+      }, growable: false);
 
-    final persons = poses3d.length;
-    final perPoseLen = persons == 0 ? 0 : poses3d[0].length;
-    _ensurePoseFlatPool(persons, perPoseLen);
-
-    final List<Float32List> pxFlat = List.generate(persons, (i) {
-      final dst = _flatPoolPose![i];
-      final src = poses3d[i];
-      for (int k = 0, j = 0; k < src.length; k++) {
-        final p = src[k];
-        dst[j++] = p.x;
-        dst[j++] = p.y;
+      if (out.isNotEmpty) {
+        return out;
       }
-      return dst;
-    }, growable: false);
+    }
 
-    final frame = PoseFrame(
-      imageSize: _szWHCached(w, h),
-      posesPxFlat: pxFlat,
-    );
+    final flats = state.lastFlat;
+    if (flats != null && flats.isNotEmpty) {
+      final first = flats.first;
+      final zFlat = state.lastFlatZ;
+      return List<PosePoint>.generate(first.length >> 1, (i) {
+        double? z;
+        if (zFlat != null && zFlat.isNotEmpty && i < zFlat.first.length) {
+          z = zFlat.first[i];
+        }
+        return PosePoint(
+          x: first[i << 1],
+          y: first[(i << 1) + 1],
+          z: z,
+        );
+      }, growable: false);
+    }
 
-    _emitBinaryThrottled(frame, kind: kind, seq: seq, task: task);
+    final legacy = state.last;
+    if (legacy != null && legacy.isNotEmpty) {
+      final first = legacy.first;
+      return first
+          .map((o) => PosePoint(x: o.dx, y: o.dy))
+          .toList(growable: false);
+    }
+
+    return null;
   }
 
   void _sendCtrlKF() => _ctrl.sendText('KF');
