@@ -13,7 +13,7 @@ import 'package:http/http.dart' as http;
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
-import '../model/pose_frame.dart' show PoseFrame, poseFrameFromMap;
+import '../model/pose_frame.dart' show PoseFrame;
 import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
@@ -87,9 +87,6 @@ int _dcIdFromTask(String name, {int mod = 1024}) {
   }
   return id;
 }
-
-Map<String, dynamic> _parseJson(String text) =>
-    jsonDecode(text) as Map<String, dynamic>;
 
 class PoseWebrtcServiceImp implements PoseCaptureService {
   PoseWebrtcServiceImp({
@@ -671,17 +668,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {};
     ch.onMessage = (RTCDataChannelMessage m) {
-      if (m.isBinary) {
-        _enqueueBinary(task, m.binary);
-      } else {
-        final txtRaw = m.text ?? '';
-        final txt = txtRaw.trim();
-        if (txt.toUpperCase() == 'KF') {
-          // ignore
-        } else {
-          _handlePoseText(txtRaw);
-        }
-      }
+      if (!m.isBinary) return;
+      _enqueueBinary(task, m.binary);
     };
   }
 
@@ -718,66 +706,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
 
-  // ======= O(1) sampler para detectar normalizado vs pixeles ================
-  bool _looksNormalized(List<List<Offset>> poses) {
-    if (poses.isEmpty || poses.first.isEmpty) return false;
-    final p = poses.first;
-    final len = p.length;
-    final sampleIdx = <int>{0, len ~/ 2, len - 1};
-    for (final i in sampleIdx) {
-      final v = p[i];
-      if (v.dx < -0.1 || v.dx > 1.1 || v.dy < -0.1 || v.dy > 1.1) return false;
-    }
-    return true;
-  }
-  // ==========================================================================
-
-  void _handlePoseText(String text) {
-    try {
-      final m = _parseJson(text);
-      final PoseFrame? raw = poseFrameFromMap(m);
-      if (raw == null) return;
-
-      final int w = _lastW ?? idealWidth;
-      final int h = _lastH ?? idealHeight;
-
-      PoseFrame out = raw;
-
-      if (raw.posesPx != null && raw.posesPx!.isNotEmpty) {
-        final isNormalized = _looksNormalized(raw.posesPx!);
-
-        if (isNormalized) {
-          final scaled = raw.posesPx!
-              .map((pose) => pose
-                  .map((p) => Offset(p.dx * w, p.dy * h))
-                  .toList(growable: false))
-              .toList(growable: false);
-
-          out = PoseFrame(
-            imageSize: _szWHCached(w, h),
-            posesPx: scaled,
-          );
-        } else if (raw.imageSize.width <= 4 || raw.imageSize.height <= 4) {
-          out = PoseFrame(
-            imageSize: _szWHCached(w, h),
-            posesPx: raw.posesPx,
-          );
-        }
-      }
-
-      final faces = m['faces'] as List<dynamic>?;
-      if (faces != null) {
-        final flats = faces2DFromJson(faces, w, h);
-        _publishFaceLmk(w, h, flats, seq: m['seq'] as int?);
-      }
-
-      final int? seqFromJson = m['seq'] as int?;
-      _emitBinaryThrottled(out, kind: 'JSON', seq: seqFromJson, task: 'pose');
-
-    } catch (_) {
-      _sendCtrlKF();
-    }
-  }
 
   void _enqueueBinary(String task, Uint8List buf) {
     _pendingBin[task] = buf;
