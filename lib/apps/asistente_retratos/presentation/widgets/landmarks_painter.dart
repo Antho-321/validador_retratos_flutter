@@ -1,5 +1,5 @@
 // lib/.../landmarks_painter.dart
-import 'dart:typed_data' show Float32List;
+import 'dart:typed_data' show Float32List, Int32List;
 import 'dart:ui' as ui show PointMode;
 import 'package:flutter/widgets.dart';
 
@@ -143,6 +143,18 @@ class LandmarksPainter extends CustomPainter {
     _lastPoseSeq = seq;
   }
 
+  Float32List? _posePackedView(Float32List? positions, Int32List? ranges) {
+    if (positions == null || ranges == null) return null;
+    if (ranges.length < 2) return null;
+    final int countPt = ranges[1];
+    if (countPt <= 0) return null;
+    final int startPt = ranges[0];
+    final int startF = startPt << 1;
+    final int endF = startF + (countPt << 1);
+    if (startF < 0 || endF > positions.length) return null;
+    return Float32List.sublistView(positions, startF, endF);
+  }
+
   // ============================ Face helpers ================================
   // Cruces de tamaño fijo en pantalla (r en px de pantalla, p.ej. 2/_scale)
   void _fillFaceCrosses(final List<Float32List> faces, final double r, final int faceSeq) {
@@ -188,6 +200,77 @@ class LandmarksPainter extends CustomPainter {
     _lastFaceSeq = faceSeq;
   }
 
+  void _fillFaceCrossesPacked(
+    Float32List positions,
+    Int32List ranges,
+    double r,
+    int faceSeq,
+  ) {
+    final bool needsUpdate =
+        (faceSeq != _lastFaceSeq) || (_faceCrossFloats == 0) || (r != _lastCrossR);
+    if (!needsUpdate) return;
+
+    int floats = 0;
+    for (int i = 0; i + 1 < ranges.length; i += 2) {
+      floats += (ranges[i + 1]) * 8;
+    }
+    if (_faceCrossBuf.length < floats) _faceCrossBuf = Float32List(floats);
+
+    int k = 0;
+    for (int i = 0; i + 1 < ranges.length; i += 2) {
+      final int startPt = ranges[i];
+      final int countPt = ranges[i + 1];
+      final int startF = startPt << 1;
+      for (int j = 0; j < countPt; j++) {
+        final int idx = startF + (j << 1);
+        if (idx + 1 >= positions.length) break;
+        final double x = positions[idx];
+        final double y = positions[idx + 1];
+        _faceCrossBuf[k++] = x - r;
+        _faceCrossBuf[k++] = y;
+        _faceCrossBuf[k++] = x + r;
+        _faceCrossBuf[k++] = y;
+        _faceCrossBuf[k++] = x;
+        _faceCrossBuf[k++] = y - r;
+        _faceCrossBuf[k++] = x;
+        _faceCrossBuf[k++] = y + r;
+      }
+    }
+
+    _faceCrossFloats = k;
+    _lastFaceSeq = faceSeq;
+    _lastCrossR = r;
+  }
+
+  void _fillFacePointsPacked(
+    Float32List positions,
+    Int32List ranges,
+    int faceSeq,
+  ) {
+    if (faceSeq == _lastFaceSeq && _facePointFloats != 0) return;
+
+    int needed = 0;
+    for (int i = 0; i + 1 < ranges.length; i += 2) {
+      needed += ranges[i + 1] << 1;
+    }
+    if (_facePointBuf.length < needed) _facePointBuf = Float32List(needed);
+
+    int k = 0;
+    for (int i = 0; i + 1 < ranges.length; i += 2) {
+      final int startPt = ranges[i];
+      final int countPt = ranges[i + 1];
+      final int startF = startPt << 1;
+      final int endF = startF + (countPt << 1);
+      if (startF >= 0 && endF <= positions.length) {
+        _facePointBuf.setRange(k, k + (countPt << 1), positions, startF);
+        k += countPt << 1;
+      }
+    }
+
+    _facePointFloats = k;
+    _lastFaceSeq = faceSeq;
+  }
+
   // =============================== Paint ====================================
   @override
   void paint(Canvas c, Size size) {
@@ -215,7 +298,9 @@ class LandmarksPainter extends CustomPainter {
     }
 
     // ================= POSE =================
-    final Float32List? poseFlat = _extractPoseFlat(poseS.lastFlat);
+    Float32List? poseFlat =
+        _posePackedView(poseS.packedPositions, poseS.packedRanges);
+    poseFlat ??= _extractPoseFlat(poseS.lastFlat);
     if (poseFlat != null) {
       _fillPoseLines(poseFlat, poseS.lastSeq);
       if (showPoseBones && _poseLineFloats > 0) {
@@ -228,20 +313,45 @@ class LandmarksPainter extends CustomPainter {
     }
 
     // ================= FACE =================
-    final List<Float32List>? faces = _extractFaces(faceS.lastFlat);
-    if (showFacePoints && faces != null && faces.isNotEmpty) {
-      if (faceStyle == FaceStyle.points) {
-        _fillFacePoints(faces, faceS.lastSeq);
-        if (_facePointFloats > 0) {
-          final view = Float32List.view(_facePointBuf.buffer, 0, _facePointFloats);
-          c.drawRawPoints(ui.PointMode.points, view, _dots);
+    final Float32List? facePackedPos = faceS.packedPositions;
+    final Int32List? facePackedRanges = faceS.packedRanges;
+    final bool hasPackedFaces =
+        facePackedPos != null && facePackedRanges != null && facePackedRanges.isNotEmpty;
+    final List<Float32List>? faces = hasPackedFaces ? null : _extractFaces(faceS.lastFlat);
+    if (showFacePoints) {
+      if (hasPackedFaces) {
+        if (faceStyle == FaceStyle.points) {
+          _fillFacePointsPacked(facePackedPos!, facePackedRanges!, faceS.lastSeq);
+          if (_facePointFloats > 0) {
+            final view = Float32List.view(
+                _facePointBuf.buffer, 0, _facePointFloats);
+            c.drawRawPoints(ui.PointMode.points, view, _dots);
+          }
+        } else {
+          final double r = 2.0 / _scale;
+          _fillFaceCrossesPacked(facePackedPos!, facePackedRanges!, r, faceS.lastSeq);
+          if (_faceCrossFloats > 0) {
+            final view = Float32List.view(
+                _faceCrossBuf.buffer, 0, _faceCrossFloats);
+            c.drawRawPoints(ui.PointMode.lines, view, _line);
+          }
         }
-      } else {
-        final double r = 2.0 / _scale; // radio fijo en pantalla
-        _fillFaceCrosses(faces, r, faceS.lastSeq);
-        if (_faceCrossFloats > 0) {
-          final view = Float32List.view(_faceCrossBuf.buffer, 0, _faceCrossFloats);
-          c.drawRawPoints(ui.PointMode.lines, view, _line);
+      } else if (faces != null && faces.isNotEmpty) {
+        if (faceStyle == FaceStyle.points) {
+          _fillFacePoints(faces, faceS.lastSeq);
+          if (_facePointFloats > 0) {
+            final view = Float32List.view(
+                _facePointBuf.buffer, 0, _facePointFloats);
+            c.drawRawPoints(ui.PointMode.points, view, _dots);
+          }
+        } else {
+          final double r = 2.0 / _scale; // radio fijo en pantalla
+          _fillFaceCrosses(faces, r, faceS.lastSeq);
+          if (_faceCrossFloats > 0) {
+            final view = Float32List.view(
+                _faceCrossBuf.buffer, 0, _faceCrossFloats);
+            c.drawRawPoints(ui.PointMode.lines, view, _line);
+          }
         }
       }
     }

@@ -567,33 +567,67 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final bool hasZ = (msg['hasZ'] as bool?) ?? false;
     final Float32List? zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
 
-    List<Float32List> poses2d;
     if (positions != null && ranges != null) {
-      // build zero-copy views from packed buffers
-      poses2d = <Float32List>[];
-      for (int i = 0; i < ranges.length; i += 2) {
-        final startPt = ranges[i];        // in points
-        final countPt = ranges[i + 1];    // in points
-        final startF = startPt * 2;       // floats index
-        final endF = startF + countPt * 2;
-        poses2d.add(Float32List.sublistView(positions, startF, endF));
+      final imageSize = _szWHCached(w, h);
+      _lastPosesPerTask[t] = mkPose3DFromPacked(positions, ranges, zPositions);
+
+      if (t == 'face') {
+        final current = _faceLmk.value;
+        final nextSeq = seq ?? (current.lastSeq + 1);
+        if (nextSeq != current.lastSeq ||
+            !identical(current.packedPositions, positions) ||
+            !identical(current.packedRanges, ranges)) {
+          _lastFaceFlat = null;
+          _lastFace2D = null;
+          _faceLmk.value = LmkState.fromPacked(
+            positions: positions,
+            ranges: ranges,
+            zPositions: null,
+            lastSeq: nextSeq,
+            imageSize: imageSize,
+          );
+          _bumpOverlay();
+        }
+      } else if (t == 'pose') {
+        final current = _poseLmk.value;
+        final nextSeq = seq ?? (current.lastSeq + 1);
+        if (nextSeq != current.lastSeq ||
+            !identical(current.packedPositions, positions) ||
+            !identical(current.packedRanges, ranges) ||
+            !identical(current.packedZPositions, zPositions)) {
+          _poseLmk.value = LmkState.fromPacked(
+            positions: positions,
+            ranges: ranges,
+            zPositions: zPositions,
+            lastSeq: nextSeq,
+            imageSize: imageSize,
+          );
+          _bumpOverlay();
+        }
       }
+
+      final frame = PoseFrame.packed(
+        imageSize,
+        positions,
+        ranges,
+        zPositions: zPositions,
+      );
+      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
+      if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
+      return;
+    }
+
+    // legacy path from isolate
+    final List<Float32List> poses2d =
+        (msg['poses'] as List?)?.cast<Float32List>() ??
+        (msg['poses2d'] as List?)?.cast<Float32List>() ??
+        const <Float32List>[];
+    if (t == 'face') {
+      _publishFaceLmk(w, h, poses2d, seq: seq);
       _lastPosesPerTask[t] = mkPose3D(poses2d, null);
-      if (t == 'face') {
-        _publishFaceLmk(w, h, poses2d, seq: seq);
-      }
     } else {
-      // legacy path from isolate
-      poses2d = (msg['poses'] as List?)?.cast<Float32List>() ??
-                (msg['poses2d'] as List?)?.cast<Float32List>() ??
-                const <Float32List>[];
-      if (t == 'face') {
-        _publishFaceLmk(w, h, poses2d, seq: seq);
-        _lastPosesPerTask[t] = mkPose3D(poses2d, null);
-      } else {
-        final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
-        _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
-      }
+      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
+      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
     }
 
     if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
