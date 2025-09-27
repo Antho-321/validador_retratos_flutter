@@ -114,12 +114,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                   ? widget.poseService as PoseWebrtcServiceImp
                                   : null;
 
-                              return CustomPaint(
-                                isComplex: true,
-                                // Usa el painter solo si queremos dibujar y tenemos impl con overlayTick
-                                foregroundPainter: (widget.drawLandmarks && impl != null)
-                                    ? LandmarksPainter(
-                                        impl,
+                              final hasPainter = widget.drawLandmarks && impl != null;
+
+                              return hasPainter
+                                  ? CustomPaint(
+                                      isComplex: true,
+                                      willChange: true,
+                                      foregroundPainter: LandmarksPainter(
+                                        impl!,
                                         mirror: ctl.mirror,
                                         srcSize: impl.latestFrame.value?.imageSize, // mejor escalado
                                         fit: BoxFit.cover,
@@ -127,16 +129,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                         showPosePoints: true,
                                         showFacePoints: true,
                                         faceStyle: FaceStyle.cross, // o FaceStyle.points
-                                        // color: AppColors.landmarks, // opcional
-                                      )
-                                    : null,
-                                child: RTCVideoView(
-                                  svc.localRenderer,
-                                  mirror: ctl.mirror,
-                                  objectFit: RTCVideoViewObjectFit
-                                      .RTCVideoViewObjectFitCover,
-                                ),
-                              );
+                                      ),
+                                      child: RTCVideoView(
+                                        svc.localRenderer,
+                                        mirror: ctl.mirror,
+                                        objectFit: RTCVideoViewObjectFit
+                                            .RTCVideoViewObjectFitCover,
+                                      ),
+                                    )
+                                  : RTCVideoView(
+                                      svc.localRenderer,
+                                      mirror: ctl.mirror,
+                                      objectFit: RTCVideoViewObjectFit
+                                          .RTCVideoViewObjectFitCover,
+                                    );
                             },
                           ),
                         ),
