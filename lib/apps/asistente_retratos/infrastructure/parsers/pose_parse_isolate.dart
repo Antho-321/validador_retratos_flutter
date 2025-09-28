@@ -18,9 +18,10 @@
 //     "requestKF": bool,
 //     "keyframe": bool,
 //     "kind": "PO" | "PD",
-//     "poses": List<Float32List>,           // [x0,y0,x1,y1,...] por persona
-//     "hasZ": bool,                         // true si trae Z
-//     "posesZ": List<Float32List>?          // [z0,z1,...] por persona (normalizado), null si !hasZ
+//     "positions": Float32List,             // [x0,y0,x1,y1,...] packed por frame
+//     "ranges": Int32List,                  // [startPts,countPts,...] por persona
+//     "hasZ": bool,
+//     "zPositions": Float32List?            // [z0,z1,...] packed o null si !hasZ
 //   }
 //
 // SALIDA NEED_KF/ERROR: igual a antes.
@@ -62,23 +63,22 @@ void _handleJob(
 
     final res = parser.parseFlat2D(buf);
 
-    if (res is PoseParseOk2D) {
-      final pkt = res.packet;
-
+    if (res is PoseParseOkPacked) {
       reply.send(<String, dynamic>{
         'type': 'result',
         'status': 'ok',
         'task': task,
-        'w': pkt.w,
-        'h': pkt.h,
-        'seq': pkt.seq,
+        'w': res.w,
+        'h': res.h,
+        'seq': res.seq,
         'ackSeq': res.ackSeq,
         'requestKF': res.requestKeyframe,
-        'keyframe': pkt.keyframe,
-        'kind': pkt.kind == PacketKind.po ? 'PO' : 'PD',
-        'poses': pkt.poses2d,         // List<Float32List> XY
-        'hasZ': pkt.hasZ,             // bool
-        'posesZ': pkt.posesZ,         // List<Float32List>? Z normalizado o null
+        'keyframe': res.keyframe,
+        'kind': res.kind == PacketKind.po ? 'PO' : 'PD',
+        'positions': res.positions,
+        'ranges': res.ranges,
+        'hasZ': res.hasZ,
+        if (res.zPositions != null) 'zPositions': res.zPositions,
       });
       return;
     }
