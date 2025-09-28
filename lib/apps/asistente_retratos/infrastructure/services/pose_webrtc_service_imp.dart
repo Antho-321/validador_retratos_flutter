@@ -92,6 +92,16 @@ int _dcIdFromTask(String name, {int mod = 1024}) {
 }
 
 class PoseWebrtcServiceImp implements PoseCaptureService {
+  static const int _T_POSE = 0;
+  static const int _T_FACE = 1;
+  static const int _MSG_JOB = 0;
+  static const int _MSG_RESULT = 1;
+  static const int _MSG_NEED_KF = 2;
+  static const int _MSG_ERROR = 3;
+
+  static int _taskId(String t) => t.toLowerCase() == 'face' ? _T_FACE : _T_POSE;
+  static String _taskName(int id) => id == _T_FACE ? 'face' : 'pose';
+
   PoseWebrtcServiceImp({
     required this.offerUri,
     this.facingMode = 'user',
@@ -158,19 +168,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   RTCDataChannel? _dc;
   RTCDataChannel? _ctrl;
-  final Map<String, RTCDataChannel> _resultsPerTask = {};
-  final Map<String, _PendingEmit> _pendingByTask = {};
-  final Set<String> _emitScheduled = {};
-  final Map<String, int> _lastEmitUsByTask = {};
+  final Map<int, RTCDataChannel> _dcByTask = {};
+  final Map<int, _PendingEmit> _pendingByTaskI = {};
+  final Set<int> _emitScheduledI = {};
+  final Map<int, int> _lastEmitUsByTaskI = {};
 
-  int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
+  int _minEmitIntervalMsFor(int task) => (1000 ~/ idealFps).clamp(8, 1000);
 
   // ===== Pre-parse drop helpers ===============================================
   bool _tooSoonForParse(String task) {
-    final lastUs = _lastEmitUsByTask[task];
+    final lastUs = _lastEmitUsByTaskI[_taskId(task)];
     if (lastUs == null) return false;
     final nowUs = _nowUs();
-    final minGapUs = _minEmitIntervalMsFor(task) * 1000;
+    final minGapUs = _minEmitIntervalMsFor(_taskId(task)) * 1000;
     return nowUs - lastUs < minGapUs;
   }
 
@@ -205,6 +215,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
+  bool get _wantsFramesStream =>
+      _framesCtrl.hasListener && !_framesCtrl.isClosed;
 
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
@@ -220,7 +232,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   @override
   List<List<Offset>>? get latestFaceLandmarks {
-    final faces3d = _lastPosesPerTask['face'];
+    final faces3d = _lastPosesPerTaskI[_T_FACE];
     if (faces3d == null) return null;
     return faces3d
         .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
@@ -229,7 +241,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   @override
   List<PosePoint>? get latestPoseLandmarks3D {
-    final poses = _lastPosesPerTask['pose'];
+    final poses = _lastPosesPerTaskI[_T_POSE];
     if (poses == null || poses.isEmpty) return null;
     return poses.first;
   }
@@ -241,41 +253,82 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return ps.map((p) => Offset(p.x, p.y)).toList(growable: false);
   }
 
-  final Map<String, PoseBinaryParser> _parsers = {};
-  final Map<String, List<List<PosePoint>>> _lastPosesPerTask = {};
+  final Map<int, PoseBinaryParser> _parsers = {};
+  final Map<int, List<List<PosePoint>>> _lastPosesPerTaskI = {};
+  bool keepPose3DCache = false;
   int? _lastW;
   int? _lastH;
 
-  final Map<String, int> _lastSeqPerTask = {};
+  final Map<int, int> _lastSeqPerTaskI = {};
   bool _isNewer16(int seq, int? last) {
     if (last == null) return true;
     final int d = (seq - last) & 0xFFFF;
     return d != 0 && (d & 0x8000) == 0;
   }
 
-  final Map<String, Uint8List?> _pendingBin = {};
-  final Set<String> _parsingTasks = {};
+  final Map<int, Uint8List?> _pendingBinI = {};
+  final Set<int> _parsingTasksI = {};
+  int _minParseGapUs = 12000;
+  int _parseBudget = 2;
+  int _parseBudgetMax = 2;
+  int _lastParseRefillUs = _nowUs();
   int _lastAckSeqSent = -1;
   int _lastKfReqUs = 0;
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
+  int? _pendingAckSeq;
+  bool _ackScheduled = false;
+  int _lastWallClockUs = 0;
+  DateTime _cachedNow = DateTime.now();
+
+  DateTime _nowWall() {
+    final nowUs = _nowUs();
+    if (nowUs - _lastWallClockUs > 100000) {
+      _lastWallClockUs = nowUs;
+      _cachedNow = DateTime.now();
+    }
+    return _cachedNow;
+  }
+
+  void _refillParseBudget() {
+    final now = _nowUs();
+    if (now - _lastParseRefillUs >= _minParseGapUs) {
+      _lastParseRefillUs = now;
+      _parseBudget = (_parseBudget + 1).clamp(0, _parseBudgetMax);
+    }
+  }
+
+  bool _shouldParseNow(String task) {
+    _refillParseBudget();
+    if (_parseBudget <= 0) return false;
+    if (_tooSoonForParse(task)) return false;
+    _parseBudget--;
+    return true;
+  }
 
   String _forceTurnUdp(String url) => url.contains('?') ? url : '$url?transport=udp';
 
   // ====== Overlay repaint coalescing =========================================
   final ValueNotifier<int> overlayTick = ValueNotifier<int>(0);
   bool _overlayScheduled = false;
+  bool _overlayDirty = false;
   late final int _minOverlayGapUs;
   int _lastTickUs = 0;
+
+  void _markOverlayDirty() {
+    _overlayDirty = true;
+      _markOverlayDirty();
+  }
 
   void _bumpOverlay() {
     if (_overlayScheduled) return;
     final nowUs = _nowUs();
-    if (nowUs - _lastTickUs < _minOverlayGapUs) return;
+    if (!_overlayDirty || nowUs - _lastTickUs < _minOverlayGapUs) return;
     _overlayScheduled = true;
     SchedulerBinding.instance.scheduleFrameCallback((_) {
       _overlayScheduled = false;
       _lastTickUs = _nowUs();
-      overlayTick.value++;
+      _overlayDirty = false;
+      if (overlayTick.hasListeners) overlayTick.value++;
     });
   }
   // ===========================================================================
@@ -366,7 +419,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       if (label.startsWith('results:')) {
         final task = label.substring('results:'.length).toLowerCase().trim();
         final t = task.isNotEmpty ? task : _primaryTask;
-        _resultsPerTask[t] = ch;
+        _dcByTask[_taskId(t)] = ch;
         if (t == _primaryTask) _dc = ch;
         _wireResults(ch, task: t);
       }
@@ -453,7 +506,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       ..ordered = false
       ..maxRetransmits = 0;
     final ch = await _pc!.createDataChannel('results:$task', lossy);
-    _resultsPerTask[task] = ch;
+    _dcByTask[_taskId(task)] = ch;
     if (task == _primaryTask) _dc = ch;
     _wireResults(ch, task: task);
     return ch;
@@ -502,8 +555,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _dcGuardTimer?.cancel();
     await _framesCtrl.close();
 
-    _lastSeqPerTask.clear();
-    _lastPosesPerTask.clear();
+    _lastSeqPerTaskI.clear();
+    _lastPosesPerTaskI.clear();
 
     await _silenceAsync(() async { await _parseRxSub?.cancel(); });
     _silence(() => _parseRx?.close());
@@ -557,140 +610,223 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         lastFlat: _lastFaceFlat,    // source of truth
         lastFlatZ: null,
         lastSeq: nextSeq,
-        lastTs: DateTime.now(),
+        lastTs: _nowWall(),
         imageSize: _szWHCached(w, h),
       );
-      _bumpOverlay();
+      _markOverlayDirty();
     }
   }
   // ===========================================================================
 
-  void _handleParsed2D(Map msg, {String? fallbackTask}) {
-    final t = (msg['task'] as String? ?? fallbackTask ?? 'pose').toLowerCase();
-    final int w = (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
-    final int h = (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
+  void _handleParsedPacked({
+    required int taskId,
+    required int w,
+    required int h,
+    int? seq,
+    required bool requestKF,
+    required bool keyframe,
+    required int kindCode,
+    required Float32List positions,
+    required Int32List ranges,
+    Float32List? zPositions,
+  }) {
     if (w == 0 || h == 0) return;
 
-    final int? seq = msg['seq'] as int?;
-    final bool kf = (msg['keyframe'] as bool?) ?? false;
-    final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
-    final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
+    final taskName = _taskName(taskId);
+    final emitKind =
+        kindCode == 0 ? 'PO' : (keyframe ? 'PD(KF)' : 'PD');
 
-    _lastW = w; _lastH = h;
+    _lastW = w;
+    _lastH = h;
     if (seq != null) {
-      final last = _lastSeqPerTask[t];
-      if (last != null && !_isNewer16(seq, last)) return; // drop stale PDs
-      _lastSeqPerTask[t] = seq;
+      _lastSeqPerTaskI[taskId] = seq;
     }
 
-    final Float32List? positions = msg['positions'] as Float32List?;
-    final Int32List? ranges = msg['ranges'] as Int32List?;
-    final bool hasZ = (msg['hasZ'] as bool?) ?? false;
-    final Float32List? zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
+    if (keepPose3DCache) {
+      _lastPosesPerTaskI[taskId] =
+          mkPose3DFromPacked(positions, ranges, zPositions);
+    }
 
-    if (positions != null && ranges != null) {
-      final imageSize = _szWHCached(w, h);
-      _lastPosesPerTask[t] = mkPose3DFromPacked(positions, ranges, zPositions);
-
-      if (t == 'face') {
-        final current = _faceLmk.value;
-        final nextSeq = seq ?? (current.lastSeq + 1);
-        if (nextSeq != current.lastSeq ||
-            !identical(current.packedPositions, positions) ||
-            !identical(current.packedRanges, ranges)) {
-          _lastFaceFlat = null;
-          _lastFace2D = null;
-          _faceLmk.value = LmkState.fromPacked(
-            positions: positions,
-            ranges: ranges,
-            zPositions: null,
-            lastSeq: nextSeq,
-            imageSize: imageSize,
-          );
-          _bumpOverlay();
-        }
-      } else if (t == 'pose') {
-        final current = _poseLmk.value;
-        final nextSeq = seq ?? (current.lastSeq + 1);
-        if (nextSeq != current.lastSeq ||
-            !identical(current.packedPositions, positions) ||
-            !identical(current.packedRanges, ranges) ||
-            !identical(current.packedZPositions, zPositions)) {
-          _poseLmk.value = LmkState.fromPacked(
-            positions: positions,
-            ranges: ranges,
-            zPositions: zPositions,
-            lastSeq: nextSeq,
-            imageSize: imageSize,
-          );
-          _bumpOverlay();
-        }
+    final imageSize = _szWHCached(w, h);
+    if (taskId == _T_FACE) {
+      final current = _faceLmk.value;
+      final nextSeq = seq ?? (current.lastSeq + 1);
+      if (nextSeq != current.lastSeq ||
+          !identical(current.packedPositions, positions) ||
+          !identical(current.packedRanges, ranges)) {
+        _lastFaceFlat = null;
+        _lastFace2D = null;
+        _faceLmk.value = LmkState(
+          last: null,
+          lastFlat: null,
+          lastFlatZ: null,
+          imageSize: imageSize,
+          lastSeq: nextSeq,
+          lastTs: _nowWall(),
+          packedPositions: positions,
+          packedRanges: ranges,
+          packedZPositions: null,
+        );
+        _markOverlayDirty();
       }
-
-      final frame = PoseFrame.packed(
-        imageSize,
-        positions,
-        ranges,
-        zPositions: zPositions,
-      );
-      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
-      if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
-      return;
+    } else if (taskId == _T_POSE) {
+      final current = _poseLmk.value;
+      final nextSeq = seq ?? (current.lastSeq + 1);
+      if (nextSeq != current.lastSeq ||
+          !identical(current.packedPositions, positions) ||
+          !identical(current.packedRanges, ranges) ||
+          !identical(current.packedZPositions, zPositions)) {
+        _poseLmk.value = LmkState(
+          last: null,
+          lastFlat: null,
+          lastFlatZ: null,
+          imageSize: imageSize,
+          lastSeq: nextSeq,
+          lastTs: _nowWall(),
+          packedPositions: positions,
+          packedRanges: ranges,
+          packedZPositions: zPositions,
+        );
+        _markOverlayDirty();
+      }
     }
 
-    // legacy path from isolate
-    final List<Float32List> poses2d =
-        (msg['poses'] as List?)?.cast<Float32List>() ??
-        (msg['poses2d'] as List?)?.cast<Float32List>() ??
-        const <Float32List>[];
-    if (t == 'face') {
+    final frame = PoseFrame.packed(
+      imageSize,
+      positions,
+      ranges,
+      zPositions: zPositions,
+    );
+    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: taskName);
+    if (requestKF) _maybeSendKF();
+  }
+
+  void _handleLegacyPoses(
+    int taskId,
+    int w,
+    int h,
+    List<Float32List> poses2d, {
+    List<Float32List>? posesZ,
+    int? seq,
+    required bool requestKF,
+    required int kindCode,
+    required bool keyframe,
+  }) {
+    if (w == 0 || h == 0) return;
+
+    final taskName = _taskName(taskId);
+    final emitKind =
+        kindCode == 0 ? 'PO' : (keyframe ? 'PD(KF)' : 'PD');
+
+    _lastW = w;
+    _lastH = h;
+    if (seq != null) {
+      _lastSeqPerTaskI[taskId] = seq;
+    }
+
+    if (taskId == _T_FACE) {
       _publishFaceLmk(w, h, poses2d, seq: seq);
-      _lastPosesPerTask[t] = mkPose3D(poses2d, null);
+      if (keepPose3DCache) {
+        _lastPosesPerTaskI[taskId] = mkPose3D(poses2d, null);
+      }
     } else {
-      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
-      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
+      if (keepPose3DCache) {
+        _lastPosesPerTaskI[taskId] = mkPose3D(poses2d, posesZ);
+      }
     }
 
-    if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
+    if (requestKF) _maybeSendKF();
 
-    final frame = PoseFrame(imageSize: _szWHCached(w, h), posesPxFlat: poses2d);
-    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
+    final frame = PoseFrame(
+      imageSize: _szWHCached(w, h),
+      posesPxFlat: poses2d,
+    );
+    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: taskName);
   }
 
   void _onParseResultFromIsolate(dynamic msg) {
-    if (_disposed || msg is! Map) return;
+    if (_disposed || msg is! List || msg.isEmpty) return;
 
-    final String? task = (msg['task'] as String?)?.toLowerCase();
-    final String? type = msg['type'] as String?;
+    final int type = msg[0] as int;
 
-    if (task != null) {
-      _parsingTasks.remove(task);
-      if (_pendingBin.containsKey(task)) {
-        if (_tooSoonForParse(task)) {
-          // Try next frame instead of right-now microtask (keeps CPU cooler)
-          SchedulerBinding.instance.scheduleFrameCallback((_) {
-            if (!_disposed &&
-                _pendingBin.containsKey(task) &&
-                !_parsingTasks.contains(task)) {
-              _parsingTasks.add(task);
-              _drainParseLoop(task);
-            }
-          });
-        } else {
-          scheduleMicrotask(() => _drainParseLoop(task));
+    if (type == _MSG_RESULT) {
+      if (msg.length < 12) return;
+      final int taskId = msg[1] as int;
+      final String taskName = _taskName(taskId);
+      _parsingTasksI.remove(taskId);
+
+      void _maybeRetry() {
+        SchedulerBinding.instance.scheduleFrameCallback((_) {
+          if (_disposed) return;
+          if (!_pendingBinI.containsKey(taskId)) return;
+          if (_parsingTasksI.contains(taskId)) return;
+          if (!_shouldParseNow(taskName)) {
+            _maybeRetry();
+            return;
+          }
+          _parsingTasksI.add(taskId);
+          _drainParseLoop(taskName);
+        });
+      }
+
+      if (_pendingBinI.containsKey(taskId)) {
+        _maybeRetry();
+      }
+
+      final int w = msg[2] as int;
+      final int h = msg[3] as int;
+      final int seqRaw = msg[4] as int;
+      final int ackRaw = msg[5] as int;
+      final bool requestKF = (msg[6] as int) != 0;
+      final bool keyframe = (msg[7] as int) != 0;
+      final int kindCode = msg[8] as int;
+      final bool hasZ = (msg[9] as int) != 0;
+      final Float32List positions = msg[10] as Float32List;
+      final Int32List ranges = msg[11] as Int32List;
+      final Float32List? zPositions =
+          hasZ && msg.length > 12 ? msg[12] as Float32List? : null;
+
+      final int? seq = seqRaw >= 0 ? seqRaw : null;
+      final int? ackSeq = ackRaw >= 0 ? ackRaw : null;
+
+      if (kindCode == 1 && !keyframe && seq != null) {
+        final int? last = _lastSeqPerTaskI[taskId];
+        if (last != null && !_isNewer16(seq, last)) {
+          if (taskId == _taskId(_primaryTask) && ackSeq != null) {
+            _sendCtrlAck(ackSeq);
+          }
+          return;
         }
       }
-    }
 
-    final int? ackSeq = msg['ackSeq'] as int?;
-    if (ackSeq != null) _sendCtrlAck(ackSeq);
+      _handleParsedPacked(
+        taskId: taskId,
+        w: w,
+        h: h,
+        seq: seq,
+        requestKF: requestKF,
+        keyframe: keyframe,
+        kindCode: kindCode,
+        positions: positions,
+        ranges: ranges,
+        zPositions: zPositions,
+      );
 
-    if (type == 'result' || type == 'ok2d') {
-      _handleParsed2D(msg, fallbackTask: task);
+      if (ackSeq != null) _sendCtrlAck(ackSeq);
       return;
     }
 
-    _maybeSendKF();
+    if (type == _MSG_NEED_KF) {
+      final int taskId = msg.length > 1 ? msg[1] as int : _T_POSE;
+      _parsingTasksI.remove(taskId);
+      _maybeSendKF();
+      return;
+    }
+
+    if (type == _MSG_ERROR) {
+      final int taskId = msg.length > 1 ? msg[1] as int : _T_POSE;
+      _parsingTasksI.remove(taskId);
+    }
   }
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
@@ -738,39 +874,34 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
 
   void _enqueueBinary(String task, Uint8List buf) {
+    final taskId = _taskId(task);
     // Always replace with the freshest payload
-    _pendingBin[task] = buf;
+    _pendingBinI[taskId] = buf;
 
-    // === EARLY-DROP: if we've emitted too recently AND a parse is already running,
-    // don't schedule a new parse yet; just keep the freshest buffer and return.
-    if (_parsingTasks.contains(task) && _tooSoonForParse(task)) {
-      return; // cheap backpressure: avoid sending another job to the isolate
+    if (_parsingTasksI.contains(taskId) && !_shouldParseNow(task)) {
+      return;
     }
 
-    // Normal path: if parser isn't running for this task, start it.
-    if (_parsingTasks.contains(task)) return; // (we'll parse the freshest later)
-    _parsingTasks.add(task);
+    if (_parsingTasksI.contains(taskId)) return;
+    _parsingTasksI.add(taskId);
     scheduleMicrotask(() => _drainParseLoop(task));
   }
 
   void _drainParseLoop(String task) {
-    final Uint8List? buf = _pendingBin.remove(task);
+    final taskId = _taskId(task);
+    final Uint8List? buf = _pendingBinI.remove(taskId);
     if (buf == null || _disposed) {
-      _parsingTasks.remove(task);
+      _parsingTasksI.remove(taskId);
       return;
     }
 
     try {
       final ttd = TransferableTypedData.fromList([buf]);
-      _parseSendPort?.send({
-        'type': 'job',
-        'task': task,
-        'data': ttd,
-      });
+      _parseSendPort?.send([_MSG_JOB, taskId, ttd]);
       return;
     } catch (_) {
       _maybeSendKF();
-      _parsingTasks.remove(task);
+      _parsingTasksI.remove(taskId);
     }
   }
 
@@ -784,33 +915,43 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }) {
     if (_disposed) return;
 
-    _pendingByTask[task] = _PendingEmit(frame, kind, seq);
-    _scheduleEmitFlush(task);
+    if (!_wantsFramesStream && task != 'pose') {
+      _updateLandmarksOnly(frame, seq: seq, task: task);
+      return;
+    }
+
+    final id = _taskId(task);
+    _pendingByTaskI[id] = _PendingEmit(frame, kind, seq);
+    _scheduleEmitFlush(id);
   }
 
-  void _scheduleEmitFlush(String task) {
-    if (_emitScheduled.contains(task)) return;
-    _emitScheduled.add(task);
+  void _scheduleEmitFlush(int taskId) {
+    if (_emitScheduledI.contains(taskId)) return;
+    _emitScheduledI.add(taskId);
     SchedulerBinding.instance.scheduleFrameCallback((_) {
-      _emitScheduled.remove(task);
+      _emitScheduledI.remove(taskId);
       if (_disposed) return;
 
-      final pending = _pendingByTask[task];
+      final pending = _pendingByTaskI[taskId];
       if (pending == null) return;
 
       final nowUs = _nowUs();
-      final lastUs = _lastEmitUsByTask[task] ?? 0;
-      final minIntervalUs = _minEmitIntervalMsFor(task) * 1000;
+      final lastUs = _lastEmitUsByTaskI[taskId] ?? 0;
+      final minIntervalUs = _minEmitIntervalMsFor(taskId) * 1000;
 
       if (nowUs - lastUs < minIntervalUs) {
-        _scheduleEmitFlush(task);
+        _scheduleEmitFlush(taskId);
         return;
       }
 
-      _pendingByTask.remove(task);
-      _lastEmitUsByTask[task] = nowUs;
-      _doEmit(pending.frame,
-          kind: pending.kind, seq: pending.seq, task: task);
+      _pendingByTaskI.remove(taskId);
+      _lastEmitUsByTaskI[taskId] = nowUs;
+      _doEmit(
+        pending.frame,
+        kind: pending.kind,
+        seq: pending.seq,
+        task: _taskName(taskId),
+      );
     });
   }
 
@@ -849,15 +990,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
   // ===========================================================================
 
-  void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
-    if (frame.packedPositions != null && frame.packedRanges != null) {
-      _latestFrame.value = frame;
-      if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
-        _framesCtrl.add(frame);
-      }
-      return;
-    }
-
+  List<Float32List>? _ensureFlatFromFrame(PoseFrame frame) {
     List<Float32List>? pxFlat = frame.posesPxFlat;
     final pxLegacy = frame.posesPx;
 
@@ -890,10 +1023,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       pxFlat = fallback ?? reusedWrapper;
     }
 
-    _latestFrame.value = frame;
+    return pxFlat;
+  }
+
+  void _updateLandmarksOnly(PoseFrame frame, {int? seq, required String task}) {
+    final pxFlat = _ensureFlatFromFrame(frame);
 
     if (task == 'face') {
-      final lf  = _lastFace2D;   // puede ser null por lazy
+      final lf = _lastFace2D;
       final lff = _lastFaceFlat;
       if (lf != null || lff != null) {
         _faceLmk.value = LmkState(
@@ -901,69 +1038,90 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           lastFlat: lff,
           lastFlatZ: null,
           lastSeq: seq ?? _faceLmk.value.lastSeq,
-          lastTs: DateTime.now(),
+          lastTs: _nowWall(),
           imageSize: frame.imageSize,
         );
+        _markOverlayDirty();
       }
+      return;
     }
 
     if (task == 'pose' && pxFlat != null && pxFlat.isNotEmpty) {
       final current = _poseLmk.value;
       final nextSeq = seq ?? (current.lastSeq + 1);
       if (nextSeq != current.lastSeq || !identical(current.lastFlat, pxFlat)) {
-        _poseLmk.value = LmkState.fromFlat(
-          pxFlat,
-          z: current.lastFlatZ,
-          lastSeq: nextSeq,
+        _poseLmk.value = LmkState(
+          last: null,
+          lastFlat: List<Float32List>.unmodifiable(pxFlat),
+          lastFlatZ: current.lastFlatZ,
           imageSize: frame.imageSize,
+          lastSeq: nextSeq,
+          lastTs: _nowWall(),
+          packedPositions: null,
+          packedRanges: null,
+          packedZPositions: null,
         );
-        _bumpOverlay();
+        _markOverlayDirty();
       }
     }
+  }
 
-    if (_framesCtrl.hasListener && !_framesCtrl.isClosed) {
+  void _doEmit(PoseFrame frame, {required String kind, int? seq, required String task}) {
+    if (frame.packedPositions != null && frame.packedRanges != null) {
+      _latestFrame.value = frame;
+      if (_wantsFramesStream) {
+        _framesCtrl.add(frame);
+      }
+      return;
+    }
+
+    _updateLandmarksOnly(frame, seq: seq, task: task);
+
+    if (_wantsFramesStream) {
       _framesCtrl.add(frame);
     }
   }
 
   void _handleTaskBinary(String task, Uint8List b) {
-    final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-    final res = parser.parseFlat2D(b);
+    final int taskId = _taskId(task);
+    final parser = _parsers.putIfAbsent(taskId, () => PoseBinaryParser());
+    final LmkState currentState =
+        taskId == _T_POSE ? _poseLmk.value : _faceLmk.value;
+
+    final res = parser.parseIntoFlat2D(
+      b,
+      reusePositions: currentState.packedPositions,
+      reuseRanges: currentState.packedRanges,
+      reuseZ: currentState.packedZPositions,
+    );
 
     if (res is PoseParseOkPacked) {
       final int? seq = res.seq;
-
-      if (res.kind == PacketKind.pd && !res.keyframe && seq != null) {
-        final int? last = _lastSeqPerTask[task];
+      final bool isPd = res.kind == PacketKind.pd;
+      if (isPd && !res.keyframe && seq != null) {
+        final int? last = _lastSeqPerTaskI[taskId];
         if (last != null && !_isNewer16(seq, last)) {
-          if (task == _primaryTask && res.ackSeq != null) {
+          if (taskId == _taskId(_primaryTask) && res.ackSeq != null) {
             _sendCtrlAck(res.ackSeq!);
           }
           return;
         }
       }
 
-      final msg = <String, dynamic>{
-        'type': 'ok2d',
-        'task': task,
-        'w': res.w,
-        'h': res.h,
-        'seq': seq,
-        'ackSeq': res.ackSeq,
-        'requestKF': res.requestKeyframe,
-        'keyframe': res.keyframe,
-        'kind': res.kind == PacketKind.po ? 'PO' : 'PD',
-        'positions': res.positions,
-        'ranges': res.ranges,
-        'hasZ': res.hasZ,
-      };
-      if (res.zPositions != null) {
-        msg['zPositions'] = res.zPositions;
-      }
+      _handleParsedPacked(
+        taskId: taskId,
+        w: res.w,
+        h: res.h,
+        seq: res.seq,
+        requestKF: res.requestKeyframe,
+        keyframe: res.keyframe,
+        kindCode: res.kind == PacketKind.po ? 0 : 1,
+        positions: res.positions,
+        ranges: res.ranges,
+        zPositions: res.zPositions,
+      );
 
-      _handleParsed2D(msg, fallbackTask: task);
-
-      if (task == _primaryTask && res.ackSeq != null) {
+      if (taskId == _taskId(_primaryTask) && res.ackSeq != null) {
         _sendCtrlAck(res.ackSeq!);
       }
     } else if (res is PoseParseNeedKF) {
@@ -981,11 +1139,22 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _sendCtrlAck(int seq) {
-    if (seq == _lastAckSeqSent) return;
-    _lastAckSeqSent = seq;
-    _ackBuf[3] = (seq & 0xFF);
-    _ackBuf[4] = ((seq >> 8) & 0xFF);
-    _ctrl.sendBin(_ackBuf);
+    if (_pendingAckSeq != null && ((seq - _pendingAckSeq!) & 0xFFFF) <= 0) {
+      return;
+    }
+    _pendingAckSeq = seq;
+    if (_ackScheduled) return;
+    _ackScheduled = true;
+    scheduleMicrotask(() {
+      _ackScheduled = false;
+      final s = _pendingAckSeq;
+      _pendingAckSeq = null;
+      if (s == null || s == _lastAckSeqSent) return;
+      _lastAckSeqSent = s;
+      _ackBuf[3] = (s & 0xFF);
+      _ackBuf[4] = ((s >> 8) & 0xFF);
+      _ctrl.sendBin(_ackBuf);
+    });
   }
 
   void _startRtpStatsProbe() {

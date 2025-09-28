@@ -3,28 +3,13 @@
 // Isolate de parseo: recibe binarios por SendPort, parsea con PoseBinaryParser
 // (vía parseFlat2D) y devuelve un DTO plano con metadatos + listas Float32List.
 //
-// ENTRADA:
-//   { "type":"job", "task":String, "data":TransferableTypedData, "ackHint":int? }
-//
+// ENTRADA: [0, taskId:int, TransferableTypedData]
 // SALIDA OK:
-//   {
-//     "type": "result",
-//     "status": "ok",
-//     "task": String,
-//     "w": int,
-//     "h": int,
-//     "seq": int?,
-//     "ackSeq": int?,
-//     "requestKF": bool,
-//     "keyframe": bool,
-//     "kind": "PO" | "PD",
-//     "positions": Float32List,             // [x0,y0,x1,y1,...] packed por frame
-//     "ranges": Int32List,                  // [startPts,countPts,...] por persona
-//     "hasZ": bool,
-//     "zPositions": Float32List?            // [z0,z1,...] packed o null si !hasZ
-//   }
-//
-// SALIDA NEED_KF/ERROR: igual a antes.
+//   [1, taskId, w, h, seqOr-1, ackSeqOr-1, requestKF?1:0, keyframe?1:0,
+//    kindCode (0=PO,1=PD), hasZ?1:0, positions:Float32List, ranges:Int32List,
+//    zPositions?:Float32List]
+// SALIDA NEED_KF: [2, taskId]
+// SALIDA ERROR:  [3, taskId]
 
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -35,76 +20,70 @@ void poseParseIsolateEntry(SendPort mainSendPort) {
   final recv = ReceivePort();
   mainSendPort.send(recv.sendPort);
 
-  final parsers = <String, PoseBinaryParser>{};
+  const int msgJob = 0;
+  const int msgResult = 1;
+  const int msgNeedKf = 2;
+  const int msgError = 3;
+  const int msgShutdown = 4;
+
+  final parsers = <int, PoseBinaryParser>{};
 
   recv.listen((dynamic message) {
-    if (message is Map) {
-      final String? type = message['type'] as String?;
-      if (type == 'job') {
-        _handleJob(message, mainSendPort, parsers);
-      } else if (type == 'shutdown') {
-        recv.close();
-      }
+    if (message is! List || message.isEmpty) return;
+    final int type = message[0] as int;
+    if (type == msgJob) {
+      _handleJob(message, mainSendPort, parsers,
+          msgResult: msgResult, msgNeedKf: msgNeedKf, msgError: msgError);
+    } else if (type == msgShutdown) {
+      recv.close();
     }
   });
 }
 
 void _handleJob(
-  Map msg,
+  List<dynamic> msg,
   SendPort reply,
-  Map<String, PoseBinaryParser> parsers,
-) {
+  Map<int, PoseBinaryParser> parsers, {
+  required int msgResult,
+  required int msgNeedKf,
+  required int msgError,
+}) {
   try {
-    final String task = (msg['task'] as String?) ?? 'pose';
-    final TransferableTypedData ttd = msg['data'] as TransferableTypedData;
+    if (msg.length < 3) return;
+    final int taskId = msg[1] as int? ?? 0;
+    final TransferableTypedData ttd = msg[2] as TransferableTypedData;
 
     final Uint8List buf = ttd.materialize().asUint8List();
-    final parser = parsers.putIfAbsent(task, () => PoseBinaryParser());
+    final parser = parsers.putIfAbsent(taskId, () => PoseBinaryParser());
 
-    final res = parser.parseFlat2D(buf);
+    final res = parser.parseIntoFlat2D(buf);
 
     if (res is PoseParseOkPacked) {
-      reply.send(<String, dynamic>{
-        'type': 'result',
-        'status': 'ok',
-        'task': task,
-        'w': res.w,
-        'h': res.h,
-        'seq': res.seq,
-        'ackSeq': res.ackSeq,
-        'requestKF': res.requestKeyframe,
-        'keyframe': res.keyframe,
-        'kind': res.kind == PacketKind.po ? 'PO' : 'PD',
-        'positions': res.positions,
-        'ranges': res.ranges,
-        'hasZ': res.hasZ,
-        if (res.zPositions != null) 'zPositions': res.zPositions,
-      });
+      reply.send([
+        msgResult,
+        taskId,
+        res.w,
+        res.h,
+        res.seq ?? -1,
+        res.ackSeq ?? -1,
+        res.requestKeyframe ? 1 : 0,
+        res.keyframe ? 1 : 0,
+        res.kind == PacketKind.po ? 0 : 1,
+        res.hasZ ? 1 : 0,
+        res.positions,
+        res.ranges,
+        if (res.hasZ && res.zPositions != null) res.zPositions!,
+      ]);
       return;
     }
 
     if (res is PoseParseNeedKF) {
-      reply.send(<String, dynamic>{
-        'type': 'result',
-        'status': 'need_kf',
-        'task': (msg['task'] as String?) ?? 'pose',
-        'error': res.reason,
-      });
+      reply.send([msgNeedKf, taskId]);
       return;
     }
 
-    reply.send(<String, dynamic>{
-      'type': 'result',
-      'status': 'err',
-      'task': (msg['task'] as String?) ?? 'pose',
-      'error': 'Unknown parse result type',
-    });
+    reply.send([msgError, taskId]);
   } catch (e) {
-    reply.send(<String, dynamic>{
-      'type': 'result',
-      'status': 'err',
-      'task': (msg['task'] as String?) ?? 'pose',
-      'error': e.toString(),
-    });
+    reply.send([msgError, msg.length > 1 ? (msg[1] as int? ?? 0) : 0]);
   }
 }

@@ -97,6 +97,13 @@ class PoseBinaryParser {
   bool? _hasZ;
   int get parseErrors => _errors;
 
+  Float32List? _positionsScratch;
+  Int32List? _rangesScratch;
+  Float32List? _zScratch;
+  Float32List? _positionsHint;
+  Int32List? _rangesHint;
+  Float32List? _zHint;
+
   void reset() {
     _lastQ = null;
     _lastScale = 1;
@@ -108,7 +115,71 @@ class PoseBinaryParser {
 
   PoseParseResult parse(Uint8List b) => _parsePacked(b);
 
-  PoseParseResult parseFlat2D(Uint8List b) => _parsePacked(b);
+  PoseParseResult parseFlat2D(Uint8List b) => parseIntoFlat2D(b);
+
+  PoseParseResult parseIntoFlat2D(
+    Uint8List b, {
+    Float32List? reusePositions,
+    Int32List? reuseRanges,
+    Float32List? reuseZ,
+  }) {
+    _positionsHint = reusePositions;
+    _rangesHint = reuseRanges;
+    _zHint = reuseZ;
+    final res = _parsePacked(b);
+    _positionsHint = null;
+    _rangesHint = null;
+    _zHint = null;
+    return res;
+  }
+
+  Float32List _obtainPositions(int length) {
+    final hint = _positionsHint;
+    if (hint != null && hint.length == length) {
+      _positionsHint = null;
+      _positionsScratch = hint;
+      return hint;
+    }
+    final scratch = _positionsScratch;
+    if (scratch != null && scratch.length == length) {
+      return scratch;
+    }
+    final buf = Float32List(length);
+    _positionsScratch = buf;
+    return buf;
+  }
+
+  Int32List _obtainRanges(int length) {
+    final hint = _rangesHint;
+    if (hint != null && hint.length == length) {
+      _rangesHint = null;
+      _rangesScratch = hint;
+      return hint;
+    }
+    final scratch = _rangesScratch;
+    if (scratch != null && scratch.length == length) {
+      return scratch;
+    }
+    final buf = Int32List(length);
+    _rangesScratch = buf;
+    return buf;
+  }
+
+  Float32List? _obtainZ(int length) {
+    final hint = _zHint;
+    if (hint != null && hint.length == length) {
+      _zHint = null;
+      _zScratch = hint;
+      return hint;
+    }
+    final scratch = _zScratch;
+    if (scratch != null && scratch.length == length) {
+      return scratch;
+    }
+    final buf = Float32List(length);
+    _zScratch = buf;
+    return buf;
+  }
 
   PoseParseResult _parsePacked(Uint8List b) {
     try {
@@ -162,9 +233,9 @@ class PoseBinaryParser {
         (b.length == (j + totalPts * 6)) || ((b.length - j) == totalPts * 6);
     _hasZ = hasZ;
 
-    final Float32List positions = Float32List(totalPts * 2);
-    final Float32List? zPositions = hasZ ? Float32List(totalPts) : null;
-    final Int32List ranges = Int32List(nposes * 2);
+    final Float32List positions = _obtainPositions(totalPts * 2);
+    final Float32List? zPositions = hasZ ? _obtainZ(totalPts) : null;
+    final Int32List ranges = _obtainRanges(nposes * 2);
 
     final posesQ = <List<_PtQ>>[];
     int writePos = 0;
@@ -354,9 +425,9 @@ class PoseBinaryParser {
       totalPts += npts;
     }
 
-    final Float32List positions = Float32List(totalPts * 2);
-    final Float32List? zPositions = hasZ ? Float32List(totalPts) : null;
-    final Int32List ranges = Int32List(nposes * 2);
+    final Float32List positions = _obtainPositions(totalPts * 2);
+    final Float32List? zPositions = hasZ ? _obtainZ(totalPts) : null;
+    final Int32List ranges = _obtainRanges(nposes * 2);
 
     final posesQ = <List<_PtQ>>[];
     int writePos = 0;
