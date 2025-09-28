@@ -40,6 +40,15 @@ class PoseOverlay extends StatelessWidget {
   }
 }
 
+const List<int> _kPoseEdgeIdx = <int>[
+  11, 12,
+  11, 13, 13, 15,
+  12, 14, 14, 16,
+  23, 24,
+  23, 25, 25, 27,
+  24, 26, 26, 28,
+];
+
 class _PoseOverlayPainter extends CustomPainter {
   _PoseOverlayPainter(
     this.frame, {
@@ -53,17 +62,10 @@ class _PoseOverlayPainter extends CustomPainter {
   final BoxFit fit;
   final Color landmarksColor;
 
-  // MediaPipe Pose (índices)
-  static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
-  static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
-  static const List<List<int>> _edges = [
-    [LS, RS],
-    [LS, LE], [LE, LW],
-    [RS, RE], [RE, RW],
-    [LH, RH],
-    [LH, LK], [LK, LA],
-    [RH, RK], [RK, RA],
-  ];
+  static const bool _showBones = true;
+  static const bool _showPoints = true;
+
+  final _PoseBufferSet _poseBuffers = _PoseBufferSet(_kPoseEdgeIdx);
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -97,59 +99,35 @@ class _PoseOverlayPainter extends CustomPainter {
     final offX = (size.width - drawW) / 2.0;
     final offY = (size.height - drawH) / 2.0;
 
-    final pt = Paint()
-      ..style = PaintingStyle.fill
-      ..color = landmarksColor;
+    final double strokeScale = s <= 0 ? 1.0 : (1.0 / s);
 
-    final line = Paint()
+    final Paint pt = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
       ..strokeCap = StrokeCap.round
-      ..color = landmarksColor;
+      ..strokeWidth = 5.0 * strokeScale
+      ..color = landmarksColor
+      ..isAntiAlias = false;
 
-    double mapX(double x) {
-      final local = x * s + offX;
-      return mirror ? (size.width - local) : local;
-    }
-    double mapY(double y) => y * s + offY;
+    final Paint line = Paint()
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.0 * strokeScale
+      ..strokeCap = StrokeCap.round
+      ..color = landmarksColor
+      ..isAntiAlias = false;
 
-    final Path bones = Path();
-    final Path dots  = Path();
-    const double r = 2.5;
+    _poseBuffers.reset();
 
     void paintPacked(Float32List positions, Int32List ranges) {
       for (int i = 0; i + 1 < ranges.length; i += 2) {
         final int startPt = ranges[i];
         final int countPt = ranges[i + 1];
-        if (countPt <= 0) continue;
-
-        if (showBones) {
-          for (final e in _edges) {
-            final int a = e[0], b = e[1];
-            if (a >= countPt || b >= countPt) continue;
-            final int idxA = (startPt + a) << 1;
-            final int idxB = (startPt + b) << 1;
-            if (idxA + 1 >= positions.length || idxB + 1 >= positions.length) {
-              continue;
-            }
-            final double ax = mapX(positions[idxA]);
-            final double ay = mapY(positions[idxA + 1]);
-            final double bx = mapX(positions[idxB]);
-            final double by = mapY(positions[idxB + 1]);
-            bones.moveTo(ax, ay);
-            bones.lineTo(bx, by);
-          }
-        }
-
-        if (showPoints) {
-          final int startF = startPt << 1;
-          final int endF = startF + (countPt << 1);
-          for (int idx = startF; idx + 1 < endF && idx + 1 < positions.length; idx += 2) {
-            final double cx = mapX(positions[idx]);
-            final double cy = mapY(positions[idx + 1]);
-            dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-          }
-        }
+        _poseBuffers.appendPacked(
+          positions,
+          startPt,
+          countPt,
+          addPoints: _showPoints,
+          addLines: _showBones,
+        );
       }
     }
 
@@ -157,47 +135,42 @@ class _PoseOverlayPainter extends CustomPainter {
       paintPacked(packedPos!, packedRanges!);
     } else if (flats != null && flats.isNotEmpty) {
       for (final Float32List p in flats) {
-        if (showBones) {
-          for (final e in _edges) {
-            final i0 = e[0] * 2, i1 = e[1] * 2;
-            if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
-            final ax = mapX(p[i0]), ay = mapY(p[i0 + 1]);
-            final bx = mapX(p[i1]), by = mapY(p[i1 + 1]);
-            bones.moveTo(ax, ay);
-            bones.lineTo(bx, by);
-          }
-        }
-        if (showPoints) {
-          for (int i = 0; i + 1 < p.length; i += 2) {
-            final cx = mapX(p[i]), cy = mapY(p[i + 1]);
-            dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-          }
-        }
+        _poseBuffers.appendFlat(
+          p,
+          addPoints: _showPoints,
+          addLines: _showBones,
+        );
       }
     } else if (posesPx != null && posesPx.isNotEmpty) {
       for (final pose in posesPx) {
-        if (showBones) {
-          for (final e in _edges) {
-            final int a = e[0], b = e[1];
-            if (a >= pose.length || b >= pose.length) continue;
-            final Offset pa = pose[a];
-            final Offset pb = pose[b];
-            bones.moveTo(mapX(pa.dx), mapY(pa.dy));
-            bones.lineTo(mapX(pb.dx), mapY(pb.dy));
-          }
-        }
-        if (showPoints) {
-          for (final pt in pose) {
-            final double cx = mapX(pt.dx);
-            final double cy = mapY(pt.dy);
-            dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-          }
-        }
+        _poseBuffers.appendOffsets(
+          pose,
+          addPoints: _showPoints,
+          addLines: _showBones,
+        );
       }
     }
 
-    canvas.drawPath(bones, line);
-    canvas.drawPath(dots, pt);
+    canvas.save();
+    if (mirror) {
+      canvas.translate(size.width - offX, offY);
+      canvas.scale(-s, s);
+    } else {
+      canvas.translate(offX, offY);
+      canvas.scale(s, s);
+    }
+
+    final Float32List? lineView = _showBones ? _poseBuffers.linesView() : null;
+    if (lineView != null) {
+      canvas.drawRawPoints(PointMode.lines, lineView, line);
+    }
+
+    final Float32List? pointView = _showPoints ? _poseBuffers.pointsView() : null;
+    if (pointView != null) {
+      canvas.drawRawPoints(PointMode.points, pointView, pt);
+    }
+
+    canvas.restore();
   }
 
   @override
@@ -352,17 +325,8 @@ class _PoseOverlayFastPainter extends CustomPainter {
 
   final Color landmarksColor;
 
-  // MediaPipe Pose (índices)
-  static const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
-  static const int LH = 23, RH = 24, LK = 25, RK = 26, LA = 27, RA = 28;
-  static const List<List<int>> _edges = [
-    [LS, RS],
-    [LS, LE], [LE, LW],
-    [RS, RE], [RE, RW],
-    [LH, RH],
-    [LH, LK], [LK, LA],
-    [RH, RK], [RK, RA],
-  ];
+  final _PoseBufferSet _poseBuffers = _PoseBufferSet(_kPoseEdgeIdx);
+  final _PointBuffer _facePoints = _PointBuffer();
 
   bool _hasPoseData(PoseFrame? frame) {
     if (frame == null) return false;
@@ -412,37 +376,30 @@ class _PoseOverlayFastPainter extends CustomPainter {
     final double offX = (size.width - drawW) / 2.0;
     final double offY = (size.height - drawH) / 2.0;
 
-    double mapX(double x) {
-      final double local = x * s + offX;
-      return mirror ? (size.width - local) : local;
-    }
-
-    double mapY(double y) => y * s + offY;
+    final double strokeScale = s <= 0 ? 1.0 : (1.0 / s);
 
     final Paint bonePaint = Paint()
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2
+      ..strokeWidth = 2.0 * strokeScale
       ..strokeCap = StrokeCap.round
       ..isAntiAlias = false
       ..color = landmarksColor;
 
     final Paint ptsPaint = Paint()
-      ..style = PaintingStyle.fill
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 5.0 * strokeScale
       ..isAntiAlias = false
       ..color = landmarksColor;
 
     final Paint facePaint = Paint()
-      ..strokeWidth = 3
+      ..strokeWidth = 6.0 * strokeScale
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke
       ..isAntiAlias = false
       ..color = Colors.white;
 
-    final Path bones = Path();
-    final Path dots = Path();
-    bool hasBonePath = false;
-    bool hasDotPath = false;
-    const double r = 2.5;
+    _poseBuffers.reset();
 
     if (frame != null) {
       final Float32List? packedPos = frame.packedPositions;
@@ -454,100 +411,39 @@ class _PoseOverlayFastPainter extends CustomPainter {
 
       if (hasPacked) {
         for (int i = 0; i + 1 < packedRanges!.length; i += 2) {
-          final int startPt = packedRanges[i];
-          final int countPt = packedRanges[i + 1];
-          if (countPt <= 0) continue;
-
-          if (showBones) {
-            for (final e in _edges) {
-              final int a = e[0], b = e[1];
-              if (a >= countPt || b >= countPt) continue;
-              final int idxA = (startPt + a) << 1;
-              final int idxB = (startPt + b) << 1;
-              if (idxA + 1 >= packedPos!.length ||
-                  idxB + 1 >= packedPos.length) {
-                continue;
-              }
-              final double ax = mapX(packedPos[idxA]);
-              final double ay = mapY(packedPos[idxA + 1]);
-              final double bx = mapX(packedPos[idxB]);
-              final double by = mapY(packedPos[idxB + 1]);
-              bones.moveTo(ax, ay);
-              bones.lineTo(bx, by);
-              hasBonePath = true;
-            }
-          }
-
-          if (showPoints) {
-            final int startF = startPt << 1;
-            final int endF = startF + (countPt << 1);
-            for (int idx = startF;
-                idx + 1 < endF && idx + 1 < packedPos!.length;
-                idx += 2) {
-              final double cx = mapX(packedPos[idx]);
-              final double cy = mapY(packedPos[idx + 1]);
-              dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-              hasDotPath = true;
-            }
-          }
+          _poseBuffers.appendPacked(
+            packedPos!,
+            packedRanges[i],
+            packedRanges[i + 1],
+            addPoints: showPoints,
+            addLines: showBones,
+          );
         }
       } else if (flats != null && flats.isNotEmpty) {
         for (final Float32List p in flats) {
-          if (showBones) {
-            for (final e in _edges) {
-              final int i0 = e[0] * 2;
-              final int i1 = e[1] * 2;
-              if (p.length <= i0 + 1 || p.length <= i1 + 1) continue;
-              final double ax = mapX(p[i0]);
-              final double ay = mapY(p[i0 + 1]);
-              final double bx = mapX(p[i1]);
-              final double by = mapY(p[i1 + 1]);
-              bones.moveTo(ax, ay);
-              bones.lineTo(bx, by);
-              hasBonePath = true;
-            }
-          }
-          if (showPoints) {
-            for (int i = 0; i + 1 < p.length; i += 2) {
-              final double cx = mapX(p[i]);
-              final double cy = mapY(p[i + 1]);
-              dots.addOval(Rect.fromCircle(center: Offset(cx, cy), radius: r));
-              hasDotPath = true;
-            }
-          }
+          _poseBuffers.appendFlat(
+            p,
+            addPoints: showPoints,
+            addLines: showBones,
+          );
         }
       } else if (posesPx != null && posesPx.isNotEmpty) {
         for (final pose in posesPx) {
-          if (showBones) {
-            for (final e in _edges) {
-              final int a = e[0], b = e[1];
-              if (a >= pose.length || b >= pose.length) continue;
-              final Offset pa = pose[a];
-              final Offset pb = pose[b];
-              bones.moveTo(mapX(pa.dx), mapY(pa.dy));
-              bones.lineTo(mapX(pb.dx), mapY(pb.dy));
-              hasBonePath = true;
-            }
-          }
-          if (showPoints) {
-            for (final pt in pose) {
-              dots.addOval(
-                Rect.fromCircle(center: Offset(mapX(pt.dx), mapY(pt.dy)), radius: r),
-              );
-              hasDotPath = true;
-            }
-          }
+          _poseBuffers.appendOffsets(
+            pose,
+            addPoints: showPoints,
+            addLines: showBones,
+          );
         }
       }
     }
 
-    if (showBones && hasBonePath) {
-      canvas.drawPath(bones, bonePaint);
-    }
-    if (showPoints && hasDotPath) {
-      canvas.drawPath(dots, ptsPaint);
-    }
+    final Float32List? lineView =
+        showBones ? _poseBuffers.linesView() : null;
+    final Float32List? pointView =
+        showPoints ? _poseBuffers.pointsView() : null;
 
+    Float32List? faceView;
     if (showFace && faceState != null && faceState.isFresh) {
       final Float32List? facePackedPos = faceState.packedPositions;
       final Int32List? facePackedRanges = faceState.packedRanges;
@@ -557,38 +453,55 @@ class _PoseOverlayFastPainter extends CustomPainter {
       final List<List<Offset>>? facesLegacy = faceState.last;
       final List<Float32List>? facesFlat = faceState.lastFlat;
 
-      const double faceR = 3.0;
+      _facePoints.reset();
 
       if (hasFacePacked) {
         for (int i = 0; i + 1 < facePackedRanges!.length; i += 2) {
-          final int startPt = facePackedRanges[i];
-          final int countPt = facePackedRanges[i + 1];
-          final int startF = startPt << 1;
-          final int endF = startF + (countPt << 1);
-          for (int idx = startF;
-              idx + 1 < endF && idx + 1 < facePackedPos!.length;
-              idx += 2) {
-            final double cx = mapX(facePackedPos[idx]);
-            final double cy = mapY(facePackedPos[idx + 1]);
-            canvas.drawCircle(Offset(cx, cy), faceR, facePaint);
-          }
+          _facePoints.appendPacked(
+            facePackedPos!,
+            facePackedRanges[i],
+            facePackedRanges[i + 1],
+          );
         }
       } else if (facesFlat != null && facesFlat.isNotEmpty) {
-        for (final fFlat in facesFlat) {
-          for (int i = 0; i + 1 < fFlat.length; i += 2) {
-            final double cx = mapX(fFlat[i]);
-            final double cy = mapY(fFlat[i + 1]);
-            canvas.drawCircle(Offset(cx, cy), faceR, facePaint);
-          }
+        for (final Float32List fFlat in facesFlat) {
+          _facePoints.appendFlat(fFlat);
         }
       } else if (facesLegacy != null && facesLegacy.isNotEmpty) {
         for (final pts in facesLegacy) {
-          for (final pt in pts) {
-            canvas.drawCircle(Offset(mapX(pt.dx), mapY(pt.dy)), faceR, facePaint);
-          }
+          _facePoints.appendOffsets(pts);
         }
       }
+
+      faceView = _facePoints.view();
     }
+
+    if (lineView == null && pointView == null && faceView == null) {
+      return;
+    }
+
+    canvas.save();
+    if (mirror) {
+      canvas.translate(size.width - offX, offY);
+      canvas.scale(-s, s);
+    } else {
+      canvas.translate(offX, offY);
+      canvas.scale(s, s);
+    }
+
+    if (lineView != null) {
+      canvas.drawRawPoints(PointMode.lines, lineView, bonePaint);
+    }
+
+    if (pointView != null) {
+      canvas.drawRawPoints(PointMode.points, pointView, ptsPaint);
+    }
+
+    if (faceView != null) {
+      canvas.drawRawPoints(PointMode.points, faceView, facePaint);
+    }
+
+    canvas.restore();
   }
 
   @override
@@ -602,4 +515,180 @@ class _PoseOverlayFastPainter extends CustomPainter {
       old.latest != latest ||
       old.face != face ||
       old.landmarksColor != landmarksColor;
+}
+
+class _PoseBufferSet {
+  _PoseBufferSet(this._edges);
+
+  final List<int> _edges;
+  late final int _maxSegments = _edges.length ~/ 2;
+
+  Float32List _pointBuf = Float32List(0);
+  Float32List _lineBuf = Float32List(0);
+  Float32List _scratch = Float32List(0);
+  int _pointFloats = 0;
+  int _lineFloats = 0;
+
+  final Map<int, Float32List> _pointViews = <int, Float32List>{};
+  final Map<int, Float32List> _lineViews = <int, Float32List>{};
+
+  void reset() {
+    _pointFloats = 0;
+    _lineFloats = 0;
+  }
+
+  void _ensurePointCapacity(int floats) {
+    if (_pointBuf.length >= floats) return;
+    _pointBuf = Float32List(floats);
+    _pointViews.clear();
+  }
+
+  void _ensureLineCapacity(int floats) {
+    if (_lineBuf.length >= floats) return;
+    _lineBuf = Float32List(floats);
+    _lineViews.clear();
+  }
+
+  Float32List _ensureScratch(int floats) {
+    if (_scratch.length >= floats) return _scratch;
+    _scratch = Float32List(floats);
+    return _scratch;
+  }
+
+  void appendPacked(
+    Float32List src,
+    int startPt,
+    int countPt, {
+    required bool addPoints,
+    required bool addLines,
+  }) {
+    if (countPt <= 0) return;
+    final int startF = startPt << 1;
+    if (startF >= src.length) return;
+    int endF = startF + (countPt << 1);
+    if (endF > src.length) endF = src.length;
+    final int floats = endF - startF;
+    if (floats <= 0) return;
+    final int availablePts = floats >> 1;
+    if (availablePts <= 0) return;
+
+    if (addPoints) {
+      _ensurePointCapacity(_pointFloats + floats);
+      _pointBuf.setRange(_pointFloats, _pointFloats + floats, src, startF);
+      _pointFloats += floats;
+    }
+
+    if (addLines) {
+      _ensureLineCapacity(_lineFloats + _maxSegments * 4);
+      for (int e = 0; e < _edges.length; e += 2) {
+        final int a = _edges[e];
+        final int b = _edges[e + 1];
+        if (a >= availablePts || b >= availablePts) continue;
+        final int idxA = startF + (a << 1);
+        final int idxB = startF + (b << 1);
+        if (idxA + 1 >= endF || idxB + 1 >= endF) continue;
+        _lineBuf[_lineFloats++] = src[idxA];
+        _lineBuf[_lineFloats++] = src[idxA + 1];
+        _lineBuf[_lineFloats++] = src[idxB];
+        _lineBuf[_lineFloats++] = src[idxB + 1];
+      }
+    }
+  }
+
+  void appendFlat(
+    Float32List flat, {
+    required bool addPoints,
+    required bool addLines,
+  }) {
+    if (flat.isEmpty) return;
+    appendPacked(flat, 0, flat.length >> 1, addPoints: addPoints, addLines: addLines);
+  }
+
+  void appendOffsets(
+    List<Offset> pose, {
+    required bool addPoints,
+    required bool addLines,
+  }) {
+    if (pose.isEmpty) return;
+    final int floats = pose.length << 1;
+    final Float32List scratch = _ensureScratch(floats);
+    int k = 0;
+    for (final Offset pt in pose) {
+      scratch[k++] = pt.dx;
+      scratch[k++] = pt.dy;
+    }
+    appendPacked(scratch, 0, pose.length, addPoints: addPoints, addLines: addLines);
+  }
+
+  Float32List? pointsView() {
+    if (_pointFloats == 0) return null;
+    return _pointViews[_pointFloats] ??=
+        Float32List.view(_pointBuf.buffer, 0, _pointFloats);
+  }
+
+  Float32List? linesView() {
+    if (_lineFloats == 0) return null;
+    return _lineViews[_lineFloats] ??=
+        Float32List.view(_lineBuf.buffer, 0, _lineFloats);
+  }
+}
+
+class _PointBuffer {
+  Float32List _buf = Float32List(0);
+  Float32List _scratch = Float32List(0);
+  int _floats = 0;
+  final Map<int, Float32List> _views = <int, Float32List>{};
+
+  void reset() {
+    _floats = 0;
+  }
+
+  void _ensureCapacity(int floats) {
+    if (_buf.length >= floats) return;
+    _buf = Float32List(floats);
+    _views.clear();
+  }
+
+  Float32List _ensureScratch(int floats) {
+    if (_scratch.length >= floats) return _scratch;
+    _scratch = Float32List(floats);
+    return _scratch;
+  }
+
+  void appendPacked(Float32List src, int startPt, int countPt) {
+    if (countPt <= 0) return;
+    final int startF = startPt << 1;
+    if (startF >= src.length) return;
+    int endF = startF + (countPt << 1);
+    if (endF > src.length) endF = src.length;
+    final int floats = endF - startF;
+    if (floats <= 0) return;
+    _ensureCapacity(_floats + floats);
+    _buf.setRange(_floats, _floats + floats, src, startF);
+    _floats += floats;
+  }
+
+  void appendFlat(Float32List flat) {
+    if (flat.isEmpty) return;
+    _ensureCapacity(_floats + flat.length);
+    _buf.setRange(_floats, _floats + flat.length, flat);
+    _floats += flat.length;
+  }
+
+  void appendOffsets(List<Offset> pts) {
+    if (pts.isEmpty) return;
+    final int floats = pts.length << 1;
+    final Float32List scratch = _ensureScratch(floats);
+    int k = 0;
+    for (final Offset pt in pts) {
+      scratch[k++] = pt.dx;
+      scratch[k++] = pt.dy;
+    }
+    appendPacked(scratch, 0, pts.length);
+  }
+
+  Float32List? view() {
+    if (_floats == 0) return null;
+    return _views[_floats] ??= Float32List.view(_buf.buffer, 0, _floats);
+  }
 }
