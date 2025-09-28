@@ -896,80 +896,47 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _handleTaskBinary(String task, Uint8List b) {
     final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-    final res = parser.parse(b);
+    final res = parser.parseFlat2D(b);
 
-    if (res is PoseParseOk) {
-      final pkt = res.packet;
-      final int? seq = pkt.seq;
+    if (res is PoseParseOkPacked) {
+      final int? seq = res.seq;
 
-      if (pkt.kind == PacketKind.pd && !pkt.keyframe && seq != null) {
+      if (res.kind == PacketKind.pd && !res.keyframe && seq != null) {
         final int? last = _lastSeqPerTask[task];
         if (last != null && !_isNewer16(seq, last)) {
-          if (task == _primaryTask && res.ackSeq != null) _sendCtrlAck(res.ackSeq!);
+          if (task == _primaryTask && res.ackSeq != null) {
+            _sendCtrlAck(res.ackSeq!);
+          }
           return;
         }
       }
 
-      _lastW = pkt.w;
-      _lastH = pkt.h;
-      _lastPosesPerTask[task] = pkt.poses;
-      if (seq != null) _lastSeqPerTask[task] = seq;
-
-      if (task == 'face') {
-        _lastFace2D = pkt.poses.isEmpty
-            ? const <List<Offset>>[]
-            : pkt.poses
-                .map((pose) => pose.map((p) => Offset(p.x, p.y)).toList(growable: false))
-                .toList(growable: false);
+      final msg = <String, dynamic>{
+        'type': 'ok2d',
+        'task': task,
+        'w': res.w,
+        'h': res.h,
+        'seq': seq,
+        'ackSeq': res.ackSeq,
+        'requestKF': res.requestKeyframe,
+        'keyframe': res.keyframe,
+        'kind': res.kind == PacketKind.po ? 'PO' : 'PD',
+        'positions': res.positions,
+        'ranges': res.ranges,
+        'hasZ': res.hasZ,
+      };
+      if (res.zPositions != null) {
+        msg['zPositions'] = res.zPositions;
       }
 
-      _emitBinary(
-        pkt.w,
-        pkt.h,
-        pkt.poses,
-        kind: pkt.kind == PacketKind.po ? 'PO' : (pkt.keyframe ? 'PD(KF)' : 'PD'),
-        seq: pkt.seq,
-        task: task,
-      );
+      _handleParsed2D(msg, fallbackTask: task);
 
-      if (task == _primaryTask && res.ackSeq != null) _sendCtrlAck(res.ackSeq!);
-      if (res.requestKeyframe) _sendCtrlKF();
+      if (task == _primaryTask && res.ackSeq != null) {
+        _sendCtrlAck(res.ackSeq!);
+      }
     } else if (res is PoseParseNeedKF) {
       _sendCtrlKF();
     }
-  }
-
-  void _emitBinary(
-    int w,
-    int h,
-    List<List<PosePoint>> poses3d, {
-    required String kind,
-    int? seq,
-    required String task,
-  }) {
-    if (_disposed) return;
-
-    final persons = poses3d.length;
-    final perPoseLen = persons == 0 ? 0 : poses3d[0].length;
-    _ensurePoseFlatPool(persons, perPoseLen);
-
-    final List<Float32List> pxFlat = List.generate(persons, (i) {
-      final dst = _flatPoolPose![i];
-      final src = poses3d[i];
-      for (int k = 0, j = 0; k < src.length; k++) {
-        final p = src[k];
-        dst[j++] = p.x;
-        dst[j++] = p.y;
-      }
-      return dst;
-    }, growable: false);
-
-    final frame = PoseFrame(
-      imageSize: _szWHCached(w, h),
-      posesPxFlat: pxFlat,
-    );
-
-    _emitBinaryThrottled(frame, kind: kind, seq: seq, task: task);
   }
 
   void _sendCtrlKF() {
