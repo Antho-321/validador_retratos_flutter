@@ -1,7 +1,7 @@
 // lib/apps/asistente_retratos/infrastructure/parsers/pose_parse_isolate.dart
 //
 // Isolate de parseo: recibe binarios por SendPort, parsea con PoseBinaryParser
-// (vía parseFlat2D) y devuelve un DTO plano con metadatos + listas Float32List.
+// y devuelve un DTO plano con metadatos + listas Float32List.
 //
 // ENTRADA:
 //   { "type":"job", "task":String, "data":TransferableTypedData, "ackHint":int? }
@@ -61,7 +61,7 @@ void _handleJob(
     final Uint8List buf = ttd.materialize().asUint8List();
     final parser = parsers.putIfAbsent(task, () => PoseBinaryParser());
 
-    final res = parser.parseFlat2D(buf);
+    final res = parser.parse(buf);
 
     if (res is PoseParseOkPacked) {
       reply.send(<String, dynamic>{
