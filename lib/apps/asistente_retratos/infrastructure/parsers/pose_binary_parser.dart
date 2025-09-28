@@ -95,6 +95,18 @@ class PoseBinaryParser {
 
   // Sticky Z presence (null until first KF decides)
   bool? _hasZ;
+
+  Float32List? _positions;
+  Float32List? _positionsView;
+  int _positionsViewLen = 0;
+
+  Int32List? _ranges;
+  Int32List? _rangesView;
+  int _rangesViewLen = 0;
+
+  Float32List? _z;
+  Float32List? _zView;
+  int _zViewLen = 0;
   int get parseErrors => _errors;
 
   void reset() {
@@ -104,23 +116,62 @@ class PoseBinaryParser {
     _lastHq = 0;
     _errors = 0;
     _hasZ = null;
+    _positions = null;
+    _positionsView = null;
+    _positionsViewLen = 0;
+    _ranges = null;
+    _rangesView = null;
+    _rangesViewLen = 0;
+    _z = null;
+    _zView = null;
+    _zViewLen = 0;
   }
 
   PoseParseResult parse(Uint8List b) => _parsePacked(b);
 
-  PoseParseResult parseFlat2D(Uint8List b) => _parsePacked(b);
+  PoseParseResult parseIntoFlat2D(
+    Uint8List b, {
+    Float32List? reusePositions,
+    Int32List? reuseRanges,
+    Float32List? reuseZ,
+  }) =>
+      _parsePacked(
+        b,
+        reusePositions: reusePositions,
+        reuseRanges: reuseRanges,
+        reuseZ: reuseZ,
+        allowReuse: true,
+      );
 
-  PoseParseResult _parsePacked(Uint8List b) {
+  PoseParseResult _parsePacked(
+    Uint8List b, {
+    Float32List? reusePositions,
+    Int32List? reuseRanges,
+    Float32List? reuseZ,
+    bool allowReuse = false,
+  }) {
     try {
       if (b.length < 2) {
         _errors++;
         return const PoseParseNeedKF('short packet');
       }
       if (b[0] == 0x50 && b[1] == 0x4F) { // 'PO'
-        return _parsePOPacked(b);
+        return _parsePOPacked(
+          b,
+          reusePositions: reusePositions,
+          reuseRanges: reuseRanges,
+          reuseZ: reuseZ,
+          allowReuse: allowReuse,
+        );
       }
       if (b[0] == 0x50 && b[1] == 0x44) { // 'PD'
-        return _parsePDPacked(b);
+        return _parsePDPacked(
+          b,
+          reusePositions: reusePositions,
+          reuseRanges: reuseRanges,
+          reuseZ: reuseZ,
+          allowReuse: allowReuse,
+        );
       }
       _errors++;
       return const PoseParseNeedKF('unknown header (not PO/PD)');
@@ -130,7 +181,13 @@ class PoseBinaryParser {
     }
   }
 
-  PoseParseOkPacked _parsePOPacked(Uint8List b) {
+  PoseParseOkPacked _parsePOPacked(
+    Uint8List b, {
+    Float32List? reusePositions,
+    Int32List? reuseRanges,
+    Float32List? reuseZ,
+    bool allowReuse = false,
+  }) {
     int i = 2;
     _require(i + 1 <= b.length, 'PO missing ver');
     final ver = b[i];
@@ -162,9 +219,31 @@ class PoseBinaryParser {
         (b.length == (j + totalPts * 6)) || ((b.length - j) == totalPts * 6);
     _hasZ = hasZ;
 
-    final Float32List positions = Float32List(totalPts * 2);
-    final Float32List? zPositions = hasZ ? Float32List(totalPts) : null;
-    final Int32List ranges = Int32List(nposes * 2);
+    final int positionsFloats = totalPts * 2;
+    final int rangesLen = nposes * 2;
+
+    final Float32List positionsBuf = allowReuse
+        ? _ensurePositions(positionsFloats, reusePositions)
+        : Float32List(positionsFloats);
+    final Float32List positions = allowReuse
+        ? _viewPositions(positionsBuf, positionsFloats)
+        : positionsBuf;
+
+    Float32List? zBuf;
+    Float32List? zPositions;
+    if (hasZ) {
+      zBuf = allowReuse
+          ? _ensureZ(totalPts, reuseZ)
+          : Float32List(totalPts);
+      zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+    }
+
+    final Int32List rangesBuf = allowReuse
+        ? _ensureRanges(rangesLen, reuseRanges)
+        : Int32List(rangesLen);
+    final Int32List ranges = allowReuse
+        ? _viewRanges(rangesBuf, rangesLen)
+        : rangesBuf;
 
     final posesQ = <List<_PtQ>>[];
     int writePos = 0;
@@ -178,8 +257,8 @@ class PoseBinaryParser {
       final need = npts * (hasZ ? 6 : 4);
       _require(i + need <= b.length, 'PO pose[$p] points short');
 
-      ranges[(p << 1)] = startPt;
-      ranges[(p << 1) + 1] = npts;
+      rangesBuf[(p << 1)] = startPt;
+      rangesBuf[(p << 1) + 1] = npts;
       startPt += npts;
 
       final ptsQ = <_PtQ>[];
@@ -197,10 +276,10 @@ class PoseBinaryParser {
         final cxq = _clampQ(xq, wq);
         final cyq = _clampQ(yq, hq);
         ptsQ.add(_PtQ(cxq, cyq, zq));
-        positions[writePos++] = cxq / scale;
-        positions[writePos++] = cyq / scale;
+        positionsBuf[writePos++] = cxq / scale;
+        positionsBuf[writePos++] = cyq / scale;
         if (hasZ) {
-          zPositions![writeZ++] = (zq ?? 0) / zScale;
+          zBuf![writeZ++] = (zq ?? 0) / zScale;
         }
       }
       posesQ.add(ptsQ);
@@ -223,7 +302,13 @@ class PoseBinaryParser {
     );
   }
 
-  PoseParseOkPacked _parsePDPacked(Uint8List b) {
+  PoseParseOkPacked _parsePDPacked(
+    Uint8List b, {
+    Float32List? reusePositions,
+    Int32List? reuseRanges,
+    Float32List? reuseZ,
+    bool allowReuse = false,
+  }) {
     int i = 2;
     _require(i + 1 <= b.length, 'PD missing ver');
     final ver = b[i];
@@ -269,9 +354,31 @@ class PoseBinaryParser {
           (b.length == (j + totalPts * 6)) || ((b.length - j) == totalPts * 6);
       _hasZ = hasZ;
 
-      final Float32List positions = Float32List(totalPts * 2);
-      final Float32List? zPositions = hasZ ? Float32List(totalPts) : null;
-      final Int32List ranges = Int32List(nposes * 2);
+      final int positionsFloats = totalPts * 2;
+      final int rangesLen = nposes * 2;
+
+      final Float32List positionsBuf = allowReuse
+          ? _ensurePositions(positionsFloats, reusePositions)
+          : Float32List(positionsFloats);
+      final Float32List positions = allowReuse
+          ? _viewPositions(positionsBuf, positionsFloats)
+          : positionsBuf;
+
+      Float32List? zBuf;
+      Float32List? zPositions;
+      if (hasZ) {
+        zBuf = allowReuse
+            ? _ensureZ(totalPts, reuseZ)
+            : Float32List(totalPts);
+        zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+      }
+
+      final Int32List rangesBuf = allowReuse
+          ? _ensureRanges(rangesLen, reuseRanges)
+          : Int32List(rangesLen);
+      final Int32List ranges = allowReuse
+          ? _viewRanges(rangesBuf, rangesLen)
+          : rangesBuf;
 
       final posesQ = <List<_PtQ>>[];
       int writePos = 0;
@@ -285,8 +392,8 @@ class PoseBinaryParser {
         final need = npts * (hasZ ? 6 : 4);
         _require(i + need <= b.length, 'PD(KF) pose[$p] points short');
 
-        ranges[(p << 1)] = startPt;
-        ranges[(p << 1) + 1] = npts;
+        rangesBuf[(p << 1)] = startPt;
+        rangesBuf[(p << 1) + 1] = npts;
         startPt += npts;
 
         final ptsQ = <_PtQ>[];
@@ -304,10 +411,10 @@ class PoseBinaryParser {
           final cxq = _clampQ(xq, wq);
           final cyq = _clampQ(yq, hq);
           ptsQ.add(_PtQ(cxq, cyq, zq));
-          positions[writePos++] = cxq / scale;
-          positions[writePos++] = cyq / scale;
+          positionsBuf[writePos++] = cxq / scale;
+          positionsBuf[writePos++] = cyq / scale;
           if (hasZ) {
-            zPositions![writeZ++] = (zq ?? 0) / zScale;
+            zBuf![writeZ++] = (zq ?? 0) / zScale;
           }
         }
         posesQ.add(ptsQ);
@@ -354,9 +461,31 @@ class PoseBinaryParser {
       totalPts += npts;
     }
 
-    final Float32List positions = Float32List(totalPts * 2);
-    final Float32List? zPositions = hasZ ? Float32List(totalPts) : null;
-    final Int32List ranges = Int32List(nposes * 2);
+    final int positionsFloats = totalPts * 2;
+    final int rangesLen = nposes * 2;
+
+    final Float32List positionsBuf = allowReuse
+        ? _ensurePositions(positionsFloats, reusePositions)
+        : Float32List(positionsFloats);
+    final Float32List positions = allowReuse
+        ? _viewPositions(positionsBuf, positionsFloats)
+        : positionsBuf;
+
+    Float32List? zBuf;
+    Float32List? zPositions;
+    if (hasZ) {
+      zBuf = allowReuse
+          ? _ensureZ(totalPts, reuseZ)
+          : Float32List(totalPts);
+      zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+    }
+
+    final Int32List rangesBuf = allowReuse
+        ? _ensureRanges(rangesLen, reuseRanges)
+        : Int32List(rangesLen);
+    final Int32List ranges = allowReuse
+        ? _viewRanges(rangesBuf, rangesLen)
+        : rangesBuf;
 
     final posesQ = <List<_PtQ>>[];
     int writePos = 0;
@@ -378,8 +507,8 @@ class PoseBinaryParser {
       final prevPts = prevQ[p];
       _require(prevPts.length == npts, 'PD(Δ) pose[$p] npts mismatch');
 
-      ranges[(p << 1)] = startPt;
-      ranges[(p << 1) + 1] = npts;
+      rangesBuf[(p << 1)] = startPt;
+      rangesBuf[(p << 1) + 1] = npts;
       startPt += npts;
 
       final outQ = <_PtQ>[];
@@ -411,10 +540,10 @@ class PoseBinaryParser {
         yq = _clampQ(yq, hq);
 
         outQ.add(_PtQ(xq, yq, zq));
-        positions[writePos++] = xq / scale;
-        positions[writePos++] = yq / scale;
+        positionsBuf[writePos++] = xq / scale;
+        positionsBuf[writePos++] = yq / scale;
         if (hasZ) {
-          zPositions![writeZ++] = (zq ?? 0) / zScale;
+          zBuf![writeZ++] = (zq ?? 0) / zScale;
         }
       }
 
@@ -438,6 +567,93 @@ class PoseBinaryParser {
       keyframe: false,
       ackSeq: seq,
     );
+  }
+
+  Float32List _ensurePositions(int needed, Float32List? reuse) {
+    if (reuse != null && reuse.length >= needed) {
+      return reuse;
+    }
+    final Float32List? current = _positions;
+    if (current == null || current.length < needed) {
+      final buf = Float32List(needed);
+      _positions = buf;
+      _positionsView = buf;
+      _positionsViewLen = needed;
+      return buf;
+    }
+    return current;
+  }
+
+  Float32List _viewPositions(Float32List data, int needed) {
+    if (data.length == needed) {
+      return data;
+    }
+    if (identical(data, _positions)) {
+      if (_positionsView == null || _positionsViewLen != needed) {
+        _positionsView = Float32List.view(data.buffer, data.offsetInBytes, needed);
+        _positionsViewLen = needed;
+      }
+      return _positionsView!;
+    }
+    return Float32List.sublistView(data, 0, needed);
+  }
+
+  Int32List _ensureRanges(int needed, Int32List? reuse) {
+    if (reuse != null && reuse.length >= needed) {
+      return reuse;
+    }
+    final Int32List? current = _ranges;
+    if (current == null || current.length < needed) {
+      final buf = Int32List(needed);
+      _ranges = buf;
+      _rangesView = buf;
+      _rangesViewLen = needed;
+      return buf;
+    }
+    return current;
+  }
+
+  Int32List _viewRanges(Int32List data, int needed) {
+    if (data.length == needed) {
+      return data;
+    }
+    if (identical(data, _ranges)) {
+      if (_rangesView == null || _rangesViewLen != needed) {
+        _rangesView = Int32List.view(data.buffer, data.offsetInBytes, needed);
+        _rangesViewLen = needed;
+      }
+      return _rangesView!;
+    }
+    return Int32List.sublistView(data, 0, needed);
+  }
+
+  Float32List _ensureZ(int needed, Float32List? reuse) {
+    if (reuse != null && reuse.length >= needed) {
+      return reuse;
+    }
+    final Float32List? current = _z;
+    if (current == null || current.length < needed) {
+      final buf = Float32List(needed);
+      _z = buf;
+      _zView = buf;
+      _zViewLen = needed;
+      return buf;
+    }
+    return current;
+  }
+
+  Float32List _viewZ(Float32List data, int needed) {
+    if (data.length == needed) {
+      return data;
+    }
+    if (identical(data, _z)) {
+      if (_zView == null || _zViewLen != needed) {
+        _zView = Float32List.view(data.buffer, data.offsetInBytes, needed);
+        _zViewLen = needed;
+      }
+      return _zView!;
+    }
+    return Float32List.sublistView(data, 0, needed);
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────

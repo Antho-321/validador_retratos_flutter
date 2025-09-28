@@ -928,7 +928,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _handleTaskBinary(String task, Uint8List b) {
     final parser = _parsers.putIfAbsent(task, () => PoseBinaryParser());
-    final res = parser.parseFlat2D(b);
+    final currentLmk = _poseLmk.value;
+    final res = parser.parseIntoFlat2D(
+      b,
+      reusePositions: currentLmk.packedPositions,
+      reuseRanges: currentLmk.packedRanges,
+      reuseZ: currentLmk.packedZPositions,
+    );
 
     if (res is PoseParseOkPacked) {
       final int? seq = res.seq;
