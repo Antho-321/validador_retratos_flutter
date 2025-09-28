@@ -678,6 +678,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _wireCtrl(RTCDataChannel ch) {
+    _lastAckSeqSent = -1;
+    _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
     ch.onDataChannelState = (s) {
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
         _nudgeServer();
@@ -690,7 +692,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _nudgeServer() {
     _ctrl.sendText('HELLO');
-    _ctrl.sendText('KF');
+    _sendCtrlKF();
   }
 
   Future<void> _recreateNegotiatedChannels() async {
@@ -739,13 +741,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
 
-  void _maybeSendKF() {
-    final now = DateTime.now();
-    if (now.millisecondsSinceEpoch - _lastKfReq.millisecondsSinceEpoch >= kfMinGapMs) {
-      _lastKfReq = now;
-      _sendCtrlKF();
-    }
-  }
+  void _maybeSendKF() => _sendCtrlKF();
 
   void _emitBinaryThrottled(
     PoseFrame frame, {
@@ -976,9 +972,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _emitBinaryThrottled(frame, kind: kind, seq: seq, task: task);
   }
 
-  void _sendCtrlKF() => _ctrl.sendText('KF');
+  void _sendCtrlKF() {
+    final now = DateTime.now();
+    if (now.millisecondsSinceEpoch - _lastKfReq.millisecondsSinceEpoch < kfMinGapMs) {
+      return;
+    }
+    _lastKfReq = now;
+    _ctrl.sendText('KF');
+  }
 
   void _sendCtrlAck(int seq) {
+    if (seq == _lastAckSeqSent) return;
+    _lastAckSeqSent = seq;
     _ackBuf[3] = (seq & 0xFF);
     _ackBuf[4] = ((seq >> 8) & 0xFF);
     _ctrl.sendBin(_ackBuf);
