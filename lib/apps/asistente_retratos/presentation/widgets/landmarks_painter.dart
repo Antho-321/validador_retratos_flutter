@@ -1,10 +1,12 @@
-// lib/.../landmarks_painter.dart
+// lib/apps/asistente_retratos/presentation/widgets/landmarks_painter.dart
 import 'dart:typed_data' show Float32List, Int32List;
 import 'dart:ui' as ui show PointMode;
 import 'package:flutter/widgets.dart';
 
 import '../../domain/model/lmk_state.dart';
 import '../../infrastructure/services/pose_webrtc_service_imp.dart';
+import '../styles/colors.dart'
+    show CaptureTheme;
 
 // ===== Pose "lite" (hombros–brazos y caderas–piernas) ======================
 const int LS = 11, RS = 12, LE = 13, RE = 14, LW = 15, RW = 16;
@@ -25,6 +27,7 @@ enum FaceStyle { cross, points }
 class LandmarksPainter extends CustomPainter {
   LandmarksPainter(
     this.service, {
+    required this.cap, // ← color proviene únicamente del CaptureTheme
     this.mirror = false,
     this.srcSize,
     this.fit = BoxFit.cover,
@@ -32,17 +35,16 @@ class LandmarksPainter extends CustomPainter {
     this.showPosePoints = true,
     this.showFacePoints = true,
     this.faceStyle = FaceStyle.cross,
-    Color? color,
   })  : _line = Paint()
           ..style = PaintingStyle.stroke
           ..isAntiAlias = false
-          ..strokeCap = StrokeCap.round // cambia a .butt si te vale visualmente
-          ..color = color ?? const Color(0xFFFFFFFF),
+          ..strokeCap = StrokeCap.round
+          ..color = cap.landmarks, // ← desde tema
         _dots = Paint()
           ..style = PaintingStyle.stroke
           ..isAntiAlias = false
-          ..strokeCap = StrokeCap.round // cambia a .butt si te vale
-          ..color = color ?? const Color(0xFFFFFFFF),
+          ..strokeCap = StrokeCap.round
+          ..color = cap.landmarks, // ← desde tema
         super(repaint: service.overlayTick) {
     _ensurePoseCapacity();
     // Preasignación de buffers de cara (kMaxFaces = 1)
@@ -52,6 +54,9 @@ class LandmarksPainter extends CustomPainter {
 
   // Fuente de datos
   final PoseWebrtcServiceImp service;
+
+  // Tema de captura (fuente ÚNICA del color de landmarks)
+  final CaptureTheme cap;
 
   // Opciones de presentación
   final bool mirror;
@@ -274,6 +279,10 @@ class LandmarksPainter extends CustomPainter {
   // =============================== Paint ====================================
   @override
   void paint(Canvas c, Size size) {
+    // Refresca el color desde el tema por si el painter se reconstruye
+    _line.color = cap.landmarks;
+    _dots.color = cap.landmarks;
+
     // Estados actuales (ideal: ya tipados en el modelo)
     final LmkState poseS = service.poseLmk.value;
     final LmkState faceS = service.faceLmk.value;
@@ -368,15 +377,12 @@ class LandmarksPainter extends CustomPainter {
       if (first is Float32List) return first;
     }
     return null;
-    // Ideal: que poseS.lastFlat ya sea Float32List? en el modelo/servicio.
   }
 
   List<Float32List>? _extractFaces(Object? src) {
     if (src is List<Float32List>) return src;
     if (src == null) return null;
-    // Si llega en otro formato, evita allocs: no lo fuerces aquí.
     return const <Float32List>[];
-    // Ideal: que faceS.lastFlat ya sea List<Float32List>? en el modelo/servicio.
   }
 
   // ============================ Repaint rule ===============================
@@ -389,6 +395,7 @@ class LandmarksPainter extends CustomPainter {
         old.showPosePoints != showPosePoints ||
         old.showFacePoints != showFacePoints ||
         old.faceStyle != faceStyle ||
+        old.cap.landmarks != cap.landmarks || // ← repinta si cambia color del tema
         !identical(old.service, service);
   }
 }

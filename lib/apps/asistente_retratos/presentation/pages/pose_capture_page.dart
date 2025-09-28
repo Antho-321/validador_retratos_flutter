@@ -23,6 +23,10 @@ import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 
 import '../controllers/pose_capture_controller.dart';
 
+// ✅ acceso a CaptureTheme (para color de landmarks)
+import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
+    show CaptureTheme;
+
 class PoseCapturePage extends StatefulWidget {
   const PoseCapturePage({
     super.key,
@@ -86,6 +90,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   Widget build(BuildContext context) {
     final svc = widget.poseService;
+    // ✅ obtiene el CaptureTheme del tema actual
+    final cap = Theme.of(context).extension<CaptureTheme>() ?? const CaptureTheme();
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -122,6 +128,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                       willChange: true,
                                       foregroundPainter: LandmarksPainter(
                                         impl!,
+                                        cap: cap,                 // ✅ color desde CaptureTheme
                                         mirror: ctl.mirror,
                                         srcSize: impl.latestFrame.value?.imageSize, // mejor escalado
                                         fit: BoxFit.cover,
