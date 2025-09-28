@@ -62,6 +62,9 @@ Size _szWHCached(int w, int h) {
   return n;
 }
 
+final Stopwatch _monoClock = Stopwatch()..start();
+int _nowUs() => _monoClock.elapsedMicroseconds;
+
 T? _silence<T>(T Function() f) { try { return f(); } catch (_) { return null; } }
 Future<void> _silenceAsync(Future<void> Function() f) async { try { await f(); } catch (_) {} }
 
@@ -122,7 +125,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             ) {
     final fps = idealFps <= 0 ? 1 : idealFps;
     final gapMs = (1000 ~/ fps).clamp(1, 1000);
-    _minGap = Duration(milliseconds: gapMs);
+    _minOverlayGapUs = gapMs * 1000;
   }
 
   final Uri offerUri;
@@ -158,16 +161,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Map<String, RTCDataChannel> _resultsPerTask = {};
   final Map<String, _PendingEmit> _pendingByTask = {};
   final Set<String> _emitScheduled = {};
-  final Map<String, DateTime> _lastEmitByTask = {};
+  final Map<String, int> _lastEmitUsByTask = {};
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
   // ===== Pre-parse drop helpers ===============================================
   bool _tooSoonForParse(String task) {
-    final last = _lastEmitByTask[task];
-    if (last == null) return false;
-    final now = DateTime.now();
-    return now.difference(last).inMilliseconds < _minEmitIntervalMsFor(task);
+    final lastUs = _lastEmitUsByTask[task];
+    if (lastUs == null) return false;
+    final nowUs = _nowUs();
+    final minGapUs = _minEmitIntervalMsFor(task) * 1000;
+    return nowUs - lastUs < minGapUs;
   }
 
   MediaStream? _localStream;
@@ -252,7 +256,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Map<String, Uint8List?> _pendingBin = {};
   final Set<String> _parsingTasks = {};
   int _lastAckSeqSent = -1;
-  DateTime _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
+  int _lastKfReqUs = 0;
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
   String _forceTurnUdp(String url) => url.contains('?') ? url : '$url?transport=udp';
@@ -260,17 +264,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // ====== Overlay repaint coalescing =========================================
   final ValueNotifier<int> overlayTick = ValueNotifier<int>(0);
   bool _overlayScheduled = false;
-  late Duration _minGap;
-  DateTime _lastTick = DateTime.fromMillisecondsSinceEpoch(0);
+  late final int _minOverlayGapUs;
+  int _lastTickUs = 0;
 
   void _bumpOverlay() {
     if (_overlayScheduled) return;
-    final now = DateTime.now();
-    if (now.difference(_lastTick) < _minGap) return;
+    final nowUs = _nowUs();
+    if (nowUs - _lastTickUs < _minOverlayGapUs) return;
     _overlayScheduled = true;
     SchedulerBinding.instance.scheduleFrameCallback((_) {
       _overlayScheduled = false;
-      _lastTick = DateTime.now();
+      _lastTickUs = _nowUs();
       overlayTick.value++;
     });
   }
@@ -699,7 +703,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _wireCtrl(RTCDataChannel ch) {
     _lastAckSeqSent = -1;
-    _lastKfReq = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastKfReqUs = 0;
     ch.onDataChannelState = (s) {
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
         _nudgeServer();
@@ -794,18 +798,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final pending = _pendingByTask[task];
       if (pending == null) return;
 
-      final now = DateTime.now();
-      final last =
-          _lastEmitByTask[task] ?? DateTime.fromMillisecondsSinceEpoch(0);
-      final minIntervalMs = _minEmitIntervalMsFor(task);
+      final nowUs = _nowUs();
+      final lastUs = _lastEmitUsByTask[task] ?? 0;
+      final minIntervalUs = _minEmitIntervalMsFor(task) * 1000;
 
-      if (now.difference(last).inMilliseconds < minIntervalMs) {
+      if (nowUs - lastUs < minIntervalUs) {
         _scheduleEmitFlush(task);
         return;
       }
 
       _pendingByTask.remove(task);
-      _lastEmitByTask[task] = now;
+      _lastEmitUsByTask[task] = nowUs;
       _doEmit(pending.frame,
           kind: pending.kind, seq: pending.seq, task: task);
     });
@@ -969,11 +972,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _sendCtrlKF() {
-    final now = DateTime.now();
-    if (now.millisecondsSinceEpoch - _lastKfReq.millisecondsSinceEpoch < kfMinGapMs) {
+    final nowUs = _nowUs();
+    if (nowUs - _lastKfReqUs < kfMinGapMs * 1000) {
       return;
     }
-    _lastKfReq = now;
+    _lastKfReqUs = nowUs;
     _ctrl.sendText('KF');
   }
 
