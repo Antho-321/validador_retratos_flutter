@@ -162,6 +162,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
+  // ===== Pre-parse drop helpers ===============================================
+  bool _tooSoonForParse(String task) {
+    final last = _lastEmitByTask[task];
+    if (last == null) return false;
+    final now = DateTime.now();
+    return now.difference(last).inMilliseconds < _minEmitIntervalMsFor(task);
+  }
+
   MediaStream? _localStream;
   @override
   MediaStream? get localStream => _localStream;
@@ -654,7 +662,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (task != null) {
       _parsingTasks.remove(task);
       if (_pendingBin.containsKey(task)) {
-        scheduleMicrotask(() => _drainParseLoop(task));
+        if (_tooSoonForParse(task)) {
+          // Try next frame instead of right-now microtask (keeps CPU cooler)
+          SchedulerBinding.instance.scheduleFrameCallback((_) {
+            if (!_disposed &&
+                _pendingBin.containsKey(task) &&
+                !_parsingTasks.contains(task)) {
+              _parsingTasks.add(task);
+              _drainParseLoop(task);
+            }
+          });
+        } else {
+          scheduleMicrotask(() => _drainParseLoop(task));
+        }
       }
     }
 
@@ -714,8 +734,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
 
   void _enqueueBinary(String task, Uint8List buf) {
+    // Always replace with the freshest payload
     _pendingBin[task] = buf;
-    if (_parsingTasks.contains(task)) return;
+
+    // === EARLY-DROP: if we've emitted too recently AND a parse is already running,
+    // don't schedule a new parse yet; just keep the freshest buffer and return.
+    if (_parsingTasks.contains(task) && _tooSoonForParse(task)) {
+      return; // cheap backpressure: avoid sending another job to the isolate
+    }
+
+    // Normal path: if parser isn't running for this task, start it.
+    if (_parsingTasks.contains(task)) return; // (we'll parse the freshest later)
     _parsingTasks.add(task);
     scheduleMicrotask(() => _drainParseLoop(task));
   }
