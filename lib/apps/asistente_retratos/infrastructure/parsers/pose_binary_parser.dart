@@ -28,6 +28,7 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+
 enum PacketKind { po, pd }
 
 abstract class PoseParseResult {
@@ -80,9 +81,9 @@ class PoseBinaryParser {
   int _errors = 0;
 
   // Compact baseline in Q-domain
-  Uint16List? _baseXY; // [x0,y0, x1,y1, ...]
-  Int16List? _baseZ; // nullable when stream has no Z
-  Int32List? _lastRangesBuf; // cached ranges (start,len per pose)
+  Uint16List? _baseXY;        // [x0,y0, x1,y1, ...]
+  Int16List? _baseZ;          // nullable when stream has no Z
+  Int32List? _lastRangesBuf;  // cached ranges (start,len per pose)
   int _lastTotalPts = 0;
   int _lastNposes = 0;
   int _lastScale = 1;
@@ -506,11 +507,15 @@ class PoseBinaryParser {
     }
     final bool hasZ = _hasZ!;
 
-    final Uint16List? baseXY = _baseXY;
-    final Int32List? cachedRanges = _lastRangesBuf;
-    _require(baseXY != null && cachedRanges != null, 'PD(Δ) missing baseline');
+    // Guard baseline presence and bind non-nullable aliases
+    if (_baseXY == null || _lastRangesBuf == null) {
+      throw StateError('PD(Δ) missing baseline');
+    }
+    final Uint16List baseXY = _baseXY!;
+    final Int32List cachedRanges = _lastRangesBuf!;
     _require(_lastNposes == nposes, 'PD(Δ) nposes mismatch');
 
+    // Pre-scan: counts + detect no-change
     final List<int> counts = List<int>.filled(nposes, 0, growable: false);
     int totalPts = 0;
     int scan = i;
@@ -528,12 +533,12 @@ class PoseBinaryParser {
       counts[p] = npts;
       totalPts += npts;
     }
-
     _require(_lastTotalPts == totalPts, 'PD(Δ) total points mismatch');
 
     final int positionsFloats = totalPts * 2;
     final int rangesLen = nposes * 2;
 
+    // Ensure output buffers
     Float32List posBuf;
     if (_positions != null && _positions!.length >= positionsFloats) {
       posBuf = _positions!;
@@ -551,8 +556,7 @@ class PoseBinaryParser {
 
     Float32List? zBuf;
     if (hasZ) {
-      final Int16List? baseZ = _baseZ;
-      if (baseZ == null) {
+      if (_baseZ == null) {
         throw StateError('PD(Δ) missing Z baseline');
       }
       if (_z != null && _z!.length >= totalPts) {
@@ -579,6 +583,7 @@ class PoseBinaryParser {
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
 
+    // Early-out if nothing changed: reuse existing floats/ranges
     if (maskOr == 0) {
       _lastScale = scale;
       _lastWq = wq;
@@ -597,8 +602,8 @@ class PoseBinaryParser {
       );
     }
 
+    // Apply sparse deltas
     int ptr = i;
-
     for (int p = 0; p < nposes; p++) {
       final int npts = counts[p];
       _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
@@ -621,12 +626,14 @@ class PoseBinaryParser {
           if ((m & 1) != 0) {
             _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] dxdy short @pt $g');
             final int xyIndex = g << 1;
+
             int xq = baseXY[xyIndex] + _asInt8(b[ptr]);
             int yq = baseXY[xyIndex + 1] + _asInt8(b[ptr + 1]);
             ptr += 2;
 
             if (hasZ) {
               _require(ptr + 1 <= b.length, 'PD(Δ) pose[$p] dz short @pt $g');
+              // _baseZ is non-null when hasZ true (checked above)
               int zq = _baseZ![g] + _asInt8(b[ptr]);
               ptr += 1;
               zq = _clampZq(zq);
