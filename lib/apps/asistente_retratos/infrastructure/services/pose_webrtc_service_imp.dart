@@ -31,6 +31,52 @@ class _PendingEmit {
   const _PendingEmit(this.frame, this.kind, this.seq);
 }
 
+class _ParseWorker {
+  _ParseWorker(this.task, this._onMessage)
+      : _receivePort = ReceivePort(),
+        _readyCompleter = Completer<void>() {
+    _subscription = _receivePort.listen((dynamic msg) {
+      if (msg is SendPort) {
+        sendPort = msg;
+        if (!_readyCompleter.isCompleted) {
+          _readyCompleter.complete();
+        }
+        return;
+      }
+      _onMessage(task, msg);
+    });
+  }
+
+  final String task;
+  final void Function(String task, dynamic message) _onMessage;
+  final ReceivePort _receivePort;
+  late final StreamSubscription<dynamic> _subscription;
+  final Completer<void> _readyCompleter;
+
+  Isolate? isolate;
+  SendPort? sendPort;
+  bool busy = false;
+
+  Future<void> start() async {
+    isolate = await Isolate.spawn(
+      poseParseIsolateEntry,
+      _receivePort.sendPort,
+    );
+  }
+
+  Future<void> get ready => _readyCompleter.future;
+
+  Future<void> dispose() async {
+    await _subscription.cancel();
+    _receivePort.close();
+    isolate?.kill(priority: Isolate.immediate);
+    isolate = null;
+    if (!_readyCompleter.isCompleted) {
+      _readyCompleter.complete();
+    }
+  }
+}
+
 // ======================= Helpers y extensiones compactas =======================
 
 extension _DCX on RTCDataChannel? {
@@ -160,6 +206,62 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   final RtcVideoEncoder _encoder;
 
+  String _normalizeTask(String task) {
+    final normalized = task.toLowerCase().trim();
+    if (normalized.isEmpty) return _primaryTask;
+    return normalized;
+  }
+
+  Future<_ParseWorker> _ensureWorker(String task) {
+    final normalized = _normalizeTask(task);
+    final existing = _parseWorkers[normalized];
+    if (existing != null && existing.sendPort != null) {
+      return Future.value(existing);
+    }
+
+    final pending = _workerFutures[normalized];
+    if (pending != null) {
+      return pending;
+    }
+
+    final worker = _ParseWorker(normalized, _handleWorkerMessage);
+    _parseWorkers[normalized] = worker;
+
+    final future = () async {
+      await worker.start();
+      await worker.ready;
+      return worker;
+    }();
+
+    _workerFutures[normalized] = future;
+    future.catchError((_) {}).whenComplete(() {
+      _workerFutures.remove(normalized);
+    });
+
+    return future;
+  }
+
+  Future<void> _ensureWorkersForRequestedTasks() async {
+    final requested = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
+    final futures = <Future<_ParseWorker>>[];
+    for (final raw in requested) {
+      final normalized = _normalizeTask(raw);
+      if (normalized.isEmpty) continue;
+      futures.add(_ensureWorker(normalized));
+    }
+    if (futures.isEmpty) {
+      futures.add(_ensureWorker(_primaryTask));
+    }
+    await Future.wait(futures);
+  }
+
+  void _handleWorkerMessage(String task, dynamic message) {
+    if (message is Map && ((message['task'] as String?)?.isEmpty ?? true)) {
+      message['task'] = task;
+    }
+    _onParseResultFromIsolate(message);
+  }
+
   RTCPeerConnection? _pc;
 
   RTCDataChannel? _dc;
@@ -196,10 +298,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Timer? _dcGuardTimer;
   bool _disposed = false;
 
-  Isolate? _parseIsolate;
-  ReceivePort? _parseRx;
-  SendPort? _parseSendPort;
-  StreamSubscription? _parseRxSub;
+  final Map<String, _ParseWorker> _parseWorkers = {};
+  final Map<String, Future<_ParseWorker>> _workerFutures = {};
 
   final RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
@@ -266,7 +366,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   final Map<String, Uint8List?> _pendingBin = {};
-  final Set<String> _parsingTasks = {};
   int _lastAckSeqSent = -1;
   int _lastKfReqUs = 0;
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
@@ -441,21 +540,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     _startRtpStatsProbe();
     _startNoResultsGuard();
-    if (_parseIsolate == null) {
-      _parseRx = ReceivePort();
-      _parseIsolate = await Isolate.spawn(
-        poseParseIsolateEntry,
-        _parseRx!.sendPort,
-      );
-
-      _parseRxSub = _parseRx!.listen((msg) {
-        if (msg is SendPort) {
-          _parseSendPort = msg;
-          return;
-        }
-        _onParseResultFromIsolate(msg);
-      });
-    }
+    await _ensureWorkersForRequestedTasks();
   }
 
   Future<RTCDataChannel> _createLossyDC(String task) async {
@@ -517,14 +602,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _lastSeqPerTask.clear();
     _lastPosesPerTask.clear();
 
-    await _silenceAsync(() async { await _parseRxSub?.cancel(); });
-    _silence(() => _parseRx?.close());
-    _silence(() => _parseIsolate?.kill(priority: Isolate.immediate));
-
-    _parseRxSub = null;
-    _parseIsolate = null;
-    _parseRx = null;
-    _parseSendPort = null;
+    final workers = List<_ParseWorker>.from(_parseWorkers.values);
+    _parseWorkers.clear();
+    _workerFutures.clear();
+    for (final worker in workers) {
+      await _silenceAsync(() => worker.dispose());
+    }
 
     overlayTick.dispose();
   }
@@ -672,21 +755,25 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _onParseResultFromIsolate(dynamic msg) {
     if (_disposed || msg is! Map) return;
 
-    final String? task = (msg['task'] as String?)?.toLowerCase();
+    final String? rawTask = (msg['task'] as String?)?.toLowerCase();
     final String? type = msg['type'] as String?;
+    final String? task = rawTask == null ? null : _normalizeTask(rawTask);
 
     if (task != null) {
-      _parsingTasks.remove(task);
+      msg['task'] = task;
+      final worker = _parseWorkers[task];
+      if (worker != null) {
+        worker.busy = false;
+      }
       if (_pendingBin.containsKey(task)) {
         if (_tooSoonForParse(task)) {
           // Try next frame instead of right-now microtask (keeps CPU cooler)
           SchedulerBinding.instance.scheduleFrameCallback((_) {
-            if (!_disposed &&
-                _pendingBin.containsKey(task) &&
-                !_parsingTasks.contains(task)) {
-              _parsingTasks.add(task);
-              _drainParseLoop(task);
-            }
+            if (_disposed) return;
+            if (!_pendingBin.containsKey(task)) return;
+            final w = _parseWorkers[task];
+            if (w == null || w.busy) return;
+            scheduleMicrotask(() => _drainParseLoop(task));
           });
         } else {
           scheduleMicrotask(() => _drainParseLoop(task));
@@ -750,50 +837,68 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
 
   void _enqueueBinary(String task, Uint8List buf) {
-    // Always replace with the freshest payload
-    _pendingBin[task] = buf;
+    final normalized = _normalizeTask(task);
 
-    final bool parseRunning = _parsingTasks.contains(task);
+    // Always replace with the freshest payload
+    _pendingBin[normalized] = buf;
+
+    final bool parseRunning = _parseWorkers[normalized]?.busy ?? false;
     if (logEverything) {
       _log(
-          'enqueueBinary[$task]: buffer=${buf.length}B, parseRunning=$parseRunning, pending=${_pendingBin.length}');
+          'enqueueBinary[$normalized]: buffer=${buf.length}B, parseRunning=$parseRunning, pending=${_pendingBin.length}');
     }
 
     if (parseRunning) {
-      final bool throttled = _tooSoonForParse(task);
+      final bool throttled = _tooSoonForParse(normalized);
       if (throttled) {
-        _log('enqueueBinary[$task]: isolate busy, throttling new payload');
+        _log('enqueueBinary[$normalized]: isolate busy, throttling new payload');
         return; // cheap backpressure: avoid sending another job to the isolate
       }
 
-      _log('enqueueBinary[$task]: isolate busy, keeping freshest payload');
+      _log('enqueueBinary[$normalized]: isolate busy, keeping freshest payload');
       return; // we'll parse the freshest later
     }
 
     // Normal path: parser isn't running for this task → start it.
-    _parsingTasks.add(task);
-    _log('enqueueBinary[$task]: dispatching job to parse isolate');
-    scheduleMicrotask(() => _drainParseLoop(task));
+    _log('enqueueBinary[$normalized]: dispatching job to parse isolate');
+    scheduleMicrotask(() => _drainParseLoop(normalized));
   }
 
-  void _drainParseLoop(String task) {
-    final Uint8List? buf = _pendingBin.remove(task);
+  Future<void> _drainParseLoop(String task) async {
+    final normalized = _normalizeTask(task);
+    final Uint8List? buf = _pendingBin.remove(normalized);
     if (buf == null || _disposed) {
-      _parsingTasks.remove(task);
+      return;
+    }
+
+    _ParseWorker worker;
+    try {
+      worker = await _ensureWorker(normalized);
+    } catch (_) {
+      _maybeSendKF();
+      return;
+    }
+
+    if (_disposed) {
+      return;
+    }
+
+    final sendPort = worker.sendPort;
+    if (sendPort == null) {
       return;
     }
 
     try {
       final ttd = TransferableTypedData.fromList([buf]);
-      _parseSendPort?.send({
+      worker.busy = true;
+      sendPort.send({
         'type': 'job',
-        'task': task,
+        'task': normalized,
         'data': ttd,
       });
-      return;
     } catch (_) {
+      worker.busy = false;
       _maybeSendKF();
-      _parsingTasks.remove(task);
     }
   }
 
