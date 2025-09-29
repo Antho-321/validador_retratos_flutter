@@ -2,7 +2,8 @@
 import 'dart:typed_data' show Float32List, Int32List;
 import 'dart:ui';
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, Listenable;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, Listenable, debugPrint, kDebugMode;
 
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../domain/model/lmk_state.dart' show LmkState;
@@ -217,6 +218,8 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
   bool get _poseHoldFresh =>
       DateTime.now().difference(_poseHoldTs) < const Duration(milliseconds: 400);
 
+  Duration _poseHoldAge() => DateTime.now().difference(_poseHoldTs);
+
   bool _hasPoseData(PoseFrame? frame) {
     if (frame == null) return false;
     if (frame.packedPositions != null &&
@@ -248,9 +251,23 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
   void _onPoseFrame() {
     if (!widget.useHoldLastForPose) return;
     final f = widget.latest.value;
+    final prevHold = _poseHoldFrame;
     if (_hasPoseData(f)) {
       _poseHoldFrame = f;
       _poseHoldTs = DateTime.now();
+      if (kDebugMode) {
+        final packed = f.packedPositions?.length ?? 0;
+        final flats = f.posesPxFlat?.length ?? 0;
+        debugPrint(
+          '[PoseOverlayFast] new hold frame stored (packed=$packed, flats=$flats)',
+        );
+      }
+    }
+    if (kDebugMode && !_hasPoseData(f) && prevHold != null) {
+      final ageMs = _poseHoldAge().inMilliseconds;
+      debugPrint(
+        '[PoseOverlayFast] live frame without pose data; hold age=${ageMs}ms (fresh=${_poseHoldFresh})',
+      );
     }
   }
 
@@ -281,6 +298,7 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
         useHoldLastForPose: widget.useHoldLastForPose,
         getPoseHoldFrame: () => _poseHoldFrame,
         isPoseHoldFresh: () => _poseHoldFresh,
+        poseHoldAge: _poseHoldAge,
         landmarksColor: landmarksColor,
       ),
       size: Size.infinite,
@@ -303,6 +321,7 @@ class _PoseOverlayFastPainter extends CustomPainter {
     required this.getPoseHoldFrame,
     required this.isPoseHoldFresh,
     required this.landmarksColor,
+    this.poseHoldAge,
     this.face,
   }) : super(
           repaint: face == null
@@ -322,11 +341,14 @@ class _PoseOverlayFastPainter extends CustomPainter {
   // Hold-last plano
   final PoseFrame? Function() getPoseHoldFrame;
   final bool Function() isPoseHoldFresh;
+  final Duration Function()? poseHoldAge;
 
   final Color landmarksColor;
 
   final _PoseBufferSet _poseBuffers = _PoseBufferSet(_kPoseEdgeIdx);
   final _PointBuffer _facePoints = _PointBuffer();
+
+  bool _lastUsedHold = false;
 
   bool _hasPoseData(PoseFrame? frame) {
     if (frame == null) return false;
@@ -343,8 +365,18 @@ class _PoseOverlayFastPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     PoseFrame? frame = latest.value;
+    bool usedHold = false;
     if (!_hasPoseData(frame) && useHoldLastForPose && isPoseHoldFresh()) {
       frame = getPoseHoldFrame();
+      usedHold = frame != null;
+    }
+
+    if (kDebugMode && usedHold != _lastUsedHold) {
+      final age = poseHoldAge?.call();
+      final ageMs = age?.inMilliseconds;
+      debugPrint('[PoseOverlayFast] ${usedHold ? 'reusing hold frame' : 'using live frame'}'
+          '${usedHold && ageMs != null ? ' (age=${ageMs}ms)' : ''}');
+      _lastUsedHold = usedHold;
     }
 
     final LmkState? faceState = face?.value;
