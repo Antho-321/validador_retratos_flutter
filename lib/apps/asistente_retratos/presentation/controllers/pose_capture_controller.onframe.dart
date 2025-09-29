@@ -1,6 +1,12 @@
 // lib/apps/asistente_retratos/presentation/controllers/pose_capture_controller.onframe.dart
 part of 'pose_capture_controller.dart';
 
+void _poseCtrlLog(String message) {
+  if (kDebugMode) {
+    debugPrint('[PoseCapture] $message');
+  }
+}
+
 // ── Top-level helper types (must NOT be inside an extension) ───────────
 class _EvalCtx {
   _EvalCtx({
@@ -505,7 +511,16 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final canvas = _canvasSize;
     final pose = poseService.latestPoseLandmarks; // image-space points
     final lms3d = poseService.latestPoseLandmarks3D; // List<PosePoint>?
-    if (faces == null || faces.isEmpty || canvas == null) return null;
+    if (canvas == null) {
+      _poseCtrlLog('Skipping frame: canvas size not ready yet');
+      return null;
+    }
+    if (faces == null || faces.isEmpty) {
+      final poseCount = pose?.length ?? 0;
+      _poseCtrlLog(
+          'Skipping frame: no face landmarks (poseLandmarks=$poseCount)');
+      return null;
+    }
 
     final now = DateTime.now();
 
@@ -637,16 +652,35 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final double a = 1 - math.exp(-dtMs / PoseCaptureController._emaTauMs);
     _lastSampleAt ??= now;
 
+    final double rawYaw = report.yawDeg;
+    final double rawPitch = report.pitchDeg;
+    final double rawRoll = report.rollDeg;
+
     _emaYawDeg = (_emaYawDeg == null)
-        ? report.yawDeg
-        : (a * report.yawDeg + (1 - a) * _emaYawDeg!);
+        ? rawYaw
+        : (a * rawYaw + (1 - a) * _emaYawDeg!);
     _emaPitchDeg = (_emaPitchDeg == null)
-        ? report.pitchDeg
-        : (a * report.pitchDeg + (1 - a) * _emaPitchDeg!);
+        ? rawPitch
+        : (a * rawPitch + (1 - a) * _emaPitchDeg!);
     _lastSampleAt = now;
 
     // Roll kinematics (unwrap + EMA + dps + error-to-180°)
-    updateRollKinematics(report.rollDeg, now); // _emaRollDeg se sincroniza adentro
+    final _RollMetrics rollMetrics = updateRollKinematics(rawRoll, now);
+
+    if (pose == null || pose.isEmpty) {
+      _poseCtrlLog(
+          'Frame ${now.millisecondsSinceEpoch}: pose landmarks missing; relying on face only');
+    }
+
+    _poseCtrlLog(
+      'Frame ${now.millisecondsSinceEpoch}: Δt=${dtMs.toStringAsFixed(1)}ms, '
+      'faceOk=$faceOk, arc=${arcProgress.toStringAsFixed(2)}, '
+      'yaw=${rawYaw.toStringAsFixed(2)}→${_emaYawDeg?.toStringAsFixed(2)}, '
+      'pitch=${rawPitch.toStringAsFixed(2)}→${_emaPitchDeg?.toStringAsFixed(2)}, '
+      'roll=${rawRoll.toStringAsFixed(2)}→${_emaRollDeg?.toStringAsFixed(2)}, '
+      'rollDps=${rollMetrics.dps.toStringAsFixed(1)}, '
+      'pose2D=${pose?.length ?? 0}, pose3D=${lms3dRec?.length ?? 0}',
+    );
 
     // Devuelve contexto mínimo: inputs + registry + flags de HUD
     return _EvalCtx(

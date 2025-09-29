@@ -7,7 +7,8 @@ import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
 
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
-import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
+import 'package:flutter/foundation.dart'
+    show ValueListenable, ValueNotifier, debugPrint;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
@@ -144,6 +145,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final List<String> requestedTasks;
   final int kfMinGapMs;
 
+  void _log(String message) {
+    if (!logEverything) return;
+    debugPrint('[PoseWebRTC] $message');
+  }
+
   String get _primaryTask =>
       (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
 
@@ -171,7 +177,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (lastUs == null) return false;
     final nowUs = _nowUs();
     final minGapUs = _minEmitIntervalMsFor(task) * 1000;
-    return nowUs - lastUs < minGapUs;
+    final deltaUs = nowUs - lastUs;
+    final tooSoon = deltaUs < minGapUs;
+    if (tooSoon) {
+      _log(
+          'Throttle parse for "$task": Δ${(deltaUs / 1000).toStringAsFixed(2)}ms < ${(minGapUs / 1000).toStringAsFixed(2)}ms');
+    }
+    return tooSoon;
   }
 
   MediaStream? _localStream;
@@ -741,15 +753,26 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     // Always replace with the freshest payload
     _pendingBin[task] = buf;
 
-    // === EARLY-DROP: if we've emitted too recently AND a parse is already running,
-    // don't schedule a new parse yet; just keep the freshest buffer and return.
-    if (_parsingTasks.contains(task) && _tooSoonForParse(task)) {
-      return; // cheap backpressure: avoid sending another job to the isolate
+    final bool parseRunning = _parsingTasks.contains(task);
+    if (logEverything) {
+      _log(
+          'enqueueBinary[$task]: buffer=${buf.length}B, parseRunning=$parseRunning, pending=${_pendingBin.length}');
     }
 
-    // Normal path: if parser isn't running for this task, start it.
-    if (_parsingTasks.contains(task)) return; // (we'll parse the freshest later)
+    if (parseRunning) {
+      final bool throttled = _tooSoonForParse(task);
+      if (throttled) {
+        _log('enqueueBinary[$task]: isolate busy, throttling new payload');
+        return; // cheap backpressure: avoid sending another job to the isolate
+      }
+
+      _log('enqueueBinary[$task]: isolate busy, keeping freshest payload');
+      return; // we'll parse the freshest later
+    }
+
+    // Normal path: parser isn't running for this task → start it.
     _parsingTasks.add(task);
+    _log('enqueueBinary[$task]: dispatching job to parse isolate');
     scheduleMicrotask(() => _drainParseLoop(task));
   }
 
@@ -801,14 +824,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final nowUs = _nowUs();
       final lastUs = _lastEmitUsByTask[task] ?? 0;
       final minIntervalUs = _minEmitIntervalMsFor(task) * 1000;
+      final deltaMs = (nowUs - lastUs) / 1000.0;
+      final minGapMs = minIntervalUs / 1000.0;
 
       if (nowUs - lastUs < minIntervalUs) {
+        _log(
+            'emit[$task]: rescheduling ${pending.kind} seq=${pending.seq ?? '-'}; waited ${deltaMs.toStringAsFixed(2)}ms < ${minGapMs.toStringAsFixed(2)}ms');
         _scheduleEmitFlush(task);
         return;
       }
 
       _pendingByTask.remove(task);
       _lastEmitUsByTask[task] = nowUs;
+      _log(
+          'emit[$task]: delivering ${pending.kind} seq=${pending.seq ?? '-'} after ${deltaMs.toStringAsFixed(2)}ms');
       _doEmit(pending.frame,
           kind: pending.kind, seq: pending.seq, task: task);
     });
