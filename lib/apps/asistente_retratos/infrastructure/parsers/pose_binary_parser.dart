@@ -28,6 +28,7 @@
 
 import 'dart:math' as math;
 import 'dart:typed_data';
+
 enum PacketKind { po, pd }
 
 abstract class PoseParseResult {
@@ -67,14 +68,6 @@ class PoseParseNeedKF extends PoseParseResult {
   final String reason;
 }
 
-// Quantized baseline point
-class _PtQ {
-  int x;
-  int y;
-  int? z; // quantized z (i16 domain), nullable if stream had no Z
-  _PtQ(this.x, this.y, [this.z]);
-}
-
 class PoseBinaryParser {
   PoseBinaryParser({
     this.enforceBounds = true,
@@ -87,8 +80,12 @@ class PoseBinaryParser {
 
   int _errors = 0;
 
-  // Baseline in Q
-  List<List<_PtQ>>? _lastQ;
+  // Compact baseline in Q-domain
+  Uint16List? _baseXY;        // [x0,y0, x1,y1, ...]
+  Int16List? _baseZ;          // nullable when stream has no Z
+  Int32List? _lastRangesBuf;  // cached ranges (start,len per pose)
+  int _lastTotalPts = 0;
+  int _lastNposes = 0;
   int _lastScale = 1;
   int _lastWq = 0;
   int _lastHq = 0;
@@ -110,7 +107,11 @@ class PoseBinaryParser {
   int get parseErrors => _errors;
 
   void reset() {
-    _lastQ = null;
+    _baseXY = null;
+    _baseZ = null;
+    _lastRangesBuf = null;
+    _lastTotalPts = 0;
+    _lastNposes = 0;
     _lastScale = 1;
     _lastWq = 0;
     _lastHq = 0;
@@ -205,6 +206,7 @@ class PoseBinaryParser {
     final scale = _deriveScale(ver, wq, hq);
     final int wpx = wq ~/ scale;
     final int hpx = hq ~/ scale;
+    final double invScale = 1.0 / scale;
 
     int j = i;
     int totalPts = 0;
@@ -225,6 +227,9 @@ class PoseBinaryParser {
     final Float32List positionsBuf = allowReuse
         ? _ensurePositions(positionsFloats, reusePositions)
         : Float32List(positionsFloats);
+    _positions = positionsBuf;
+    _positionsView = null;
+    _positionsViewLen = positionsFloats;
     final Float32List positions = allowReuse
         ? _viewPositions(positionsBuf, positionsFloats)
         : positionsBuf;
@@ -235,20 +240,48 @@ class PoseBinaryParser {
       zBuf = allowReuse
           ? _ensureZ(totalPts, reuseZ)
           : Float32List(totalPts);
+      _z = zBuf;
+      _zView = null;
+      _zViewLen = totalPts;
       zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+    } else {
+      _z = null;
+      _zView = null;
+      _zViewLen = 0;
     }
 
     final Int32List rangesBuf = allowReuse
         ? _ensureRanges(rangesLen, reuseRanges)
         : Int32List(rangesLen);
+    _ranges = rangesBuf;
+    _rangesView = null;
+    _rangesViewLen = rangesLen;
     final Int32List ranges = allowReuse
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
 
-    final posesQ = <List<_PtQ>>[];
+    final int needXY = totalPts << 1;
+    Uint16List baseXY = _baseXY ?? Uint16List(needXY);
+    if (baseXY.length < needXY) {
+      baseXY = Uint16List(needXY);
+    }
+    _baseXY = baseXY;
+
+    Int16List? baseZ;
+    if (hasZ) {
+      baseZ = _baseZ ?? Int16List(totalPts);
+      if (baseZ.length < totalPts) {
+        baseZ = Int16List(totalPts);
+      }
+      _baseZ = baseZ;
+    } else {
+      _baseZ = null;
+    }
+
     int writePos = 0;
     int writeZ = 0;
     int startPt = 0;
+    int writeXY = 0;
 
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PO pose[$p] missing npts');
@@ -261,31 +294,30 @@ class PoseBinaryParser {
       rangesBuf[(p << 1) + 1] = npts;
       startPt += npts;
 
-      final ptsQ = <_PtQ>[];
       for (int k = 0; k < npts; k++) {
-        final xq = _u16le(b, i);
+        int xq = _u16le(b, i);
         i += 2;
-        final yq = _u16le(b, i);
+        int yq = _u16le(b, i);
         i += 2;
-        int? zq;
+        xq = _clampQ(xq, wq);
+        yq = _clampQ(yq, hq);
+        baseXY[writeXY++] = xq;
+        baseXY[writeXY++] = yq;
+        positionsBuf[writePos++] = xq * invScale;
+        positionsBuf[writePos++] = yq * invScale;
         if (hasZ) {
-          zq = _i16le(b, i);
+          int zq = _i16le(b, i);
           i += 2;
           zq = _clampZq(zq);
-        }
-        final cxq = _clampQ(xq, wq);
-        final cyq = _clampQ(yq, hq);
-        ptsQ.add(_PtQ(cxq, cyq, zq));
-        positionsBuf[writePos++] = cxq / scale;
-        positionsBuf[writePos++] = cyq / scale;
-        if (hasZ) {
-          zBuf![writeZ++] = (zq ?? 0) / zScale;
+          baseZ![writeZ] = zq;
+          zBuf![writeZ++] = zq / zScale;
         }
       }
-      posesQ.add(ptsQ);
     }
 
-    _lastQ = posesQ;
+    _lastRangesBuf = rangesBuf;
+    _lastTotalPts = totalPts;
+    _lastNposes = nposes;
     _lastScale = scale;
     _lastWq = wq;
     _lastHq = hq;
@@ -333,8 +365,9 @@ class PoseBinaryParser {
     final int scale = _deriveScale(ver, wq, hq);
     final int wpx = wq ~/ scale;
     final int hpx = hq ~/ scale;
+    final double invScale = 1.0 / scale;
 
-    final bool noBaseline = (_lastQ == null);
+    final bool noBaseline = (_baseXY == null || _lastRangesBuf == null);
     final bool scaleChanged = (!noBaseline && _lastScale != scale);
     final bool dimsChanged = (!noBaseline && (_lastWq != wq || _lastHq != hq));
     if (!isKey && (scaleChanged || dimsChanged)) {
@@ -360,6 +393,9 @@ class PoseBinaryParser {
       final Float32List positionsBuf = allowReuse
           ? _ensurePositions(positionsFloats, reusePositions)
           : Float32List(positionsFloats);
+      _positions = positionsBuf;
+      _positionsView = null;
+      _positionsViewLen = positionsFloats;
       final Float32List positions = allowReuse
           ? _viewPositions(positionsBuf, positionsFloats)
           : positionsBuf;
@@ -370,20 +406,48 @@ class PoseBinaryParser {
         zBuf = allowReuse
             ? _ensureZ(totalPts, reuseZ)
             : Float32List(totalPts);
+        _z = zBuf;
+        _zView = null;
+        _zViewLen = totalPts;
         zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+      } else {
+        _z = null;
+        _zView = null;
+        _zViewLen = 0;
       }
 
       final Int32List rangesBuf = allowReuse
           ? _ensureRanges(rangesLen, reuseRanges)
           : Int32List(rangesLen);
+      _ranges = rangesBuf;
+      _rangesView = null;
+      _rangesViewLen = rangesLen;
       final Int32List ranges = allowReuse
           ? _viewRanges(rangesBuf, rangesLen)
           : rangesBuf;
 
-      final posesQ = <List<_PtQ>>[];
+      final int needXY = totalPts << 1;
+      Uint16List baseXY = _baseXY ?? Uint16List(needXY);
+      if (baseXY.length < needXY) {
+        baseXY = Uint16List(needXY);
+      }
+      _baseXY = baseXY;
+
+      Int16List? baseZ;
+      if (hasZ) {
+        baseZ = _baseZ ?? Int16List(totalPts);
+        if (baseZ.length < totalPts) {
+          baseZ = Int16List(totalPts);
+        }
+        _baseZ = baseZ;
+      } else {
+        _baseZ = null;
+      }
+
       int writePos = 0;
       int writeZ = 0;
       int startPt = 0;
+      int writeXY = 0;
 
       for (int p = 0; p < nposes; p++) {
         _require(i + 2 <= b.length, 'PD(KF) pose[$p] missing npts');
@@ -396,31 +460,30 @@ class PoseBinaryParser {
         rangesBuf[(p << 1) + 1] = npts;
         startPt += npts;
 
-        final ptsQ = <_PtQ>[];
         for (int k = 0; k < npts; k++) {
-          final xq = _u16le(b, i);
+          int xq = _u16le(b, i);
           i += 2;
-          final yq = _u16le(b, i);
+          int yq = _u16le(b, i);
           i += 2;
-          int? zq;
+          xq = _clampQ(xq, wq);
+          yq = _clampQ(yq, hq);
+          baseXY[writeXY++] = xq;
+          baseXY[writeXY++] = yq;
+          positionsBuf[writePos++] = xq * invScale;
+          positionsBuf[writePos++] = yq * invScale;
           if (hasZ) {
-            zq = _i16le(b, i);
+            int zq = _i16le(b, i);
             i += 2;
             zq = _clampZq(zq);
-          }
-          final cxq = _clampQ(xq, wq);
-          final cyq = _clampQ(yq, hq);
-          ptsQ.add(_PtQ(cxq, cyq, zq));
-          positionsBuf[writePos++] = cxq / scale;
-          positionsBuf[writePos++] = cyq / scale;
-          if (hasZ) {
-            zBuf![writeZ++] = (zq ?? 0) / zScale;
+            baseZ![writeZ] = zq;
+            zBuf![writeZ++] = zq / zScale;
           }
         }
-        posesQ.add(ptsQ);
       }
 
-      _lastQ = posesQ;
+      _lastRangesBuf = rangesBuf;
+      _lastTotalPts = totalPts;
+      _lastNposes = nposes;
       _lastScale = scale;
       _lastWq = wq;
       _lastHq = hq;
@@ -444,113 +507,156 @@ class PoseBinaryParser {
     }
     final bool hasZ = _hasZ!;
 
-    final prevQ = _lastQ!;
-    _require(prevQ.length == nposes, 'PD(Δ) nposes mismatch');
+    // Guard baseline presence and bind non-nullable aliases
+    if (_baseXY == null || _lastRangesBuf == null) {
+      throw StateError('PD(Δ) missing baseline');
+    }
+    final Uint16List baseXY = _baseXY!;
+    final Int32List cachedRanges = _lastRangesBuf!;
+    _require(_lastNposes == nposes, 'PD(Δ) nposes mismatch');
 
+    // Pre-scan: counts + detect no-change
     final List<int> counts = List<int>.filled(nposes, 0, growable: false);
     int totalPts = 0;
     int scan = i;
+    int maskOr = 0;
     for (int p = 0; p < nposes; p++) {
       _require(scan + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
       final npts = _u16le(b, scan);
       scan += 2;
       final int maskBytes = (npts + 7) >> 3;
       _require(scan + maskBytes <= b.length, 'PD(Δ) pose[$p] mask short');
+      for (int m = 0; m < maskBytes; m++) {
+        maskOr |= b[scan + m];
+      }
       scan += maskBytes;
       counts[p] = npts;
       totalPts += npts;
     }
+    _require(_lastTotalPts == totalPts, 'PD(Δ) total points mismatch');
 
     final int positionsFloats = totalPts * 2;
     final int rangesLen = nposes * 2;
 
-    final Float32List positionsBuf = allowReuse
-        ? _ensurePositions(positionsFloats, reusePositions)
-        : Float32List(positionsFloats);
+    // Ensure output buffers
+    Float32List posBuf;
+    if (_positions != null && _positions!.length >= positionsFloats) {
+      posBuf = _positions!;
+    } else {
+      posBuf = allowReuse
+          ? _ensurePositions(positionsFloats, reusePositions)
+          : Float32List(positionsFloats);
+    }
+    _positions = posBuf;
+    _positionsView = null;
+    _positionsViewLen = positionsFloats;
     final Float32List positions = allowReuse
-        ? _viewPositions(positionsBuf, positionsFloats)
-        : positionsBuf;
+        ? _viewPositions(posBuf, positionsFloats)
+        : posBuf;
 
     Float32List? zBuf;
-    Float32List? zPositions;
     if (hasZ) {
-      zBuf = allowReuse
-          ? _ensureZ(totalPts, reuseZ)
-          : Float32List(totalPts);
-      zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
+      if (_baseZ == null) {
+        throw StateError('PD(Δ) missing Z baseline');
+      }
+      if (_z != null && _z!.length >= totalPts) {
+        zBuf = _z!;
+      } else {
+        zBuf = allowReuse
+            ? _ensureZ(totalPts, reuseZ)
+            : Float32List(totalPts);
+      }
+      _z = zBuf;
+      _zView = null;
+      _zViewLen = totalPts;
+    } else {
+      _z = null;
+      _zView = null;
+      _zViewLen = 0;
     }
 
-    final Int32List rangesBuf = allowReuse
-        ? _ensureRanges(rangesLen, reuseRanges)
-        : Int32List(rangesLen);
+    final Int32List rangesBuf = cachedRanges;
+    _ranges = rangesBuf;
+    _rangesView = null;
+    _rangesViewLen = rangesLen;
     final Int32List ranges = allowReuse
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
 
-    final posesQ = <List<_PtQ>>[];
-    int writePos = 0;
-    int writeZ = 0;
-    int startPt = 0;
+    // Early-out if nothing changed: reuse existing floats/ranges
+    if (maskOr == 0) {
+      _lastScale = scale;
+      _lastWq = wq;
+      _lastHq = hq;
+      return PoseParseOkPacked(
+        kind: PacketKind.pd,
+        w: wpx,
+        h: hpx,
+        positions: positions,
+        ranges: ranges,
+        hasZ: hasZ,
+        zPositions: hasZ ? _viewZ(zBuf!, totalPts) : null,
+        seq: seq,
+        keyframe: false,
+        ackSeq: seq,
+      );
+    }
 
+    // Apply sparse deltas
+    int ptr = i;
     for (int p = 0; p < nposes; p++) {
       final int npts = counts[p];
-      _require(i + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
-      final readNpts = _u16le(b, i);
-      i += 2;
+      _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
+      final readNpts = _u16le(b, ptr);
+      ptr += 2;
       _require(readNpts == npts, 'PD(Δ) pose[$p] inconsistent npts');
 
       final int maskBytes = (npts + 7) >> 3;
-      _require(i + maskBytes <= b.length, 'PD(Δ) pose[$p] mask short');
-      final int maskStart = i;
-      i += maskBytes;
+      _require(ptr + maskBytes <= b.length, 'PD(Δ) pose[$p] mask short');
+      final int maskStart = ptr;
+      ptr += maskBytes;
 
-      final prevPts = prevQ[p];
-      _require(prevPts.length == npts, 'PD(Δ) pose[$p] npts mismatch');
+      final int start = cachedRanges[(p << 1)];
+      int g = start;
 
-      rangesBuf[(p << 1)] = startPt;
-      rangesBuf[(p << 1) + 1] = npts;
-      startPt += npts;
+      for (int mb = 0; mb < maskBytes; mb++) {
+        int m = b[maskStart + mb];
+        final int upto = (mb == maskBytes - 1) ? (npts - (mb << 3)) : 8;
+        for (int bit = 0; bit < upto; bit++, g++) {
+          if ((m & 1) != 0) {
+            _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] dxdy short @pt $g');
+            final int xyIndex = g << 1;
 
-      final outQ = <_PtQ>[];
-      for (int j2 = 0; j2 < npts; j2++) {
-        final int mb = j2 >> 3;
-        final int bb = j2 & 7;
-        final bool changed = ((b[maskStart + mb] >> bb) & 1) == 1;
+            int xq = baseXY[xyIndex] + _asInt8(b[ptr]);
+            int yq = baseXY[xyIndex + 1] + _asInt8(b[ptr + 1]);
+            ptr += 2;
 
-        int xq = prevPts[j2].x;
-        int yq = prevPts[j2].y;
-        int? zq = prevPts[j2].z;
+            if (hasZ) {
+              _require(ptr + 1 <= b.length, 'PD(Δ) pose[$p] dz short @pt $g');
+              // _baseZ is non-null when hasZ true (checked above)
+              int zq = _baseZ![g] + _asInt8(b[ptr]);
+              ptr += 1;
+              zq = _clampZq(zq);
+              _baseZ![g] = zq;
+              zBuf![g] = zq / zScale;
+            }
 
-        if (changed) {
-          _require(i + 2 <= b.length, 'PD(Δ) pose[$p] dxdy short @pt $j2');
-          xq += _asInt8(b[i]);
-          i += 1;
-          yq += _asInt8(b[i]);
-          i += 1;
-          if (hasZ) {
-            _require(i + 1 <= b.length, 'PD(Δ) pose[$p] dz short @pt $j2');
-            final dz = _asInt8(b[i]);
-            i += 1;
-            final int prevZ = zq ?? 0;
-            zq = _clampZq(prevZ + dz);
+            xq = _clampQ(xq, wq);
+            yq = _clampQ(yq, hq);
+
+            baseXY[xyIndex] = xq;
+            baseXY[xyIndex + 1] = yq;
+            posBuf[xyIndex] = xq * invScale;
+            posBuf[xyIndex + 1] = yq * invScale;
           }
-        }
-
-        xq = _clampQ(xq, wq);
-        yq = _clampQ(yq, hq);
-
-        outQ.add(_PtQ(xq, yq, zq));
-        positionsBuf[writePos++] = xq / scale;
-        positionsBuf[writePos++] = yq / scale;
-        if (hasZ) {
-          zBuf![writeZ++] = (zq ?? 0) / zScale;
+          m >>= 1;
         }
       }
-
-      posesQ.add(outQ);
     }
 
-    _lastQ = posesQ;
+    _lastRangesBuf = rangesBuf;
+    _lastTotalPts = totalPts;
+    _lastNposes = nposes;
     _lastScale = scale;
     _lastWq = wq;
     _lastHq = hq;
@@ -562,7 +668,7 @@ class PoseBinaryParser {
       positions: positions,
       ranges: ranges,
       hasZ: hasZ,
-      zPositions: zPositions,
+      zPositions: hasZ ? _viewZ(zBuf!, totalPts) : null,
       seq: seq,
       keyframe: false,
       ackSeq: seq,
