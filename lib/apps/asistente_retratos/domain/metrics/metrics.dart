@@ -69,4 +69,7 @@ class MetricKeys {
   static const shouldersSigned = MetricKey('shoulders.signed'); // deg firmado
   static const azimutSigned    = MetricKey('azimut.signed');    // deg firmado
 
+  // Face recognition
+  static const faceRecogScore  = MetricKey('face_recog.cosine');
+
 }

@@ -92,6 +92,12 @@ class PortraitValidationReport {
     required this.azimutDeg,
     required this.azimutProgress,
 
+    // Face recognition
+    required this.faceRecogOk,
+    required this.faceRecogScore,
+    required this.faceRecogProgress,
+    this.faceRecogDecision,
+
     // UI ring & overall
     required this.ovalProgress,
     required this.allChecksOk,
@@ -125,6 +131,12 @@ class PortraitValidationReport {
   final bool azimutOk;
   final double azimutDeg;
   final double azimutProgress;
+
+  /// Face recognition rule
+  final bool faceRecogOk;
+  final double faceRecogScore;
+  final double faceRecogProgress;
+  final String? faceRecogDecision;
 
   /// UI ring progress:
   /// - while face isn't inside oval -> equals fractionInsideOval
@@ -179,6 +191,13 @@ class PortraitValidator {
     double azimutBandLo = 0.0,
     double azimutBandHi = 0.0,
     double azimutMaxOffDeg = 20.0,
+
+    // Face recognition (cosine similarity)
+    bool enableFaceRecog = false,
+    double? faceRecogScore,
+    double faceRecogThreshold = 0.0,
+    double faceRecogMaxOff = 0.0,
+    String? faceRecogDecision,
   }) {
     if (faceLandmarksImg.isEmpty ||
         imageSize.width <= 0 ||
@@ -203,6 +222,10 @@ class PortraitValidator {
         azimutOk: false,
         azimutDeg: 0.0,
         azimutProgress: 0.0,
+        faceRecogOk: false,
+        faceRecogScore: 0.0,
+        faceRecogProgress: 0.0,
+        faceRecogDecision: null,
         ovalProgress: 0.0,
         allChecksOk: false,
       );
@@ -251,6 +274,11 @@ class PortraitValidator {
     bool azimutOk = false;
     double azimutDegVal = 0.0;
     double azimutProgress = enableAzimut ? 0.0 : 1.0;
+
+    bool faceRecogOk = !enableFaceRecog;
+    double faceRecogScoreVal = faceRecogScore ?? 0.0;
+    double faceRecogProgress = enableFaceRecog ? 0.0 : 1.0;
+    String? faceRecogDecisionOut = faceRecogDecision;
 
     if (faceOk && (enableYaw || enablePitch || enableRoll)) {
       // Use your estimator once; it expects H/W ints (as in your page).
@@ -331,6 +359,34 @@ class PortraitValidator {
       azimutProgress = bz.progress;
     }
 
+    if (enableFaceRecog) {
+      if (faceRecogScore != null) {
+        faceRecogScoreVal = faceRecogScore;
+        final double threshold = faceRecogThreshold;
+        final double window = faceRecogMaxOff;
+        if (faceRecogScore >= threshold) {
+          faceRecogOk = true;
+          faceRecogProgress = 1.0;
+        } else {
+          faceRecogOk = false;
+          if (window > 0) {
+            final double minScore = threshold - window;
+            final double span = threshold - minScore;
+            final double raw = span <= 0
+                ? 0.0
+                : ((faceRecogScore - minScore) / span).clamp(0.0, 1.0);
+            faceRecogProgress = raw;
+          } else {
+            faceRecogProgress = 0.0;
+          }
+        }
+      } else {
+        faceRecogOk = false;
+        faceRecogScoreVal = 0.0;
+        faceRecogProgress = 0.0;
+      }
+    }
+
     // UI ring: face progress until it passes; then combine progress of all enabled checks.
     double combinedProgress = 1.0;
     final parts = <double>[];
@@ -339,6 +395,7 @@ class PortraitValidator {
     if (enableRoll) parts.add(rollProgress);
     if (enableShoulders) parts.add(shouldersProgress);
     if (enableAzimut) parts.add(azimutProgress);
+    if (enableFaceRecog) parts.add(faceRecogProgress);
     if (parts.isNotEmpty) {
       combinedProgress = parts.reduce(_min);
     }
@@ -349,7 +406,8 @@ class PortraitValidator {
         (!enablePitch || pitchOk) &&
         (!enableRoll || rollOk) &&
         (!enableShoulders || shouldersOk) &&
-        (!enableAzimut || azimutOk);
+        (!enableAzimut || azimutOk) &&
+        (!enableFaceRecog || faceRecogOk);
 
     return PortraitValidationReport(
       faceInOval: faceOk,
@@ -369,6 +427,10 @@ class PortraitValidator {
       azimutOk: azimutOk,
       azimutDeg: azimutDegVal,
       azimutProgress: azimutProgress,
+      faceRecogOk: faceRecogOk,
+      faceRecogScore: faceRecogScoreVal,
+      faceRecogProgress: faceRecogProgress,
+      faceRecogDecision: faceRecogDecisionOut,
       ovalProgress: ringProgress,
       allChecksOk: allOk,
     );

@@ -15,6 +15,8 @@ class _EvalCtx {
     required this.arcProgress,
     required this.inputs,
     required this.metrics,
+    required this.faceRecogState,
+    required this.faceRecogProgress,
 
     // Valores firmados (suavizados) SOLO para animaciones/HUD
     this.yawDegForAnim,
@@ -29,6 +31,9 @@ class _EvalCtx {
   /// Frame inputs + metric registry (pluggable)
   final FrameInputs inputs;
   final MetricRegistry metrics;
+
+  final FaceRecogState faceRecogState;
+  final double faceRecogProgress;
 
   /// Valores suavizados para animaciones (no para gating)
   final double? yawDegForAnim;
@@ -46,6 +51,7 @@ class _HintAnim {
 const Map<String, String> _maintainById = <String, String>{
   'azimut': 'Mantén el torso recto',
   'shoulders': 'Mantén los hombros nivelados',
+  'face_recog': 'Mantente quieto mientras confirmamos tu identidad',
   // default → “Mantén la cabeza recta”
 };
 
@@ -315,6 +321,63 @@ _ValidationRule makeRollRule(ValidationProfile p) {
   );
 }
 
+_ValidationRule makeFaceRecogRule(ValidationProfile p) {
+  final gate = _gateFrom(p.faceRecog);
+  return _ClosureRule(
+    id: 'face_recog',
+    gate: gate,
+    blockInterruptionDuranteValidacion: true,
+    metric: (c) {
+      final FaceRecogState state = c.faceRecogState;
+      if (!state.isFresh()) return null;
+      final double? score = c.metrics.get<double>(MetricKeys.faceRecogScore, c.inputs);
+      if (score == null) return null;
+      final String? decision = state.normalizedDecision;
+      if (decision != null && decision != 'MATCH') {
+        final double guard = gate.enterBand - 1e-3;
+        return math.min(score, guard);
+      }
+      return score;
+    },
+    hint: (ctrl, c, maintain) {
+      ctrl._hideAnimationIfVisible();
+      final FaceRecogState state = c.faceRecogState;
+      final bool fresh = state.isFresh();
+      final String? decision = state.normalizedDecision;
+      if (!fresh) {
+        return const _HintAnim(_Axis.none, 'Verificando coincidencia…');
+      }
+      if (decision == 'MATCH') {
+        return maintain
+            ? const _HintAnim(
+                _Axis.none, 'Mantente quieto mientras confirmamos tu identidad')
+            : const _HintAnim(_Axis.none, null);
+      }
+      if (state.isNoMatch) {
+        return const _HintAnim(
+          _Axis.none,
+          'No coincide con la referencia. Ajusta tu posición y vuelve a intentar',
+        );
+      }
+      final double? score = state.primaryScore;
+      if (score == null) {
+        return const _HintAnim(_Axis.none, 'Verificando coincidencia…');
+      }
+      final double threshold = gate.enterBand;
+      if (score >= threshold) {
+        return maintain
+            ? const _HintAnim(
+                _Axis.none, 'Mantente quieto mientras confirmamos tu identidad')
+            : const _HintAnim(_Axis.none, null);
+      }
+      return const _HintAnim(
+        _Axis.none,
+        'Acércate y mira al frente para mejorar la coincidencia',
+      );
+    },
+  );
+}
+
 // ── Estado por instancia para reglas usando Expando (sin tocar la clase) ──
 final Expando<List<_ValidationRule>> _rulesExp = Expando('_rules');
 final Expando<int> _idxExp = Expando('_idx');
@@ -425,6 +488,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       yawRule,
       pitchRule,
       makeRollRule(p),
+      makeFaceRecogRule(p),
     ];
 
     _rulesExp[this] = list;
@@ -511,6 +575,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final canvas = _canvasSize;
     final pose = poseService.latestPoseLandmarks; // image-space points
     final lms3d = poseService.latestPoseLandmarks3D; // List<PosePoint>?
+    final faceRecogState = poseService.faceRecog.value;
+    final bool faceRecogFresh = faceRecogState.isFresh();
+    final double? faceRecogScoreForUi =
+        faceRecogFresh ? faceRecogState.primaryScore : null;
     if (canvas == null) {
       _poseCtrlLog('Skipping frame: canvas size not ready yet');
       return null;
@@ -561,10 +629,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final rollGateNow = _findRule('roll')!.gate;
     final shouldersGateNow = _findRule('shoulders')!.gate;
     final azimutGateNow = _findRule('azimut')!.gate; // ⬅️ NUEVO
+    final _AxisGate? faceRecogGateNow = _findRule('face_recog')?.gate;
 
     final double yawDeadbandNow = yawGateNow.enterBand;
     final double pitchDeadbandNow = pitchGateNow.enterBand;
     final double rollDeadbandNow = rollGateNow.enterBand;
+    final double faceRecogThresholdNow =
+        faceRecogGateNow?.enterBand ?? p.faceRecog.baseDeadband;
 
     // SHOULDERS: tolerancia SIMÉTRICA para el validador (para progreso/ok visual).
     final p = profile;
@@ -598,6 +669,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     final bool uiEnableShoulders = !doneNow && (curId == 'shoulders');
     final bool uiEnableAzimut    = !doneNow && (curId == 'azimut') && (azDegHUD != null);
+    final bool uiEnableFaceRecog = !doneNow && (curId == 'face_recog');
 
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final report = _validator.evaluate(
@@ -636,10 +708,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
       azimutBandLo: azLoNow,
       azimutBandHi: azHiNow,
       azimutMaxOffDeg: p.azimutGate.maxOffDeg,
+
+      enableFaceRecog: uiEnableFaceRecog,
+      faceRecogScore: faceRecogScoreForUi,
+      faceRecogThreshold: faceRecogThresholdNow,
+      faceRecogMaxOff: p.faceRecog.maxOffDeg,
+      faceRecogDecision: faceRecogState.normalizedDecision,
     );
 
     final bool faceOk = report.faceInOval;
     final double arcProgress = report.ovalProgress;
+    final double faceRecogProgress = report.faceRecogProgress;
 
     // EMA para yaw/pitch (solo para animaciones)
     final double dtMs = (_lastSampleAt == null)
@@ -679,7 +758,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
       'pitch=${rawPitch.toStringAsFixed(2)}→${_emaPitchDeg?.toStringAsFixed(2)}, '
       'roll=${rawRoll.toStringAsFixed(2)}→${_emaRollDeg?.toStringAsFixed(2)}, '
       'rollDps=${rollMetrics.dps.toStringAsFixed(1)}, '
-      'pose2D=${pose?.length ?? 0}, pose3D=${lms3dRec?.length ?? 0}',
+      'pose2D=${pose?.length ?? 0}, pose3D=${lms3dRec?.length ?? 0}, '
+      'faceRecog=${faceRecogState.normalizedDecision ?? '-'} '
+      'score=${faceRecogScoreForUi?.toStringAsFixed(3) ?? '-'} '
+      'fresh=${faceRecogFresh ? "Y" : "N"}',
     );
 
     // Devuelve contexto mínimo: inputs + registry + flags de HUD
@@ -689,6 +771,8 @@ extension _OnFrameLogicExt on PoseCaptureController {
       arcProgress: arcProgress,
       inputs: inputs,
       metrics: _metricRegistry,
+      faceRecogState: faceRecogState,
+      faceRecogProgress: faceRecogProgress,
       yawDegForAnim: _emaYawDeg,
       pitchDegForAnim: _emaPitchDeg,
       rollDegForAnim: _emaRollDeg, // smoothed/unwrapped

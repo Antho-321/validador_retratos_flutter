@@ -82,6 +82,9 @@ class ValidationProfile {
   // Head gates
   final GateConfig yaw, pitch, roll;
 
+  // Reconocimiento facial (cosine similarity)
+  final GateConfig faceRecog;
+
   // Shoulders & torso (rangos + sus gates)
   final Band shouldersBand, azimutBand;
   final GateConfig shouldersGate, azimutGate;
@@ -94,6 +97,7 @@ class ValidationProfile {
     required this.yaw,
     required this.pitch,
     required this.roll,
+    required this.faceRecog,
     required this.shouldersBand,
     required this.shouldersGate,
     required this.azimutBand,
@@ -125,6 +129,16 @@ class ValidationProfile {
       tighten: 0.4,
       hysteresis: 0.3,
       maxOffDeg: 100.0, // no crítico si tu regla de roll no lo usa
+    ),
+
+    // Face recog (cosine similarity ≥ threshold)
+    faceRecog: GateConfig(
+      baseDeadband: 0.50,
+      tighten: 0.04,
+      hysteresis: 0.03,
+      extraRelaxAfterFirst: 0.02,
+      sense: GateSense.outsideIsOk,
+      maxOffDeg: 0.50, // rango donde el progreso cae a 0
     ),
 
     // Shoulders

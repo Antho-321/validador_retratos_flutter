@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoRenderer, MediaStream;
 
 import '../model/lmk_state.dart'; // ⬅️ añade esto
+import '../model/face_recog_state.dart';
 
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
@@ -33,4 +34,7 @@ abstract class PoseCaptureService {
   ValueListenable<LmkState> get faceLandmarks;
   // ⬅️ NUEVO: POSE landmarks para usar con PosePainter
   ValueListenable<LmkState> get poseLandmarks;
+
+  /// Estado de la tarea face_recog (cosine, decision, etc.).
+  ValueListenable<FaceRecogState> get faceRecog;
 }

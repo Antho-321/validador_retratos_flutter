@@ -11,6 +11,7 @@ import 'dart:ui' show Size, Offset;
 import 'package:flutter/painting.dart' show BoxFit;
 
 import '../../domain/service/pose_capture_service.dart';
+import '../../domain/model/face_recog_state.dart';
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 import '../widgets/frame_sequence_overlay.dart'
@@ -670,6 +671,12 @@ class PoseCaptureController extends ChangeNotifier {
         zToPx: zToPx,
         mirror: i.mirror,
       );
+    });
+
+    _metricRegistry.register(MetricKeys.faceRecogScore, (i) {
+      final state = poseService.faceRecog.value;
+      if (!state.isFresh()) return null;
+      return state.primaryScore;
     });
   }
 

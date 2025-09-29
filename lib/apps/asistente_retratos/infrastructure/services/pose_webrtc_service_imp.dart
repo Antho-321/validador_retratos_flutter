@@ -14,6 +14,7 @@ import 'package:http/http.dart' as http;
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
+import '../../domain/model/face_recog_state.dart';
 import '../model/pose_frame.dart' show PoseFrame;
 import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
@@ -22,6 +23,7 @@ import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_utils.dart';
+import '../parsers/face_recog_result_parser.dart';
 
 class _PendingEmit {
   final PoseFrame frame;
@@ -157,8 +159,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.stripFecFromSdp = true,
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
-    this.requestedTasks = const ['pose', 'face'],
+    this.requestedTasks = const ['pose', 'face', 'face_recog'],
     this.kfMinGapMs = 500, // configurable KF pacing
+    this.faceRecogRefImagePath = '1050298650',
     RtcVideoEncoder? encoder,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
@@ -190,6 +193,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool keepTransportCcOnly;
   final List<String> requestedTasks;
   final int kfMinGapMs;
+  final String faceRecogRefImagePath;
+
+  static const Set<String> _tasksWithoutBinary = {'face_recog'};
+
+  final FaceRecogResultParser _faceRecogParser = const FaceRecogResultParser();
+  final ValueNotifier<FaceRecogState> _faceRecog =
+      ValueNotifier<FaceRecogState>(FaceRecogState.empty);
+
+  @override
+  ValueListenable<FaceRecogState> get faceRecog => _faceRecog;
 
   void _log(String message) {
     if (!logEverything) return;
@@ -210,6 +223,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final normalized = task.toLowerCase().trim();
     if (normalized.isEmpty) return _primaryTask;
     return normalized;
+  }
+
+  List<String> _requestedNormalized() {
+    final set = <String>{};
+    final source = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
+    for (final raw in source) {
+      final normalized = _normalizeTask(raw);
+      if (normalized.isEmpty) continue;
+      set.add(normalized);
+    }
+    if (set.isEmpty) {
+      set.add(_primaryTask);
+    }
+    return List<String>.unmodifiable(set);
   }
 
   Future<_ParseWorker> _ensureWorker(String task) {
@@ -242,12 +269,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   Future<void> _ensureWorkersForRequestedTasks() async {
-    final requested = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
     final futures = <Future<_ParseWorker>>[];
-    for (final raw in requested) {
-      final normalized = _normalizeTask(raw);
-      if (normalized.isEmpty) continue;
-      futures.add(_ensureWorker(normalized));
+    for (final task in _requestedNormalized()) {
+      if (_tasksWithoutBinary.contains(task)) continue;
+      futures.add(_ensureWorker(task));
     }
     if (futures.isEmpty) {
       futures.add(_ensureWorker(_primaryTask));
@@ -460,9 +485,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _pc!.onRenegotiationNeeded = () {};
 
     if (preCreateDataChannels) {
-      final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
       await _ensureCtrlDC();
-      for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
+      for (final t in _requestedNormalized()) {
         await _createLossyDC(t);
       }
     }
@@ -515,11 +539,23 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     await _waitIceGatheringComplete(_pc!);
     final local = await _pc!.getLocalDescription();
 
+    final normalizedTasks = _requestedNormalized();
+
     final body = {
       'type': local!.type,
       'sdp': local.sdp,
-      'tasks': requestedTasks.isEmpty ? ['pose'] : requestedTasks,
+      'tasks': normalizedTasks,
     };
+
+    final taskParams = <String, dynamic>{};
+    if (normalizedTasks.contains('face_recog')) {
+      taskParams['face_recog'] = {
+        'ref_image_path': faceRecogRefImagePath,
+      };
+    }
+    if (taskParams.isNotEmpty) {
+      body['task_params'] = taskParams;
+    }
     final res = await http.post(
       offerUri,
       headers: const {'content-type': 'application/json'},
@@ -609,6 +645,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       await _silenceAsync(() => worker.dispose());
     }
 
+    _faceRecog.dispose();
     overlayTick.dispose();
   }
 
@@ -795,9 +832,59 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _wireResults(RTCDataChannel ch, {required String task}) {
     ch.onDataChannelState = (s) {};
     ch.onMessage = (RTCDataChannelMessage m) {
-      if (!m.isBinary) return;
+      if (task == 'face_recog') {
+        _handleFaceRecogMessage(m);
+        return;
+      }
+      if (!m.isBinary || m.binary == null) return;
       _enqueueBinary(task, m.binary);
     };
+  }
+
+  void _handleFaceRecogMessage(RTCDataChannelMessage m) {
+    FaceRecogResult? result;
+    try {
+      if (m.isBinary && m.binary != null) {
+        result = _faceRecogParser.parseBytes(m.binary);
+      } else {
+        final text = m.text;
+        if (text != null && text.trim().isNotEmpty) {
+          result = _faceRecogParser.parseText(text);
+        }
+      }
+    } catch (e) {
+      if (logEverything) {
+        _log('face_recog parse error: $e');
+      }
+    }
+
+    if (result != null && result.hasPayload) {
+      _handleFaceRecogPayload(result);
+    }
+  }
+
+  void _handleFaceRecogPayload(FaceRecogResult payload) {
+    if (payload.imageWidth != null) {
+      _lastW = payload.imageWidth;
+    }
+    if (payload.imageHeight != null) {
+      _lastH = payload.imageHeight;
+    }
+
+    final next = _faceRecog.value.copyWith(
+      cosineSimilarity: payload.cosineSimilarity,
+      distance: payload.distance,
+      rawScore: payload.score,
+      decision: payload.decision,
+      embeddingLength: payload.embeddingLength,
+      imageWidth: payload.imageWidth,
+      imageHeight: payload.imageHeight,
+      updatedAt: DateTime.now(),
+      fromBinary: payload.fromBinary,
+    );
+
+    _faceRecog.value = next;
+    _bumpOverlay();
   }
 
   void _wireCtrl(RTCDataChannel ch) {
@@ -829,8 +916,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _ctrl = null;
 
     await _ensureCtrlDC();
-    final tasks = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
-    for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
+    for (final t in _requestedNormalized()) {
       await _createLossyDC(t);
     }
   }
