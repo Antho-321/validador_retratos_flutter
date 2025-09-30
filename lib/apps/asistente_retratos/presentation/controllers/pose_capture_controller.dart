@@ -16,12 +16,13 @@ import '../widgets/portrait_validator_hud.dart'
 import '../widgets/frame_sequence_overlay.dart'
     show FrameSequenceOverlay, FrameSequenceController, FramePlayMode;
 import '../../domain/validators/portrait_validations.dart'
-    show PortraitValidator;
+    show PortraitValidator, PortraitValidationContext, defaultPortraitRules;
 // ⬇️ NEW: centralized, data-driven thresholds & bands
 import '../../domain/entity/validation_profile.dart' show ValidationProfile, GateSense;
 
 import '../../domain/metrics/pose_geometry.dart' as geom;  // ⬅️ NUEVO
 import '../../domain/metrics/metrics.dart';
+import '../../domain/metrics/head_pose.dart' show yawPitchRollFromFaceMesh;
 part 'pose_capture_controller.onframe.dart';
 
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
@@ -471,7 +472,8 @@ class PoseCaptureController extends ChangeNotifier {
   late final _Countdown _countdown;
 
   // Centralized validator for all portrait rules (oval + yaw/pitch/roll/shoulders).
-  final PortraitValidator _validator = const PortraitValidator();
+  late final PortraitValidator _validator =
+      const PortraitValidator(rules: defaultPortraitRules);
 
   // Distancia firmada a un rango [lo, hi]:
   //   < 0  → dentro del rango (más negativo = más centrado)
@@ -551,6 +553,13 @@ class PoseCaptureController extends ChangeNotifier {
     return _wrapDeg180(target - curDeg);
   }
 
+  double _normalizeTilt90(double a) {
+    double x = a;
+    if (x > 90.0) x -= 180.0;
+    if (x <= -90.0) x += 180.0;
+    return x;
+  }
+
   // ⬇️ NEW: factor para convertir z normalizada → píxeles (calibrable)
   double? _zToPxScale;
   void setZtoPxScale(double s) => _zToPxScale = s;
@@ -572,93 +581,58 @@ class PoseCaptureController extends ChangeNotifier {
   }
 
   void _registerDefaultMetricProviders() {
-    final p = profile;
+    // Head pose (yaw/pitch/roll firmados)
+    _metricRegistry.register(MetricKeys.yawSigned, (i) {
+      final lms = i.landmarksImg;
+      if (lms == null) return null;
+      final imgW = i.imageSize.width.toInt();
+      final imgH = i.imageSize.height.toInt();
+      final ypr = yawPitchRollFromFaceMesh(lms, imgH, imgW);
+      return ypr.yaw;
+    });
 
-    // |YAW|
+    _metricRegistry.register(MetricKeys.pitchSigned, (i) {
+      final lms = i.landmarksImg;
+      if (lms == null) return null;
+      final imgW = i.imageSize.width.toInt();
+      final imgH = i.imageSize.height.toInt();
+      final ypr = yawPitchRollFromFaceMesh(lms, imgH, imgW);
+      return ypr.pitch;
+    });
+
+    _metricRegistry.register(MetricKeys.rollSigned, (i) {
+      final lms = i.landmarksImg;
+      if (lms == null) return null;
+      final imgW = i.imageSize.width.toInt();
+      final imgH = i.imageSize.height.toInt();
+      final ypr = yawPitchRollFromFaceMesh(lms, imgH, imgW);
+      return ypr.roll;
+    });
+
     _metricRegistry.register(MetricKeys.yawAbs, (i) {
-      if (i.landmarksImg == null) return null;
-      final r = _validator.evaluate(
-        faceLandmarksImg: i.landmarksImg!,
-        imageSize: i.imageSize,
-        canvasSize: i.canvasSize,
-        mirror: i.mirror,
-        fit: i.fit,
-        minFractionInside: p.face.minFractionInside,
-        eps: p.face.eps,
-        enableYaw: true,
-        yawDeadbandDeg: p.yaw.baseDeadband,
-        yawMaxOffDeg: p.yaw.maxOffDeg,
-        enablePitch: false,
-        enableRoll: false,
-        enableShoulders: false,
-      );
-      return r.yawDeg.abs();
+      final yaw = _metricRegistry.get<double>(MetricKeys.yawSigned, i);
+      return yaw?.abs();
     });
 
-    // |PITCH|
     _metricRegistry.register(MetricKeys.pitchAbs, (i) {
-      if (i.landmarksImg == null) return null;
-      final r = _validator.evaluate(
-        faceLandmarksImg: i.landmarksImg!,
-        imageSize: i.imageSize,
-        canvasSize: i.canvasSize,
-        mirror: i.mirror,
-        fit: i.fit,
-        minFractionInside: p.face.minFractionInside,
-        eps: p.face.eps,
-        enableYaw: false,
-        enablePitch: true,
-        pitchDeadbandDeg: p.pitch.baseDeadband,
-        pitchMaxOffDeg: p.pitch.maxOffDeg,
-        enableRoll: false,
-        enableShoulders: false,
-      );
-      return r.pitchDeg.abs();
+      final pitch = _metricRegistry.get<double>(MetricKeys.pitchSigned, i);
+      return pitch?.abs();
     });
 
-    // Roll → error a 180°
     _metricRegistry.register(MetricKeys.rollErr, (i) {
-      if (i.landmarksImg == null) return null;
-      final r = _validator.evaluate(
-        faceLandmarksImg: i.landmarksImg!,
-        imageSize: i.imageSize,
-        canvasSize: i.canvasSize,
-        mirror: i.mirror,
-        fit: i.fit,
-        minFractionInside: p.face.minFractionInside,
-        eps: p.face.eps,
-        enableYaw: false,
-        enablePitch: false,
-        enableRoll: true,
-        rollDeadbandDeg: p.roll.baseDeadband,
-        rollMaxOffDeg: p.roll.maxOffDeg,
-        enableShoulders: false,
-      );
-      final delta = _deltaToNearest180(r.rollDeg);
+      final roll = _metricRegistry.get<double>(MetricKeys.rollSigned, i);
+      if (roll == null) return null;
+      final delta = _deltaToNearest180(roll);
       return delta.abs();
     });
 
     // Hombros firmados (2D)
     _metricRegistry.register(MetricKeys.shouldersSigned, (i) {
-      if (i.poseLandmarksImg == null) return null;
-      final r = _validator.evaluate(
-        faceLandmarksImg: i.landmarksImg ?? const <Offset>[], // cumplir firma no-null
-        imageSize: i.imageSize,
-        canvasSize: i.canvasSize,
-        mirror: i.mirror,
-        fit: i.fit,
-        enableYaw: false,
-        enablePitch: false,
-        enableRoll: false,
-        enableShoulders: true,
-        poseLandmarksImg: i.poseLandmarksImg,
-        shouldersDeadbandDeg:
-            math.min(p.shouldersBand.lo.abs(), p.shouldersBand.hi.abs()),
-        shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
-        minFractionInside: p.face.minFractionInside,
-        eps: p.face.eps,
-      );
-      return r.shouldersDeg; // firmado
+      final pose = i.poseLandmarksImg;
+      if (pose == null) return null;
+      final ang = geom.calcularAnguloHombros(pose);
+      if (ang == null) return null;
+      return _normalizeTilt90(ang);
     });
 
     // Azimut del torso (3D)

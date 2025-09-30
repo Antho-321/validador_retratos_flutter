@@ -61,6 +61,9 @@ class FrameInputs {
 
 class MetricKeys {
   // Cabeza
+  static const yawSigned = MetricKey('yaw.signed');      // yaw firmado en °
+  static const pitchSigned = MetricKey('pitch.signed');  // pitch firmado en °
+  static const rollSigned = MetricKey('roll.signed');    // roll firmado en °
   static const yawAbs   = MetricKey('yaw.abs');        // |yaw| en ° (abs)
   static const pitchAbs = MetricKey('pitch.abs');      // |pitch| en ° (abs)
   static const rollErr  = MetricKey('roll.err180');    // distancia a 180° (°)
