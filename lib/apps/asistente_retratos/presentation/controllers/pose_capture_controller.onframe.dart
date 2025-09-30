@@ -600,43 +600,30 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final bool uiEnableAzimut    = !doneNow && (curId == 'azimut') && (azDegHUD != null);
 
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
-    final report = _validator.evaluate(
-      faceLandmarksImg: inputs.landmarksImg!, // ya comprobado arriba
-      imageSize: inputs.imageSize,
-      canvasSize: inputs.canvasSize,
-      mirror: inputs.mirror,
-      fit: inputs.fit,
-
-      // Face-in-oval
+    final ctx = PortraitValidationContext(
+      inputs: inputs,
+      metrics: _metricRegistry,
       minFractionInside: p.face.minFractionInside,
       eps: p.face.eps,
-
-      // Yaw/Pitch/Roll (solo si la etapa actual es de cabeza)
       enableYaw: uiEnableYaw,
       yawDeadbandDeg: yawDeadbandNow,
       yawMaxOffDeg: p.yaw.maxOffDeg,
-
       enablePitch: uiEnablePitch,
       pitchDeadbandDeg: pitchDeadbandNow,
       pitchMaxOffDeg: p.pitch.maxOffDeg,
-
       enableRoll: uiEnableRoll,
       rollDeadbandDeg: rollDeadbandNow,
       rollMaxOffDeg: p.roll.maxOffDeg,
-
-      // Shoulders (solo cuando corresponde)
-      poseLandmarksImg: inputs.poseLandmarksImg,
       enableShoulders: uiEnableShoulders,
-      shouldersDeadbandDeg: shouldersTolSymNow, // dinámico simétrico para UI
+      shouldersDeadbandDeg: shouldersTolSymNow,
       shouldersMaxOffDeg: p.shouldersGate.maxOffDeg,
-
-      // Azimut (solo cuando corresponde y hay 3D)
       enableAzimut: uiEnableAzimut,
       azimutDeg: azDegHUD,
       azimutBandLo: azLoNow,
       azimutBandHi: azHiNow,
       azimutMaxOffDeg: p.azimutGate.maxOffDeg,
     );
+    final report = _validator.evaluate(ctx);
 
     final bool faceOk = report.faceInOval;
     final double arcProgress = report.ovalProgress;

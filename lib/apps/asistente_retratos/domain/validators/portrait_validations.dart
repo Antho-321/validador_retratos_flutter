@@ -1,16 +1,15 @@
 // lib/apps/asistente_retratos/domain/validators/portrait_validations.dart
-import 'dart:ui' show Offset, Size;
-import 'package:flutter/widgets.dart' show BoxFit;
+import 'dart:math' as math;
 
 import '../metrics/pose_geometry.dart' as geom;
-import '../metrics/head_pose.dart' show yawPitchRollFromFaceMesh;
+import '../metrics/metrics.dart';
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 
 /// Result type reused for yaw/pitch/roll checks.
 class AngleCheck {
   final bool ok;
   final double progress; // 0..1
-  final double offDeg;   // exceso sobre el deadband
+  final double offDeg; // exceso sobre el deadband
   const AngleCheck({required this.ok, required this.progress, required this.offDeg});
 }
 
@@ -20,9 +19,9 @@ class AngleCheck {
 /// - Otherwise              -> ok=false, progress decae linealmente hasta 0 en [maxOffDeg].
 AngleCheck checkAngle({
   required bool enabled,
-  required double deg,          // ángulo firmado (p.ej., yaw/pitch/roll)
-  required double deadbandDeg,  // tolerancia
-  required double maxOffDeg,    // cuánto exceso consideras “100% mal”
+  required double deg, // ángulo firmado (p.ej., yaw/pitch/roll)
+  required double deadbandDeg, // tolerancia
+  required double maxOffDeg, // cuánto exceso consideras “100% mal”
 }) {
   if (!enabled) return const AngleCheck(ok: true, progress: 1.0, offDeg: 0.0);
 
@@ -39,7 +38,7 @@ AngleCheck checkAngle({
 class BandCheck {
   final bool ok;
   final double progress; // 0..1
-  final double offDeg;   // exceso respecto al borde más cercano
+  final double offDeg; // exceso respecto al borde más cercano
   const BandCheck({required this.ok, required this.progress, required this.offDeg});
 }
 
@@ -54,170 +53,306 @@ BandCheck checkBand({
   if (!enabled) return const BandCheck(ok: true, progress: 1.0, offDeg: 0.0);
   if (value >= lo && value <= hi) {
     return const BandCheck(ok: true, progress: 1.0, offDeg: 0.0);
-    }
+  }
   final d = (value < lo) ? (lo - value) : (value - hi); // distancia al borde
   final off = d.clamp(0.0, maxOffDeg).toDouble();
   final progress = (1.0 - (off / maxOffDeg)).clamp(0.0, 1.0).toDouble();
   return BandCheck(ok: false, progress: progress, offDeg: off);
 }
 
+/// Identificadores comunes de reglas para el reporte/resultados.
+class PortraitRuleIds {
+  static const face = 'face';
+  static const yaw = 'yaw';
+  static const pitch = 'pitch';
+  static const roll = 'roll';
+  static const shoulders = 'shoulders';
+  static const azimut = 'azimut';
+}
+
+/// Contexto inmutable para evaluar un conjunto de reglas.
+/// Agrupa los parámetros usados anteriormente por `PortraitValidator.evaluate`.
+class PortraitValidationContext {
+  const PortraitValidationContext({
+    required this.inputs,
+    required this.metrics,
+    this.minFractionInside = 1.0,
+    this.eps = 1e-6,
+    this.enableYaw = true,
+    this.yawDeadbandDeg = 2.0,
+    this.yawMaxOffDeg = 20.0,
+    this.enablePitch = true,
+    this.pitchDeadbandDeg = 2.0,
+    this.pitchMaxOffDeg = 20.0,
+    this.enableRoll = true,
+    this.rollDeadbandDeg = 175,
+    this.rollMaxOffDeg = 100.0,
+    this.enableShoulders = false,
+    this.shouldersDeadbandDeg = 5.0,
+    this.shouldersMaxOffDeg = 20.0,
+    this.enableAzimut = false,
+    this.azimutDeg,
+    this.azimutBandLo = 0.0,
+    this.azimutBandHi = 0.0,
+    this.azimutMaxOffDeg = 20.0,
+    this.faceResult,
+  });
+
+  final FrameInputs inputs;
+  final MetricRegistry metrics;
+
+  // Face-in-oval params
+  final double minFractionInside;
+  final double eps;
+
+  // Head rules
+  final bool enableYaw;
+  final double yawDeadbandDeg;
+  final double yawMaxOffDeg;
+  final bool enablePitch;
+  final double pitchDeadbandDeg;
+  final double pitchMaxOffDeg;
+  final bool enableRoll;
+  final double rollDeadbandDeg;
+  final double rollMaxOffDeg;
+
+  // Shoulders
+  final bool enableShoulders;
+  final double shouldersDeadbandDeg;
+  final double shouldersMaxOffDeg;
+
+  // Azimut
+  final bool enableAzimut;
+  final double? azimutDeg;
+  final double azimutBandLo;
+  final double azimutBandHi;
+  final double azimutMaxOffDeg;
+
+  final RuleResult? faceResult;
+
+  PortraitValidationContext copyWithFaceResult(RuleResult? result) {
+    return PortraitValidationContext(
+      inputs: inputs,
+      metrics: metrics,
+      minFractionInside: minFractionInside,
+      eps: eps,
+      enableYaw: enableYaw,
+      yawDeadbandDeg: yawDeadbandDeg,
+      yawMaxOffDeg: yawMaxOffDeg,
+      enablePitch: enablePitch,
+      pitchDeadbandDeg: pitchDeadbandDeg,
+      pitchMaxOffDeg: pitchMaxOffDeg,
+      enableRoll: enableRoll,
+      rollDeadbandDeg: rollDeadbandDeg,
+      rollMaxOffDeg: rollMaxOffDeg,
+      enableShoulders: enableShoulders,
+      shouldersDeadbandDeg: shouldersDeadbandDeg,
+      shouldersMaxOffDeg: shouldersMaxOffDeg,
+      enableAzimut: enableAzimut,
+      azimutDeg: azimutDeg,
+      azimutBandLo: azimutBandLo,
+      azimutBandHi: azimutBandHi,
+      azimutMaxOffDeg: azimutMaxOffDeg,
+      faceResult: result,
+    );
+  }
+
+  bool get hasValidFrameGeometry {
+    final face = inputs.landmarksImg;
+    return face != null &&
+        face.isNotEmpty &&
+        inputs.imageSize.width > 0 &&
+        inputs.imageSize.height > 0 &&
+        inputs.canvasSize.width > 0 &&
+        inputs.canvasSize.height > 0;
+  }
+
+  bool get faceInsideOval => faceResult?.ok ?? false;
+  double get fractionInsideOval => faceResult?.value ?? 0.0;
+}
+
+/// Resultado de una regla individual.
+class RuleResult {
+  const RuleResult({
+    required this.enabled,
+    required this.ok,
+    required this.progress,
+    this.value,
+    this.offDeg,
+    this.extra = const {},
+  });
+
+  factory RuleResult.disabled({double value = 0.0}) =>
+      RuleResult(enabled: false, ok: true, progress: 1.0, value: value);
+
+  final bool enabled;
+  final bool ok;
+  final double progress;
+  final double? value;
+  final double? offDeg;
+  final Map<String, Object?> extra;
+
+  double get valueAsDouble => (value ?? 0.0).toDouble();
+}
+
+/// Contrato para reglas de validación de retratos.
+abstract class PortraitRule {
+  const PortraitRule();
+
+  String get id;
+
+  RuleResult evaluate(PortraitValidationContext context);
+}
+
+/// Implementación base para reglas simples basadas en closures.
+class SimplePortraitRule extends PortraitRule {
+  const SimplePortraitRule({required this.id, required RuleResult Function(PortraitValidationContext) evaluate})
+      : _evaluate = evaluate;
+
+  @override
+  final String id;
+  final RuleResult Function(PortraitValidationContext) _evaluate;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) => _evaluate(context);
+}
+
 /// Report of all portrait checks (expand as you add rules).
 class PortraitValidationReport {
   const PortraitValidationReport({
-    required this.faceInOval,
-    required this.fractionInsideOval,
-
-    // Yaw
-    required this.yawOk,
-    required this.yawDeg,
-    required this.yawProgress,
-
-    // Pitch
-    required this.pitchOk,
-    required this.pitchDeg,
-    required this.pitchProgress,
-
-    // Roll
-    required this.rollOk,
-    required this.rollDeg,
-    required this.rollProgress,
-
-    // Shoulders (tilt)
-    required this.shouldersOk,
-    required this.shouldersDeg,
-    required this.shouldersProgress,
-
-    // Azimut (torso)
-    required this.azimutOk,
-    required this.azimutDeg,
-    required this.azimutProgress,
-
-    // UI ring & overall
+    required Map<String, RuleResult> results,
     required this.ovalProgress,
     required this.allChecksOk,
-  });
+  }) : _results = results;
 
-  /// Face-in-oval rule
-  final bool faceInOval;
-  final double fractionInsideOval; // 0..1 smooth fraction
+  factory PortraitValidationReport.empty() => const PortraitValidationReport(
+        results: {},
+        ovalProgress: 0.0,
+        allChecksOk: false,
+      );
 
-  /// Yaw rule
-  final bool yawOk;
-  final double yawDeg;        // signed degrees (after mirror correction)
-  final double yawProgress;   // 0..1 (1 = perfect, 0 = worst)
-
-  /// Pitch rule
-  final bool pitchOk;
-  final double pitchDeg;      // signed degrees (mirror does NOT flip pitch)
-  final double pitchProgress; // 0..1 (1 = perfect, 0 = worst)
-
-  /// Roll rule
-  final bool rollOk;
-  final double rollDeg;       // signed degrees (mirror flips roll)
-  final double rollProgress;  // 0..1
-
-  /// Shoulders tilt rule
-  final bool shouldersOk;
-  final double shouldersDeg;       // (-90..90]
-  final double shouldersProgress;  // 0..1
-
-  /// Azimut (torso)
-  final bool azimutOk;
-  final double azimutDeg;
-  final double azimutProgress;
-
-  /// UI ring progress:
-  /// - while face isn't inside oval -> equals fractionInsideOval
-  /// - once face is inside oval     -> equals combined progress (yaw/pitch/roll + shoulders + azimut)
+  final Map<String, RuleResult> _results;
   final double ovalProgress;
-
-  /// Overall gate for capture/countdown
   final bool allChecksOk;
+
+  RuleResult? _result(String id) => _results[id];
+
+  Map<String, RuleResult> get results => Map.unmodifiable(_results);
+
+  bool get faceInOval => _result(PortraitRuleIds.face)?.ok ?? false;
+  double get fractionInsideOval => _result(PortraitRuleIds.face)?.valueAsDouble ?? 0.0;
+
+  bool get yawOk => _result(PortraitRuleIds.yaw)?.ok ?? false;
+  double get yawDeg => _result(PortraitRuleIds.yaw)?.valueAsDouble ?? 0.0;
+  double get yawProgress => _result(PortraitRuleIds.yaw)?.progress ?? 0.0;
+
+  bool get pitchOk => _result(PortraitRuleIds.pitch)?.ok ?? false;
+  double get pitchDeg => _result(PortraitRuleIds.pitch)?.valueAsDouble ?? 0.0;
+  double get pitchProgress => _result(PortraitRuleIds.pitch)?.progress ?? 0.0;
+
+  bool get rollOk => _result(PortraitRuleIds.roll)?.ok ?? false;
+  double get rollDeg => _result(PortraitRuleIds.roll)?.valueAsDouble ?? 0.0;
+  double get rollProgress => _result(PortraitRuleIds.roll)?.progress ?? 0.0;
+
+  bool get shouldersOk => _result(PortraitRuleIds.shoulders)?.ok ?? false;
+  double get shouldersDeg => _result(PortraitRuleIds.shoulders)?.valueAsDouble ?? 0.0;
+  double get shouldersProgress => _result(PortraitRuleIds.shoulders)?.progress ?? 0.0;
+
+  bool get azimutOk => _result(PortraitRuleIds.azimut)?.ok ?? false;
+  double get azimutDeg => _result(PortraitRuleIds.azimut)?.valueAsDouble ?? 0.0;
+  double get azimutProgress => _result(PortraitRuleIds.azimut)?.progress ?? 0.0;
 }
 
 /// Stateless validator you can keep as a field (e.g., `const PortraitValidator()`).
 class PortraitValidator {
-  const PortraitValidator();
+  const PortraitValidator({required List<PortraitRule> rules}) : _rules = rules;
 
-  /// Main entry point. Give it the raw image-space landmarks (px) plus the
-  /// image size and the current canvas size/mirroring/fit used by your preview.
-  PortraitValidationReport evaluate({
-    required List<Offset> faceLandmarksImg, // face landmarks in image-space (px)
-    required Size imageSize,                // from your frame
-    required Size canvasSize,               // from LayoutBuilder
-    bool mirror = true,                     // must match RTCVideoView.mirror
-    BoxFit fit = BoxFit.cover,              // must match RTCVideoView.objectFit
+  final List<PortraitRule> _rules;
 
-    // Face-in-oval rule
-    double minFractionInside = 1.0,         // 1.0 = all points inside to pass
-    double eps = 1e-6,                      // numeric tolerance
-
-    // Yaw rule parameters (degrees)
-    bool enableYaw = true,
-    double yawDeadbandDeg = 2.0,            // OK cone: [-2°, +2°]
-    double yawMaxOffDeg = 20.0,             // where progress bottoms out
-
-    // Pitch rule parameters (degrees)
-    bool enablePitch = true,
-    double pitchDeadbandDeg = 2.0,          // OK cone: [-2°, +2°]
-    double pitchMaxOffDeg = 20.0,           // where progress bottoms out
-
-    // Roll rule parameters (degrees)
-    bool enableRoll = true,
-    double rollDeadbandDeg = 175,           // caller can override (e.g., 2.2)
-    double rollMaxOffDeg = 100.0,           // kept for API symmetry (unused in new rule)
-
-    // Shoulders tilt parameters (degrees)
-    List<Offset>? poseLandmarksImg,         // full-body/upper-body pose landmarks (image-space)
-    bool enableShoulders = false,
-    double shouldersDeadbandDeg = 5.0,      // allow up to ±5°
-    double shouldersMaxOffDeg = 20.0,       // where progress bottoms out
-
-    // Azimut (torso) — progreso por banda [lo, hi]
-    bool enableAzimut = false,
-    double? azimutDeg,                      // ángulo firmado ya estimado (3D)
-    double azimutBandLo = 0.0,
-    double azimutBandHi = 0.0,
-    double azimutMaxOffDeg = 20.0,
-  }) {
-    if (faceLandmarksImg.isEmpty ||
-        imageSize.width <= 0 ||
-        imageSize.height <= 0 ||
-        canvasSize.width <= 0 ||
-        canvasSize.height <= 0) {
-      return const PortraitValidationReport(
-        faceInOval: false,
-        fractionInsideOval: 0.0,
-        yawOk: false,
-        yawDeg: 0.0,
-        yawProgress: 0.0,
-        pitchOk: false,
-        pitchDeg: 0.0,
-        pitchProgress: 0.0,
-        rollOk: false,
-        rollDeg: 0.0,
-        rollProgress: 0.0,
-        shouldersOk: false,
-        shouldersDeg: 0.0,
-        shouldersProgress: 0.0,
-        azimutOk: false,
-        azimutDeg: 0.0,
-        azimutProgress: 0.0,
-        ovalProgress: 0.0,
-        allChecksOk: false,
-      );
+  PortraitValidationReport evaluate(PortraitValidationContext context) {
+    if (!context.hasValidFrameGeometry) {
+      return PortraitValidationReport.empty();
     }
 
-    // Face-in-oval (in canvas space, respecting fit/mirror)
+    final results = <String, RuleResult>{};
+    PortraitRule? faceRule;
+    final otherRules = <PortraitRule>[];
+
+    for (final rule in _rules) {
+      if (rule.id == PortraitRuleIds.face && faceRule == null) {
+        faceRule = rule;
+      } else {
+        otherRules.add(rule);
+      }
+    }
+
+    RuleResult? faceResult;
+    if (faceRule != null) {
+      faceResult = faceRule.evaluate(context);
+      results[faceRule.id] = faceResult;
+    }
+
+    for (final rule in otherRules) {
+      final ctx = context.copyWithFaceResult(faceResult);
+      final result = rule.evaluate(ctx);
+      results[rule.id] = result;
+    }
+
+    final faceOk = faceResult?.ok ?? false;
+    final faceProgress = faceResult?.progress ?? 0.0;
+
+    double combinedProgress = 1.0;
+    final parts = <double>[];
+    results.forEach((id, res) {
+      if (!res.enabled) return;
+      if (id == PortraitRuleIds.face) return;
+      parts.add(res.progress);
+    });
+    if (parts.isNotEmpty) {
+      combinedProgress = parts.reduce(math.min);
+    }
+    final ringProgress = faceOk ? combinedProgress : faceProgress;
+
+    final allOk = results.entries
+        .where((e) => e.value.enabled)
+        .every((e) => e.value.ok);
+
+    return PortraitValidationReport(
+      results: results,
+      ovalProgress: ringProgress,
+      allChecksOk: allOk && faceOk,
+    );
+  }
+}
+
+/// Reglas por defecto utilizadas por el HUD y las métricas.
+const List<PortraitRule> defaultPortraitRules = <PortraitRule>[
+  FaceInOvalRule(),
+  YawRule(),
+  PitchRule(),
+  RollRule(),
+  ShouldersRule(),
+  AzimutRule(),
+];
+
+class FaceInOvalRule extends PortraitRule {
+  const FaceInOvalRule();
+
+  @override
+  String get id => PortraitRuleIds.face;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    final lms = context.inputs.landmarksImg!;
     final mapped = geom.mapImagePointsToCanvas(
-      points: faceLandmarksImg,
-      imageSize: imageSize,
-      canvasSize: canvasSize,
-      mirror: mirror,
-      fit: fit,
+      points: lms,
+      imageSize: context.inputs.imageSize,
+      canvasSize: context.inputs.canvasSize,
+      mirror: context.inputs.mirror,
+      fit: context.inputs.fit,
     );
 
-    final oval = faceOvalRectFor(canvasSize);
+    final oval = faceOvalRectFor(context.inputs.canvasSize);
     final rx = oval.width / 2.0;
     final ry = oval.height / 2.0;
     final cx = oval.center.dx;
@@ -229,158 +364,204 @@ class PortraitValidator {
     for (final p in mapped) {
       final dx = p.dx - cx;
       final dy = p.dy - cy;
-      final v = (dx * dx) / (rx2 + eps) + (dy * dy) / (ry2 + eps);
-      if (v <= 1.0 + eps) inside++;
+      final v = (dx * dx) / (rx2 + context.eps) + (dy * dy) / (ry2 + context.eps);
+      if (v <= 1.0 + context.eps) inside++;
     }
     final fracInside = inside / mapped.length;
-    final faceOk = fracInside >= (minFractionInside.clamp(0.0, 1.0));
+    final faceOk = fracInside >= context.minFractionInside.clamp(0.0, 1.0);
 
-    // Head orientation (yaw & pitch & roll in image space)
-    double yawDeg = 0.0, pitchDeg = 0.0, rollDeg = 0.0;
-    bool yawOk = false, pitchOk = false, rollOk = false;
-    double yawProgress = enableYaw ? 0.0 : 1.0;
-    double pitchProgress = enablePitch ? 0.0 : 1.0;
-    double rollProgress = enableRoll ? 0.0 : 1.0;
-
-    // Shoulders (tilt)
-    bool shouldersOk = false;
-    double shouldersDeg = 0.0;
-    double shouldersProgress = enableShoulders ? 0.0 : 1.0;
-
-    // Azimut (torso)
-    bool azimutOk = false;
-    double azimutDegVal = 0.0;
-    double azimutProgress = enableAzimut ? 0.0 : 1.0;
-
-    if (faceOk && (enableYaw || enablePitch || enableRoll)) {
-      // Use your estimator once; it expects H/W ints (as in your page).
-      final imgW = imageSize.width.toInt();
-      final imgH = imageSize.height.toInt();
-      final ypr = yawPitchRollFromFaceMesh(faceLandmarksImg, imgH, imgW);
-
-      // Yaw (mirror flips sign for front camera UX)
-      if (enableYaw) {
-        yawDeg = ypr.yaw;
-        final res = checkAngle(
-          enabled: true,
-          deg: yawDeg,
-          deadbandDeg: yawDeadbandDeg,
-          maxOffDeg: yawMaxOffDeg,
-        );
-        yawOk = res.ok;
-        yawProgress = res.progress;
-      }
-
-      // Pitch (do not flip sign on mirror)
-      if (enablePitch) {
-        pitchDeg = ypr.pitch;
-        final res = checkAngle(
-          enabled: true,
-          deg: pitchDeg,
-          deadbandDeg: pitchDeadbandDeg,
-          maxOffDeg: pitchMaxOffDeg,
-        );
-        pitchOk = res.ok;
-        pitchProgress = res.progress;
-      }
-
-      // Roll (mirror flips sign). New rule: OK only if |roll| >= deadband.
-      if (enableRoll) {
-        rollDeg = ypr.roll;
-        final absRoll = rollDeg.abs();
-
-        // OK region: outside the deadband (we want a minimal tilt)
-        if (absRoll >= rollDeadbandDeg) {
-          rollOk = true;
-          rollProgress = 1.0;
-        } else {
-          // Not OK: too straight. Progress grows linearly up to the deadband.
-          rollOk = false;
-          rollProgress = (absRoll / rollDeadbandDeg).clamp(0.0, 1.0);
-        }
-      }
-    }
-
-    // Shoulders tilt (independent from head ring; contributes to ring and allChecksOk)
-    if (faceOk && enableShoulders && (poseLandmarksImg != null)) {
-      final ang = geom.calcularAnguloHombros(poseLandmarksImg);
-      if (ang != null) {
-        shouldersDeg = _normalizeTilt90(ang);
-        final res = checkAngle(
-          enabled: true,
-          deg: shouldersDeg,
-          deadbandDeg: shouldersDeadbandDeg,
-          maxOffDeg: shouldersMaxOffDeg,
-        );
-        shouldersOk = res.ok;
-        shouldersProgress = res.progress;
-      }
-    }
-
-    // Azimut progress with band [lo, hi]
-    if (faceOk && enableAzimut && azimutDeg != null) {
-      azimutDegVal = azimutDeg!;
-      final bz = checkBand(
-        enabled: true,
-        value: azimutDegVal,
-        lo: azimutBandLo,
-        hi: azimutBandHi,
-        maxOffDeg: azimutMaxOffDeg,
-      );
-      azimutOk = bz.ok;
-      azimutProgress = bz.progress;
-    }
-
-    // UI ring: face progress until it passes; then combine progress of all enabled checks.
-    double combinedProgress = 1.0;
-    final parts = <double>[];
-    if (enableYaw) parts.add(yawProgress);
-    if (enablePitch) parts.add(pitchProgress);
-    if (enableRoll) parts.add(rollProgress);
-    if (enableShoulders) parts.add(shouldersProgress);
-    if (enableAzimut) parts.add(azimutProgress);
-    if (parts.isNotEmpty) {
-      combinedProgress = parts.reduce(_min);
-    }
-    final ringProgress = faceOk ? combinedProgress : fracInside;
-
-    final allOk = faceOk &&
-        (!enableYaw || yawOk) &&
-        (!enablePitch || pitchOk) &&
-        (!enableRoll || rollOk) &&
-        (!enableShoulders || shouldersOk) &&
-        (!enableAzimut || azimutOk);
-
-    return PortraitValidationReport(
-      faceInOval: faceOk,
-      fractionInsideOval: fracInside,
-      yawOk: yawOk,
-      yawDeg: yawDeg,
-      yawProgress: yawProgress,
-      pitchOk: pitchOk,
-      pitchDeg: pitchDeg,
-      pitchProgress: pitchProgress,
-      rollOk: rollOk,
-      rollDeg: rollDeg,
-      rollProgress: rollProgress,
-      shouldersOk: shouldersOk,
-      shouldersDeg: shouldersDeg,
-      shouldersProgress: shouldersProgress,
-      azimutOk: azimutOk,
-      azimutDeg: azimutDegVal,
-      azimutProgress: azimutProgress,
-      ovalProgress: ringProgress,
-      allChecksOk: allOk,
+    return RuleResult(
+      enabled: true,
+      ok: faceOk,
+      progress: fracInside,
+      value: fracInside,
+      extra: {'fractionInside': fracInside},
     );
   }
+}
 
-  double _normalizeTilt90(double a) {
-    double x = a;
-    if (x > 90.0) x -= 180.0;
-    if (x <= -90.0) x += 180.0;
-    return x; // (-90..90]
+class YawRule extends PortraitRule {
+  const YawRule();
+
+  @override
+  String get id => PortraitRuleIds.yaw;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    if (!context.enableYaw) {
+      return RuleResult.disabled();
+    }
+    if (!context.faceInsideOval) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final yaw = context.metrics.get<double>(MetricKeys.yawSigned, context.inputs);
+    if (yaw == null || yaw.isNaN) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+    final res = checkAngle(
+      enabled: true,
+      deg: yaw,
+      deadbandDeg: context.yawDeadbandDeg,
+      maxOffDeg: context.yawMaxOffDeg,
+    );
+    return RuleResult(
+      enabled: true,
+      ok: res.ok,
+      progress: res.progress,
+      value: yaw,
+      offDeg: res.offDeg,
+    );
   }
+}
 
-  double _min(double a, double b) => (a < b) ? a : b;
-  double _max(double a, double b) => (a > b) ? a : b;
+class PitchRule extends PortraitRule {
+  const PitchRule();
+
+  @override
+  String get id => PortraitRuleIds.pitch;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    if (!context.enablePitch) {
+      return RuleResult.disabled();
+    }
+    if (!context.faceInsideOval) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final pitch = context.metrics.get<double>(MetricKeys.pitchSigned, context.inputs);
+    if (pitch == null || pitch.isNaN) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+    final res = checkAngle(
+      enabled: true,
+      deg: pitch,
+      deadbandDeg: context.pitchDeadbandDeg,
+      maxOffDeg: context.pitchMaxOffDeg,
+    );
+    return RuleResult(
+      enabled: true,
+      ok: res.ok,
+      progress: res.progress,
+      value: pitch,
+      offDeg: res.offDeg,
+    );
+  }
+}
+
+class RollRule extends PortraitRule {
+  const RollRule();
+
+  @override
+  String get id => PortraitRuleIds.roll;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    if (!context.enableRoll) {
+      return RuleResult.disabled();
+    }
+    if (!context.faceInsideOval) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final roll = context.metrics.get<double>(MetricKeys.rollSigned, context.inputs);
+    if (roll == null || roll.isNaN) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final absRoll = roll.abs();
+    if (absRoll >= context.rollDeadbandDeg) {
+      return RuleResult(enabled: true, ok: true, progress: 1.0, value: roll);
+    }
+    final progress = (absRoll / context.rollDeadbandDeg).clamp(0.0, 1.0);
+    return RuleResult(
+      enabled: true,
+      ok: false,
+      progress: progress,
+      value: roll,
+      offDeg: context.rollDeadbandDeg - absRoll,
+    );
+  }
+}
+
+class ShouldersRule extends PortraitRule {
+  const ShouldersRule();
+
+  @override
+  String get id => PortraitRuleIds.shoulders;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    if (!context.enableShoulders) {
+      return RuleResult.disabled();
+    }
+    if (!context.faceInsideOval || context.inputs.poseLandmarksImg == null) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final shoulders =
+        context.metrics.get<double>(MetricKeys.shouldersSigned, context.inputs);
+    if (shoulders == null || shoulders.isNaN) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+    final normalized = _normalizeTilt90(shoulders);
+    final res = checkAngle(
+      enabled: true,
+      deg: normalized,
+      deadbandDeg: context.shouldersDeadbandDeg,
+      maxOffDeg: context.shouldersMaxOffDeg,
+    );
+    return RuleResult(
+      enabled: true,
+      ok: res.ok,
+      progress: res.progress,
+      value: normalized,
+      offDeg: res.offDeg,
+    );
+  }
+}
+
+class AzimutRule extends PortraitRule {
+  const AzimutRule();
+
+  @override
+  String get id => PortraitRuleIds.azimut;
+
+  @override
+  RuleResult evaluate(PortraitValidationContext context) {
+    if (!context.enableAzimut) {
+      return RuleResult.disabled();
+    }
+    if (!context.faceInsideOval) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+
+    final double? azimut = context.azimutDeg ??
+        context.metrics.get<double>(MetricKeys.azimutSigned, context.inputs);
+    if (azimut == null || azimut.isNaN) {
+      return const RuleResult(enabled: true, ok: false, progress: 0.0, value: 0.0);
+    }
+    final res = checkBand(
+      enabled: true,
+      value: azimut,
+      lo: context.azimutBandLo,
+      hi: context.azimutBandHi,
+      maxOffDeg: context.azimutMaxOffDeg,
+    );
+    return RuleResult(
+      enabled: true,
+      ok: res.ok,
+      progress: res.progress,
+      value: azimut,
+      offDeg: res.offDeg,
+    );
+  }
+}
+
+double _normalizeTilt90(double a) {
+  double x = a;
+  if (x > 90.0) x -= 180.0;
+  if (x <= -90.0) x += 180.0;
+  return x; // (-90..90]
 }
