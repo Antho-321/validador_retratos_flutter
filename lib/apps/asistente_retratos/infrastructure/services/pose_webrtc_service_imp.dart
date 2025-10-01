@@ -21,6 +21,7 @@ import '../model/pose_point.dart';
 import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
+import '../parsers/pose_json_parser.dart';
 import '../parsers/pose_utils.dart';
 
 class _PendingEmit {
@@ -160,6 +161,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.requestedTasks = const ['pose', 'face'],
     this.kfMinGapMs = 500, // configurable KF pacing
     RtcVideoEncoder? encoder,
+    Set<String>? jsonTasks,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
@@ -169,10 +171,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               idealFps: idealFps,
               maxBitrateKbps: maxBitrateKbps,
               preferHevc: preferHevc,
-            ) {
+            ),
+        _jsonTasks = {
+          for (final raw in (jsonTasks ?? const <String>{}))
+            if (raw.trim().isNotEmpty) raw.toLowerCase().trim(),
+        } {
     final fps = idealFps <= 0 ? 1 : idealFps;
     final gapMs = (1000 ~/ fps).clamp(1, 1000);
     _minOverlayGapUs = gapMs * 1000;
+    _jsonParser = PoseJsonParser(
+      warn: _warn,
+      updateLmkStateFromFlat: _updateLmkStateFromFlat,
+      deliverTaskJsonEvent: _deliverTaskJsonEvent,
+    );
   }
 
   final Uri offerUri;
@@ -190,10 +201,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool keepTransportCcOnly;
   final List<String> requestedTasks;
   final int kfMinGapMs;
+  final Set<String> _jsonTasks;
+  late final PoseJsonParser _jsonParser;
 
   void _log(String message) {
     if (!logEverything) return;
     debugPrint('[PoseWebRTC] $message');
+  }
+
+  void _warn(String message) {
+    debugPrint('[PoseWebRTC][WARN] $message');
   }
 
   String get _primaryTask =>
@@ -246,12 +263,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final futures = <Future<_ParseWorker>>[];
     for (final raw in requested) {
       final normalized = _normalizeTask(raw);
-      if (normalized.isEmpty) continue;
+      if (normalized.isEmpty || _jsonTasks.contains(normalized)) continue;
       futures.add(_ensureWorker(normalized));
     }
     if (futures.isEmpty) {
-      futures.add(_ensureWorker(_primaryTask));
+      final fallback = _normalizeTask(_primaryTask);
+      if (!_jsonTasks.contains(fallback)) {
+        futures.add(_ensureWorker(fallback));
+      }
     }
+    if (futures.isEmpty) return;
     await Future.wait(futures);
   }
 
@@ -317,6 +338,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
+
+  final _jsonEventsCtrl =
+      StreamController<Map<String, dynamic>>.broadcast(sync: true);
+  Stream<Map<String, dynamic>> get jsonEvents => _jsonEventsCtrl.stream;
 
   final ValueNotifier<LmkState> _faceLmk = ValueNotifier<LmkState>(LmkState());
   @override
@@ -598,6 +623,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();
     await _framesCtrl.close();
+    await _jsonEventsCtrl.close();
 
     _lastSeqPerTask.clear();
     _lastPosesPerTask.clear();
@@ -659,6 +685,72 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
   // ===========================================================================
+
+  void _deliverTaskJsonEvent(String task, Map<String, dynamic> payload) {
+    if (_disposed || _jsonEventsCtrl.isClosed) return;
+    final normalized = _normalizeTask(task);
+    _jsonEventsCtrl.add({
+      'task': normalized,
+      'payload': Map<String, dynamic>.from(payload),
+    });
+  }
+
+  void _updateLmkStateFromFlat({
+    required String task,
+    required int seq,
+    required int w,
+    required int h,
+    required Float32List flat,
+  }) {
+    final normalized = _normalizeTask(task);
+    int resolvedW = w;
+    int resolvedH = h;
+    resolvedW = resolvedW > 0 ? resolvedW : (_lastW ?? _localRenderer.videoWidth);
+    resolvedH = resolvedH > 0 ? resolvedH : (_lastH ?? _localRenderer.videoHeight);
+    if (resolvedW <= 0 || resolvedH <= 0) {
+      _warn('JSON $normalized sin dimensiones válidas (w=$resolvedW, h=$resolvedH)');
+      return;
+    }
+
+    _lastW = resolvedW;
+    _lastH = resolvedH;
+
+    final imageSize = _szWHCached(resolvedW, resolvedH);
+    final lastSeq = _lastSeqPerTask[normalized] ?? 0;
+    final nextSeq = seq > 0 ? seq : (lastSeq + 1);
+    _lastSeqPerTask[normalized] = nextSeq;
+
+    final persons = List<Float32List>.unmodifiable(<Float32List>[flat]);
+    _lastPosesPerTask[normalized] = mkPose3D(persons, null);
+
+    if (normalized == 'face') {
+      _lastFaceFlat = persons;
+      _lastFace2D = null;
+      _faceLmk.value = LmkState.fromFlat(
+        persons,
+        lastSeq: nextSeq,
+        imageSize: imageSize,
+      );
+    } else if (normalized == 'pose') {
+      _poseLmk.value = LmkState.fromFlat(
+        persons,
+        lastSeq: nextSeq,
+        imageSize: imageSize,
+      );
+    }
+
+    final frame = PoseFrame(
+      imageSize: imageSize,
+      posesPxFlat: persons,
+    );
+    _emitBinaryThrottled(
+      frame,
+      kind: 'JSON',
+      seq: nextSeq,
+      task: normalized,
+    );
+    _bumpOverlay();
+  }
 
   void _handleParsed2D(Map msg, {String? fallbackTask}) {
     final t = (msg['task'] as String? ?? fallbackTask ?? 'pose').toLowerCase();
@@ -793,10 +885,36 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
+    final normalized = _normalizeTask(task);
     ch.onDataChannelState = (s) {};
     ch.onMessage = (RTCDataChannelMessage m) {
-      if (!m.isBinary) return;
-      _enqueueBinary(task, m.binary);
+      if (_jsonTasks.contains(normalized)) {
+        if (m.isBinary) {
+          final data = m.binary;
+          _warn('Binario inesperado en canal JSON "$normalized" (${data.length}B)');
+          final decoded = _silence(() => utf8.decode(data));
+          if (decoded != null && decoded.trim().isNotEmpty) {
+            _jsonParser.handle(normalized, decoded);
+          } else if (data.isNotEmpty) {
+            _enqueueBinary(normalized, data);
+          }
+          return;
+        }
+        final text = m.text;
+        if (text == null || text.trim().isEmpty) {
+          _warn('Texto vacío recibido en canal JSON "$normalized"');
+          return;
+        }
+        _jsonParser.handle(normalized, text);
+        return;
+      }
+
+      if (!m.isBinary) {
+        _warn('Descartando texto inesperado en canal binario "$normalized"');
+        return;
+      }
+
+      _enqueueBinary(normalized, m.binary);
     };
   }
 
