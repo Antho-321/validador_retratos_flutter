@@ -160,6 +160,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'],
     this.kfMinGapMs = 500, // configurable KF pacing
+    Map<String, Map<String, dynamic>>? initialTaskParams,
     RtcVideoEncoder? encoder,
     Set<String>? jsonTasks,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
@@ -172,6 +173,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
               maxBitrateKbps: maxBitrateKbps,
               preferHevc: preferHevc,
             ),
+        taskParams = {
+          for (final entry
+              in (initialTaskParams ?? const <String, Map<String, dynamic>>{}).entries)
+            if (entry.key.trim().isNotEmpty)
+              entry.key.trim().toLowerCase(): Map<String, dynamic>.from(entry.value),
+        },
         _jsonTasks = {
           for (final raw in (jsonTasks ?? const <String>{}))
             if (raw.trim().isNotEmpty) raw.toLowerCase().trim(),
@@ -200,6 +207,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool stripRtxAndNackFromSdp;
   final bool keepTransportCcOnly;
   final List<String> requestedTasks;
+  final Map<String, Map<String, dynamic>> taskParams;
   final int kfMinGapMs;
   final Set<String> _jsonTasks;
   late final PoseJsonParser _jsonParser;
@@ -540,11 +548,22 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     await _waitIceGatheringComplete(_pc!);
     final local = await _pc!.getLocalDescription();
 
-    final body = {
+    final body = <String, dynamic>{
       'type': local!.type,
       'sdp': local.sdp,
       'tasks': requestedTasks.isEmpty ? ['pose'] : requestedTasks,
     };
+    if (taskParams.isNotEmpty) {
+      final normalizedTaskParams = <String, Map<String, dynamic>>{};
+      taskParams.forEach((task, params) {
+        final normalizedTask = task.trim().toLowerCase();
+        if (normalizedTask.isEmpty || params.isEmpty) return;
+        normalizedTaskParams[normalizedTask] = Map<String, dynamic>.from(params);
+      });
+      if (normalizedTaskParams.isNotEmpty) {
+        body['task_params'] = normalizedTaskParams;
+      }
+    }
     final res = await http.post(
       offerUri,
       headers: const {'content-type': 'application/json'},

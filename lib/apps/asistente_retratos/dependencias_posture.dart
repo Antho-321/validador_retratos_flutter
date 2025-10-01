@@ -22,6 +22,8 @@ void registrarDependenciasPosture({
     () => PoseWebrtcServiceImp(
       offerUri: offerUri,
       logEverything: logEverything,
+      requestedTasks: const ['pose', 'face', 'face_recog'],
+      jsonTasks: const {'face_recog'},
     ),
   );
   sl.registerLazySingleton<PoseCaptureService>(
