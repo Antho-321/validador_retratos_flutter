@@ -24,6 +24,9 @@ void registrarDependenciasPosture({
       logEverything: logEverything,
       requestedTasks: const ['pose', 'face', 'face_recog'],
       jsonTasks: const {'face_recog'},
+      initialTaskParams: const {
+        'face_recog': {'ref_image_path': '1050298650'},
+      },
     ),
   );
   sl.registerLazySingleton<PoseCaptureService>(
