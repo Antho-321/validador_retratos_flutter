@@ -128,7 +128,7 @@ class ValidationProfile {
     ),
 
     // Shoulders
-    shouldersBand: Band(-0.5, 1.9),
+    shouldersBand: Band(-0.5, 1.91),
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 0.7,
@@ -137,11 +137,11 @@ class ValidationProfile {
     ),
 
     // Torso azimut
-    azimutBand: Band(0, 10),
+    azimutBand: Band(3.1, 8.5),
     azimutGate: GateConfig(
       baseDeadband: 0.0,
-      tighten: 2.8,
-      hysteresis: 5,
+      tighten: 2.4,
+      hysteresis: 6,
       maxOffDeg: 20.0, // (no usado por ahora, pero queda centralizado)
     ),
 
