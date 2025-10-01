@@ -951,12 +951,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
     _activeRollPositive = null;
     _animAxis = _Axis.none; // ⇐ clave: limpiar eje activo al ocultar
   }
-
   // ─────────────────────────────────────────────────────────────────────
   // (E) HUD + countdown coordination
   // ─────────────────────────────────────────────────────────────────────
   void _updateHudAndCountdown(_EvalCtx c, _HintAnim ha) {
-    final bool allChecksOk = c.faceOk && _isDone;
+    final bool allChecksOk = c.faceOk && _isDone && _faceRecogMatch;
 
     // global stability window (no extra hold; gates ya hacen dwell)
     if (allChecksOk) {
@@ -1007,17 +1006,22 @@ extension _OnFrameLogicExt on PoseCaptureController {
     required double arcProgress,
     required String? finalHint,
   }) {
-    final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
+    String effectiveMsg;
+    if (faceOk && _isDone && !_faceRecogMatch) {
+      effectiveMsg = _faceRecogStatusMessage();
+    } else {
+      final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
 
-    final String maintainMsg = !_isDone
-        ? (_maintainById[_currentRule.id] ?? 'Mantén la cabeza recta')
-        : 'Mantén la cabeza recta';
+      final String maintainMsg = !_isDone
+          ? (_maintainById[_currentRule.id] ?? 'Mantén la cabeza recta')
+          : 'Mantén la cabeza recta';
 
-    // Forzamos a String (no null). Usa '' para “no mostrar nada”.
-    final String effectiveMsg = faceOk
-        ? (_nullIfBlank(finalHint) ??
-            (maintainNow ? maintainMsg : '')) // nunca null
-        : 'Ubica tu rostro dentro del óvalo';
+      // Forzamos a String (no null). Usa '' para “no mostrar nada”.
+      effectiveMsg = faceOk
+          ? (_nullIfBlank(finalHint) ??
+              (maintainNow ? maintainMsg : '')) // nunca null
+          : 'Ubica tu rostro dentro del óvalo';
+    }
 
     _setHud(
       PortraitUiModel(
@@ -1028,6 +1032,32 @@ extension _OnFrameLogicExt on PoseCaptureController {
         ovalProgress: arcProgress,
       ),
     );
+  }
+}
+
+extension _FaceRecogHudHelpers on PoseCaptureController {
+  String _faceRecogStatusMessage() {
+    final String? decisionRaw = _faceRecogDecisionRaw;
+    final double? score = _faceRecogScore;
+
+    if (decisionRaw == null) {
+      return 'Validando rostro...';
+    }
+
+    final String normalized = decisionRaw.toUpperCase();
+    if (normalized == 'MATCH') {
+      return '¡Rostro verificado!';
+    }
+
+    final String base = normalized == 'NO_MATCH'
+        ? 'El rostro no coincide con la persona esperada'
+        : 'Reconocimiento facial: $decisionRaw';
+
+    if (score != null) {
+      return '$base (score ${score.toStringAsFixed(2)})';
+    }
+
+    return base;
   }
 }
 
