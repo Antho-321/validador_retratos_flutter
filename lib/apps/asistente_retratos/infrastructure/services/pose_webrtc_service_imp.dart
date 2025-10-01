@@ -360,6 +360,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   final ValueNotifier<FaceRecogResult?> _faceRecogResult =
       ValueNotifier<FaceRecogResult?>(null);
+  @override
   ValueListenable<FaceRecogResult?> get faceRecogResult => _faceRecogResult;
 
   final ValueNotifier<LmkState> _poseLmk = ValueNotifier<LmkState>(LmkState());

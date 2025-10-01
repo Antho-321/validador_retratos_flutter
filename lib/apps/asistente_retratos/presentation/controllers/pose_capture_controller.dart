@@ -11,6 +11,7 @@ import 'dart:ui' show Size, Offset;
 import 'package:flutter/painting.dart' show BoxFit;
 
 import '../../domain/service/pose_capture_service.dart';
+import '../../domain/model/face_recog_result.dart';
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 import '../widgets/frame_sequence_overlay.dart'
@@ -390,9 +391,10 @@ class PoseCaptureController extends ChangeNotifier {
           playMode: FramePlayMode.forward,
           loop: true,
           autoplay: true,
-        ) {
+    ) {
     // fija la misma referencia del tear-off para add/removeListener
     _frameListener = _onFrame;
+    _faceRecogListener = _handleFaceRecogChanged;
 
     // Configura countdown con callbacks → HUD y captura integrados
     _countdown = _Countdown(
@@ -506,6 +508,11 @@ class PoseCaptureController extends ChangeNotifier {
   // Snapshot state (exposed)
   Uint8List? capturedPng; // captured bytes (from WebRTC track or boundary fallback)
   bool isCapturing = false; // Capture-mode flag to hide preview/HUD instantly at T=0
+
+  // Face recognition gating state
+  bool _faceRecogMatch = false;
+  double? _faceRecogScore;
+  String? _faceRecogDecisionRaw;
 
   // Hint trigger & visibility for sequence
   bool _turnRightSeqLoaded = false;
@@ -650,17 +657,31 @@ class PoseCaptureController extends ChangeNotifier {
   // ── Suscripción de frames (por instancia) ─────────────────────────────
   bool _attached = false;
   late final VoidCallback _frameListener;
+  late final VoidCallback _faceRecogListener;
+
+  void _handleFaceRecogChanged() {
+    final FaceRecogResult? result = poseService.faceRecogResult.value;
+    final String? decision = result?.decision?.trim();
+    _faceRecogDecisionRaw =
+        (decision == null || decision.isEmpty) ? null : decision;
+    _faceRecogScore = result?.cosSim;
+    final String? normalized = _faceRecogDecisionRaw?.toUpperCase();
+    _faceRecogMatch = normalized == 'MATCH';
+  }
 
   void attach() {
     if (_attached) return;
     _attached = true;
     poseService.latestFrame.addListener(_frameListener);
+    poseService.faceRecogResult.addListener(_faceRecogListener);
+    _handleFaceRecogChanged();
   }
 
   @override
   void dispose() {
     if (_attached) {
       poseService.latestFrame.removeListener(_frameListener);
+      poseService.faceRecogResult.removeListener(_faceRecogListener);
       _attached = false;
     }
     _countdown.stop();
