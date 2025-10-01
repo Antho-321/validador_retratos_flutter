@@ -142,6 +142,16 @@ class PoseJsonParser {
       return;
     }
 
+    if (cosSim != null || (decision != null && decision.isNotEmpty)) {
+      final payload = <String, dynamic>{'seq': seq};
+      if (cosSim != null) payload['cos_sim'] = cosSim;
+      if (decision != null && decision.isNotEmpty) {
+        payload['decision'] = decision;
+      }
+      deliverTaskJsonEvent(task, payload);
+      return;
+    }
+
     warn('JSON $task normalizado pero sin kpts ni embedding');
   }
 

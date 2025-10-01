@@ -14,6 +14,7 @@ import 'package:http/http.dart' as http;
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
+import '../../domain/model/face_recog_result.dart';
 import '../model/pose_frame.dart' show PoseFrame;
 import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
@@ -356,6 +357,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   ValueListenable<LmkState> get faceLandmarks => _faceLmk;
   List<List<Offset>>? _lastFace2D;
   List<Float32List>? _lastFaceFlat;
+
+  final ValueNotifier<FaceRecogResult?> _faceRecogResult =
+      ValueNotifier<FaceRecogResult?>(null);
+  ValueListenable<FaceRecogResult?> get faceRecogResult => _faceRecogResult;
 
   final ValueNotifier<LmkState> _poseLmk = ValueNotifier<LmkState>(LmkState());
   @override
@@ -708,6 +713,35 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _deliverTaskJsonEvent(String task, Map<String, dynamic> payload) {
     if (_disposed || _jsonEventsCtrl.isClosed) return;
     final normalized = _normalizeTask(task);
+    if (normalized == 'face_recog') {
+      final rawCos = payload['cos_sim'];
+      double? cosSim;
+      if (rawCos is num) {
+        cosSim = rawCos.toDouble();
+      } else if (rawCos is String) {
+        cosSim = double.tryParse(rawCos.trim());
+      }
+
+      final rawDecision = payload['decision'];
+      final decision = rawDecision == null ? null : rawDecision.toString();
+
+      final rawSeq = payload['seq'];
+      int seq = 0;
+      if (rawSeq is int) {
+        seq = rawSeq;
+      } else if (rawSeq is num) {
+        seq = rawSeq.toInt();
+      } else if (rawSeq is String) {
+        seq = int.tryParse(rawSeq.trim()) ?? 0;
+      }
+
+      _faceRecogResult.value = FaceRecogResult(
+        cosSim: cosSim,
+        decision: decision,
+        seq: seq,
+        ts: DateTime.now(),
+      );
+    }
     _jsonEventsCtrl.add({
       'task': normalized,
       'payload': Map<String, dynamic>.from(payload),
