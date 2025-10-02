@@ -1,8 +1,8 @@
 // lib/apps/asistente_retratos/presentation/controllers/pose_capture_controller.onframe.dart
 part of 'pose_capture_controller.dart';
 
-void _poseCtrlLog(String message) {
-  if (kDebugMode) {
+void _poseCtrlLog(PoseCaptureController ctrl, String message) {
+  if (kDebugMode || ctrl.logEverything) {
     debugPrint('[PoseCapture] $message');
   }
 }
@@ -512,13 +512,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final pose = poseService.latestPoseLandmarks; // image-space points
     final lms3d = poseService.latestPoseLandmarks3D; // List<PosePoint>?
     if (canvas == null) {
-      _poseCtrlLog('Skipping frame: canvas size not ready yet');
+      _poseCtrlLog(this, 'Skipping frame: canvas size not ready yet');
       return null;
     }
     if (faces == null || faces.isEmpty) {
       final poseCount = pose?.length ?? 0;
       _poseCtrlLog(
-          'Skipping frame: no face landmarks (poseLandmarks=$poseCount)');
+          this, 'Skipping frame: no face landmarks (poseLandmarks=$poseCount)');
       return null;
     }
 
@@ -656,10 +656,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     if (pose == null || pose.isEmpty) {
       _poseCtrlLog(
+          this,
           'Frame ${now.millisecondsSinceEpoch}: pose landmarks missing; relying on face only');
     }
 
     _poseCtrlLog(
+      this,
       'Frame ${now.millisecondsSinceEpoch}: Δt=${dtMs.toStringAsFixed(1)}ms, '
       'faceOk=$faceOk, arc=${arcProgress.toStringAsFixed(2)}, '
       'yaw=${rawYaw.toStringAsFixed(2)}→${_emaYawDeg?.toStringAsFixed(2)}, '

@@ -56,6 +56,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   void initState() {
     super.initState();
+    final logAll = widget.poseService is PoseWebrtcServiceImp
+        ? (widget.poseService as PoseWebrtcServiceImp).logEverything
+        : false;
     ctl = PoseCaptureController(
       poseService: widget.poseService,
       countdownDuration: widget.countdownDuration,
@@ -63,6 +66,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       countdownSpeed: widget.countdownSpeed,
       mirror: true,
       validationsEnabled: widget.validationsEnabled,
+      logEverything: logAll,
     );
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
     ctl.attach();
