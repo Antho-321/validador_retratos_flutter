@@ -376,6 +376,7 @@ class PoseCaptureController extends ChangeNotifier {
     required this.countdownSpeed,
     this.mirror = true,
     this.validationsEnabled = true, // ⇠ NEW
+    this.logEverything = false,
     ValidationProfile? validationProfile, // ⇠ NEW: inject data-driven thresholds
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
@@ -464,6 +465,8 @@ class PoseCaptureController extends ChangeNotifier {
 
   /// NEW: switch global de validaciones
   final bool validationsEnabled;
+
+  final bool logEverything;
 
   /// ⇠ NEW: Perfil de validación inyectado (bandas y deadbands data-driven)
   final ValidationProfile profile;
