@@ -46,6 +46,7 @@ class _HintAnim {
 const Map<String, String> _maintainById = <String, String>{
   'azimut': 'Mantén el torso recto',
   'shoulders': 'Mantén los hombros nivelados',
+  'face_recog': 'Mantén la posición mientras verificamos tu rostro',
   // default → “Mantén la cabeza recta”
 };
 
@@ -315,6 +316,32 @@ _ValidationRule makeRollRule(ValidationProfile p) {
   );
 }
 
+_ValidationRule makeFaceRecogRule(PoseCaptureController ctrl) {
+  final gate = _AxisGate(
+    baseDeadband: 0.0,
+    sense: _GateSense.insideIsOk,
+    tighten: 0.0,
+    hysteresis: 0.0,
+    dwell: const Duration(milliseconds: 300),
+    extraRelaxAfterFirst: 0.0,
+  );
+
+  return _ClosureRule(
+    id: 'face_recog',
+    gate: gate,
+    metric: (c) {
+      final String? decision = ctrl._faceRecogDecisionRaw;
+      if (decision == null) return null;
+      if (ctrl._faceRecogMatch) return 0.0;
+      return 1.0;
+    },
+    hint: (controller, c, _) {
+      controller._hideAnimationIfVisible();
+      return _HintAnim(_Axis.none, controller._faceRecogStatusMessage());
+    },
+  );
+}
+
 // ── Estado por instancia para reglas usando Expando (sin tocar la clase) ──
 final Expando<List<_ValidationRule>> _rulesExp = Expando('_rules');
 final Expando<int> _idxExp = Expando('_idx');
@@ -425,6 +452,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       yawRule,
       pitchRule,
       makeRollRule(p),
+      makeFaceRecogRule(this),
     ];
 
     _rulesExp[this] = list;
@@ -957,7 +985,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
   // (E) HUD + countdown coordination
   // ─────────────────────────────────────────────────────────────────────
   void _updateHudAndCountdown(_EvalCtx c, _HintAnim ha) {
-    final bool allChecksOk = c.faceOk && _isDone && _faceRecogMatch;
+    final bool allChecksOk = c.faceOk && _isDone;
 
     // global stability window (no extra hold; gates ya hacen dwell)
     if (allChecksOk) {
@@ -1009,21 +1037,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
     required String? finalHint,
   }) {
     String effectiveMsg;
-    if (faceOk && _isDone && !_faceRecogMatch) {
-      effectiveMsg = _faceRecogStatusMessage();
-    } else {
-      final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
+    final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
 
-      final String maintainMsg = !_isDone
-          ? (_maintainById[_currentRule.id] ?? 'Mantén la cabeza recta')
-          : 'Mantén la cabeza recta';
+    final String maintainMsg = !_isDone
+        ? (_maintainById[_currentRule.id] ?? 'Mantén la cabeza recta')
+        : 'Mantén la cabeza recta';
 
-      // Forzamos a String (no null). Usa '' para “no mostrar nada”.
-      effectiveMsg = faceOk
-          ? (_nullIfBlank(finalHint) ??
-              (maintainNow ? maintainMsg : '')) // nunca null
-          : 'Ubica tu rostro dentro del óvalo';
-    }
+    // Forzamos a String (no null). Usa '' para “no mostrar nada”.
+    effectiveMsg = faceOk
+        ? (_nullIfBlank(finalHint) ??
+            (maintainNow ? maintainMsg : '')) // nunca null
+        : 'Ubica tu rostro dentro del óvalo';
 
     _setHud(
       PortraitUiModel(
