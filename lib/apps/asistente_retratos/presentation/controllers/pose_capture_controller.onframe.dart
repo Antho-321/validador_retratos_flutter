@@ -2,7 +2,7 @@
 part of 'pose_capture_controller.dart';
 
 void _poseCtrlLog(PoseCaptureController ctrl, String message) {
-  if (kDebugMode || ctrl.logEverything) {
+  if (ctrl.logEverything) {
     debugPrint('[PoseCapture] $message');
   }
 }
