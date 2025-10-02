@@ -447,12 +447,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
     );
 
     final list = <_ValidationRule>[
+      makeFaceRecogRule(this),
       makeAzimutRule(p),
       makeShouldersRule(p),
       yawRule,
       pitchRule,
       makeRollRule(p),
-      makeFaceRecogRule(this),
     ];
 
     _rulesExp[this] = list;
@@ -1074,16 +1074,9 @@ extension _FaceRecogHudHelpers on PoseCaptureController {
     if (normalized == 'MATCH') {
       return '¡Rostro verificado!';
     }
-
-    final String base = normalized == 'NO_MATCH'
-        ? 'El rostro no coincide con la persona esperada'
-        : 'Reconocimiento facial: $decisionRaw';
-
-    if (score != null) {
-      return '$base (score ${score.toStringAsFixed(2)})';
-    }
-
-    return base;
+    
+    return 'El rostro no coincide con la persona esperada';
+    
   }
 }
 
