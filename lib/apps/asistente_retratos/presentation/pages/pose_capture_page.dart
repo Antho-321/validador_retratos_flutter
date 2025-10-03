@@ -22,6 +22,7 @@ import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
 import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 
 import '../controllers/pose_capture_controller.dart';
+import '../utils/capture_downloader.dart' show saveCapturedPortrait;
 
 // ✅ acceso a CaptureTheme (para color de landmarks)
 import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
@@ -89,6 +90,26 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final ui.Image image = await boundary.toImage(pixelRatio: dpr);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
     return byteData?.buffer.asUint8List();
+  }
+
+  Future<void> _downloadCaptured() async {
+    final bytes = ctl.capturedPng;
+    if (bytes == null) return;
+
+    final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.png';
+    final success = await saveCapturedPortrait(bytes, filename: filename);
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Descarga iniciada. Revisa tu carpeta de descargas.'
+              : 'La descarga no está disponible en esta plataforma.',
+        ),
+      ),
+    );
   }
 
   @override
@@ -254,14 +275,30 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               ),
                             ),
                             Positioned(
+                              bottom: 32,
+                              left: 0,
+                              right: 0,
+                              child: SafeArea(
+                                child: Center(
+                                  child: FilledButton.icon(
+                                    onPressed: _downloadCaptured,
+                                    icon: const Icon(Icons.download),
+                                    label: const Text('Descargar foto'),
+                                  ),
+                                ),
+                              ),
+                            ),
+                            Positioned(
                               top: 16,
                               right: 16,
                               child: Material(
                                 color: scheme.primary.withOpacity(0.92),
                                 shape: const CircleBorder(),
                                 child: IconButton(
-                                  icon: Icon(Icons.close,
-                                      color: scheme.onPrimary),
+                                  icon: Icon(
+                                    Icons.close,
+                                    color: scheme.onPrimary,
+                                  ),
                                   onPressed: ctl.closeCaptured,
                                   tooltip: 'Cerrar',
                                 ),
