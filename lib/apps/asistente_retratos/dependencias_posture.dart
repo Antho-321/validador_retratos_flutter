@@ -1,11 +1,11 @@
 // lib/apps/asistente_retratos/dependencias_posture.dart
 import 'package:get_it/get_it.dart';
 
-import 'domain/service/pose_capture_service.dart';
+import 'domain/service/portrait_validations_capture_service.dart';
 import 'domain/repository/posture_repository.dart';
 //import 'domain/service/evaluate_frame_usecase.dart';
 
-import 'infrastructure/services/pose_webrtc_service_imp.dart';
+import 'infrastructure/services/portrait_webrtc_service_imp.dart';
 import 'infrastructure/repository/posture_repository_imp.dart';
 
 final sl = GetIt.instance;
@@ -18,8 +18,8 @@ void registrarDependenciasPosture({
 }) {
   // Service (infra) — registra UNA sola instancia y expón tanto el contrato
   // como la implementación (útil si tu repo aún depende de la clase concreta).
-  sl.registerLazySingleton<PoseWebrtcServiceImp>(
-    () => PoseWebrtcServiceImp(
+  sl.registerLazySingleton<PortraitWebrtcServiceImp>(
+    () => PortraitWebrtcServiceImp(
       offerUri: offerUri,
       logEverything: logEverything,
       requestedTasks: const ['pose', 'face', 'face_recog'],
@@ -29,14 +29,14 @@ void registrarDependenciasPosture({
       },
     ),
   );
-  sl.registerLazySingleton<PoseCaptureService>(
-    () => sl<PoseWebrtcServiceImp>(),
+  sl.registerLazySingleton<PortraitValidationsCaptureService>(
+    () => sl<PortraitWebrtcServiceImp>(),
   );
 
   // Repository
   sl.registerLazySingleton<PostureRepository>(
     () => PostureRepositoryImp(
-      sl<PoseWebrtcServiceImp>(), // si tu repo acepta el contrato, usa: sl<PoseCaptureService>()
+      sl<PortraitWebrtcServiceImp>(), // si tu repo acepta el contrato, usa: sl<PortraitValidationsCaptureService>()
     ),
   );
 

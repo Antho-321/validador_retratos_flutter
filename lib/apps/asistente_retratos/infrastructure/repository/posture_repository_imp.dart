@@ -2,10 +2,10 @@
 import 'dart:async';
 import 'dart:typed_data';
 import '../../domain/repository/posture_repository.dart';
-import '../../domain/service/pose_capture_service.dart';
+import '../../domain/service/portrait_validations_capture_service.dart';
 
 class PostureRepositoryImp implements PostureRepository {
-  final PoseCaptureService _webrtc;
+  final PortraitValidationsCaptureService _webrtc;
   PostureRepositoryImp(this._webrtc);
 
   final _aliveCtrl = StreamController<bool>.broadcast();

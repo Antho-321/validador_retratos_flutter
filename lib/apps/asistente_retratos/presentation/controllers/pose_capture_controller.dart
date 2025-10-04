@@ -10,7 +10,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'dart:ui' show Size, Offset;
 import 'package:flutter/painting.dart' show BoxFit;
 
-import '../../domain/service/pose_capture_service.dart';
+import '../../domain/service/portrait_validations_capture_service.dart';
 import '../../domain/model/face_recog_result.dart';
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
@@ -325,7 +325,7 @@ class _Countdown {
 /// Pipeline de captura (WebRTC → fallback)
 class _Capture {
   static Future<Uint8List?> tryAll(
-    PoseCaptureService svc,
+    PortraitValidationsCaptureService svc,
     SnapshotFn? fallback,
   ) async {
     // 1) WebRTC track
@@ -457,7 +457,7 @@ class PoseCaptureController extends ChangeNotifier {
   }
 
   // ── External deps/config ──────────────────────────────────────────────
-  final PoseCaptureService poseService;
+  final PortraitValidationsCaptureService poseService;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;

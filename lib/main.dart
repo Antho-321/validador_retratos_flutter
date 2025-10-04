@@ -7,7 +7,7 @@ import 'package:flutter/foundation.dart'; // ⬅️ para FlutterError, debugPrin
 import 'package:get_it/get_it.dart';
 
 import 'apps/asistente_retratos/dependencias_posture.dart';
-import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
+import 'apps/asistente_retratos/domain/service/portrait_validations_capture_service.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart';
 
@@ -44,7 +44,7 @@ Future<void> main() async {
     );
 
     // 2) Obtener el servicio por contrato e iniciarlo
-    final poseService = GetIt.I<PoseCaptureService>();
+    final poseService = GetIt.I<PortraitValidationsCaptureService>();
     await poseService.init();
     unawaited(poseService.connect());
 
@@ -66,7 +66,7 @@ class PoseApp extends StatefulWidget {
     required this.validationsEnabled,
   });
 
-  final PoseCaptureService service;
+  final PortraitValidationsCaptureService service;
   final bool validationsEnabled;
 
   @override

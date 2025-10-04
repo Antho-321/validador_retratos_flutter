@@ -4,7 +4,7 @@ import 'dart:ui' as ui show PointMode;
 import 'package:flutter/widgets.dart';
 
 import '../../domain/model/lmk_state.dart';
-import '../../infrastructure/services/pose_webrtc_service_imp.dart';
+import '../../infrastructure/services/portrait_webrtc_service_imp.dart';
 import '../styles/colors.dart'
     show CaptureTheme;
 
@@ -53,7 +53,7 @@ class LandmarksPainter extends CustomPainter {
   }
 
   // Fuente de datos
-  final PoseWebrtcServiceImp service;
+  final PortraitWebrtcServiceImp service;
 
   // Tema de captura (fuente ÚNICA del color de landmarks)
   final CaptureTheme cap;

@@ -1,4 +1,4 @@
-// lib/apps/asistente_retratos/infrastructure/services/pose_webrtc_service_imp.dart
+// lib/apps/asistente_retratos/infrastructure/services/portrait_webrtc_service_imp.dart
 
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
@@ -12,7 +12,7 @@ import 'package:flutter/foundation.dart'
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
-import '../../domain/service/pose_capture_service.dart';
+import '../../domain/service/portrait_validations_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
 import '../../domain/model/face_recog_result.dart';
 import '../model/pose_frame.dart' show PoseFrame;
@@ -140,8 +140,8 @@ int _dcIdFromTask(String name, {int mod = 1024}) {
   return id;
 }
 
-class PoseWebrtcServiceImp implements PoseCaptureService {
-  PoseWebrtcServiceImp({
+class PortraitWebrtcServiceImp implements PortraitValidationsCaptureService {
+  PortraitWebrtcServiceImp({
     required this.offerUri,
     this.facingMode = 'user',
     this.idealWidth = 640,
@@ -215,11 +215,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _log(String message) {
     if (!logEverything) return;
-    debugPrint('[PoseWebRTC] $message');
+    debugPrint('[PortraitWebRTC] $message');
   }
 
   void _warn(String message) {
-    debugPrint('[PoseWebRTC][WARN] $message');
+    debugPrint('[PortraitWebRTC][WARN] $message');
   }
 
   String get _primaryTask =>

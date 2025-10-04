@@ -1,4 +1,4 @@
-// lib/apps/asistente_retratos/domain/service/pose_capture_service.dart
+// lib/apps/asistente_retratos/domain/service/portrait_validations_capture_service.dart
 import 'dart:async';
 import 'dart:ui' show Offset;
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -10,7 +10,7 @@ import '../model/face_recog_result.dart';
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
 
-abstract class PoseCaptureService {
+abstract class PortraitValidationsCaptureService {
   Future<void> init();
   Future<void> connect();
   Future<void> switchCamera();

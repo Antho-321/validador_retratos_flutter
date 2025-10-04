@@ -9,13 +9,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import '../../domain/service/pose_capture_service.dart';
+import '../../domain/service/portrait_validations_capture_service.dart';
 
 // ✅ agrega:
 import '../widgets/landmarks_painter.dart' show LandmarksPainter, FaceStyle;
 // (si tu painter usa directamente la impl del servicio)
-import '../../infrastructure/services/pose_webrtc_service_imp.dart'
-    show PoseWebrtcServiceImp;
+import '../../infrastructure/services/portrait_webrtc_service_imp.dart'
+    show PortraitWebrtcServiceImp;
 
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -39,7 +39,7 @@ class PoseCapturePage extends StatefulWidget {
     this.drawLandmarks = true, // ⬅️ nuevo
   });
 
-  final PoseCaptureService poseService;
+  final PortraitValidationsCaptureService poseService;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;
@@ -57,8 +57,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   void initState() {
     super.initState();
-    final logAll = widget.poseService is PoseWebrtcServiceImp
-        ? (widget.poseService as PoseWebrtcServiceImp).logEverything
+    final logAll = widget.poseService is PortraitWebrtcServiceImp
+        ? (widget.poseService as PortraitWebrtcServiceImp).logEverything
         : false;
     ctl = PoseCaptureController(
       poseService: widget.poseService,
@@ -140,9 +140,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         child: IgnorePointer(
                           child: Builder(
                             builder: (_) {
-                              // si el servicio concreto es PoseWebrtcServiceImp, úsalo directo
-                              final impl = widget.poseService is PoseWebrtcServiceImp
-                                  ? widget.poseService as PoseWebrtcServiceImp
+                              // si el servicio concreto es PortraitWebrtcServiceImp, úsalo directo
+                              final impl = widget.poseService is PortraitWebrtcServiceImp
+                                  ? widget.poseService as PortraitWebrtcServiceImp
                                   : null;
 
                               final hasPainter = widget.drawLandmarks && impl != null;
