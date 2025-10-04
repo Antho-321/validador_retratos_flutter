@@ -105,7 +105,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       SnackBar(
         content: Text(
           success
-              ? 'Descarga iniciada. Revisa tu carpeta de descargas.'
+              ? 'Descarga ejecutada. Revisa tu carpeta de descargas.'
               : 'La descarga no está disponible en esta plataforma.',
         ),
       ),
