@@ -128,16 +128,16 @@ class ValidationProfile {
     ),
 
     // Shoulders
-    shouldersBand: Band(-0.9, 1.75),
+    shouldersBand: Band(-0.9, 1.87),
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 0.7,
-      hysteresis: 1.2,
+      hysteresis: 0.87,
       maxOffDeg: 20.0,
     ),
 
     // Torso azimut
-    azimutBand: Band(2.88, 9.06),
+    azimutBand: Band(1.71, 9.06),
     azimutGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 2.4,

@@ -512,6 +512,21 @@ class ShouldersRule extends PortraitRule {
       deadbandDeg: context.shouldersDeadbandDeg,
       maxOffDeg: context.shouldersMaxOffDeg,
     );
+
+    // ── LOG SOLO EN DEBUG ─────────────────────────────────────────────────────────
+    // assert(() {
+    //   // ignore: avoid_print
+    //   print('[Portrait][Shoulders] deg=${normalized.toStringAsFixed(2)}°, '
+    //         'deadband=±${context.shouldersDeadbandDeg.toStringAsFixed(1)}°, '
+    //         'maxOff=${context.shouldersMaxOffDeg.toStringAsFixed(1)}°, '
+    //         'ok=${res.ok}, '
+    //         'progress=${(res.progress * 100).toStringAsFixed(0)}%, '
+    //         'off=${res.offDeg.toStringAsFixed(2)}, '
+    //         'src=metrics, raw=${shoulders.toStringAsFixed(2)}°');
+    //   return true;
+    // }());
+    // ──────────────────────────────────────────────────────────────────────────────
+
     return RuleResult(
       enabled: true,
       ok: res.ok,
@@ -549,6 +564,16 @@ class AzimutRule extends PortraitRule {
       hi: context.azimutBandHi,
       maxOffDeg: context.azimutMaxOffDeg,
     );
+    // assert(() {
+    //   final src = (context.azimutDeg != null) ? 'ctx.azimutDeg' : 'metrics';
+    //   // ignore: avoid_print
+    //   print('[Portrait][Azimut] deg=${azimut.toStringAsFixed(2)}°, '
+    //         'band=[${context.azimutBandLo.toStringAsFixed(1)}, '
+    //         '${context.azimutBandHi.toStringAsFixed(1)}], '
+    //         'ok=${res.ok}, progress=${(res.progress * 100).toStringAsFixed(0)}%, '
+    //         'off=${res.offDeg?.toStringAsFixed(2)}, src=$src');
+    //   return true;
+    // }());
     return RuleResult(
       enabled: true,
       ok: res.ok,
