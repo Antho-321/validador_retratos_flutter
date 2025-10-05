@@ -132,7 +132,7 @@ class ValidationProfile {
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 0.7,
-      hysteresis: 0.87,
+      hysteresis: 0.8,
       maxOffDeg: 20.0,
     ),
 
