@@ -74,6 +74,8 @@ class PoseBinaryParser {
     this.poseZShift = 7, // must match server; exposed for tuning
   }) : zScale = 1 << ((poseZShift < 0) ? 0 : (poseZShift > 15 ? 15 : poseZShift));
 
+  static final Uint8List _bitCount8 = _buildBitCount8();
+
   final bool enforceBounds;
   final int poseZShift;
   final int zScale; // 1<<poseZShift
@@ -143,6 +145,20 @@ class PoseBinaryParser {
         reuseZ: reuseZ,
         allowReuse: true,
       );
+
+  static Uint8List _buildBitCount8() {
+    final table = Uint8List(256);
+    for (int i = 0; i < 256; i++) {
+      int v = i;
+      int count = 0;
+      while (v != 0) {
+        count += v & 1;
+        v >>= 1;
+      }
+      table[i] = count;
+    }
+    return table;
+  }
 
   PoseParseResult _parsePacked(
     Uint8List b, {
@@ -514,27 +530,7 @@ class PoseBinaryParser {
     final Uint16List baseXY = _baseXY!;
     final Int32List cachedRanges = _lastRangesBuf!;
     _require(_lastNposes == nposes, 'PD(Δ) nposes mismatch');
-
-    // Pre-scan: counts + detect no-change
-    final List<int> counts = List<int>.filled(nposes, 0, growable: false);
-    int totalPts = 0;
-    int scan = i;
-    int maskOr = 0;
-    for (int p = 0; p < nposes; p++) {
-      _require(scan + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
-      final npts = _u16le(b, scan);
-      scan += 2;
-      final int maskBytes = (npts + 7) >> 3;
-      _require(scan + maskBytes <= b.length, 'PD(Δ) pose[$p] mask short');
-      for (int m = 0; m < maskBytes; m++) {
-        maskOr |= b[scan + m];
-      }
-      scan += maskBytes;
-      counts[p] = npts;
-      totalPts += npts;
-    }
-    _require(_lastTotalPts == totalPts, 'PD(Δ) total points mismatch');
-
+    final int totalPts = _lastTotalPts;
     final int positionsFloats = totalPts * 2;
     final int rangesLen = nposes * 2;
 
@@ -583,6 +579,85 @@ class PoseBinaryParser {
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
 
+    int headerEnd = i;
+    for (int p = 0; p < nposes; p++) {
+      headerEnd += 2;
+      final int cachedCount = cachedRanges[(p << 1) + 1];
+      final int maskBytes = (cachedCount + 7) >> 3;
+      _require(
+        headerEnd + maskBytes <= b.length,
+        'PD(Δ) pose[$p] mask short',
+      );
+      headerEnd += maskBytes;
+    }
+
+    int maskPtr = i;
+    int deltaPtr = headerEnd;
+    _require(deltaPtr <= b.length, 'PD(Δ) missing delta region');
+    int maskOr = 0;
+    final int deltaStride = hasZ ? 3 : 2;
+
+    for (int p = 0; p < nposes; p++) {
+      _require(maskPtr + 2 <= headerEnd, 'PD(Δ) pose[$p] missing npts');
+      final int cachedCount = cachedRanges[(p << 1) + 1];
+      final int readNpts = _u16le(b, maskPtr);
+      maskPtr += 2;
+      _require(readNpts == cachedCount, 'PD(Δ) pose[$p] inconsistent npts');
+
+      final int maskBytes = (cachedCount + 7) >> 3;
+      final int maskStart = maskPtr;
+      final int maskEnd = maskStart + maskBytes;
+      int g = cachedRanges[(p << 1)];
+
+      for (int mb = 0; mb < maskBytes; mb++) {
+        final int m = b[maskStart + mb];
+        maskOr |= m;
+        final int changed = _bitCount8[m];
+        final int upto =
+            (mb == maskBytes - 1) ? (cachedCount - (mb << 3)) : 8;
+        if (changed == 0) {
+          g += upto;
+          continue;
+        }
+
+        final int bytesNeeded = changed * deltaStride;
+        _require(
+          deltaPtr + bytesNeeded <= b.length,
+          'PD(Δ) pose[$p] deltas short',
+        );
+
+        int bits = m;
+        for (int bit = 0; bit < upto; bit++, g++) {
+          if ((bits & 1) != 0) {
+            final int xyIndex = g << 1;
+
+            int xq = baseXY[xyIndex] + _asInt8(b[deltaPtr]);
+            int yq = baseXY[xyIndex + 1] + _asInt8(b[deltaPtr + 1]);
+            deltaPtr += 2;
+
+            if (hasZ) {
+              int zq = _baseZ![g] + _asInt8(b[deltaPtr]);
+              deltaPtr += 1;
+              zq = _clampZq(zq);
+              _baseZ![g] = zq;
+              zBuf![g] = zq / zScale;
+            }
+
+            xq = _clampQ(xq, wq);
+            yq = _clampQ(yq, hq);
+
+            baseXY[xyIndex] = xq;
+            baseXY[xyIndex + 1] = yq;
+            posBuf[xyIndex] = xq * invScale;
+            posBuf[xyIndex + 1] = yq * invScale;
+          }
+          bits >>= 1;
+        }
+      }
+
+      maskPtr = maskEnd;
+    }
+
     // Early-out if nothing changed: reuse existing floats/ranges
     if (maskOr == 0) {
       _lastScale = scale;
@@ -600,58 +675,6 @@ class PoseBinaryParser {
         keyframe: false,
         ackSeq: seq,
       );
-    }
-
-    // Apply sparse deltas
-    int ptr = i;
-    for (int p = 0; p < nposes; p++) {
-      final int npts = counts[p];
-      _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] missing npts');
-      final readNpts = _u16le(b, ptr);
-      ptr += 2;
-      _require(readNpts == npts, 'PD(Δ) pose[$p] inconsistent npts');
-
-      final int maskBytes = (npts + 7) >> 3;
-      _require(ptr + maskBytes <= b.length, 'PD(Δ) pose[$p] mask short');
-      final int maskStart = ptr;
-      ptr += maskBytes;
-
-      final int start = cachedRanges[(p << 1)];
-      int g = start;
-
-      for (int mb = 0; mb < maskBytes; mb++) {
-        int m = b[maskStart + mb];
-        final int upto = (mb == maskBytes - 1) ? (npts - (mb << 3)) : 8;
-        for (int bit = 0; bit < upto; bit++, g++) {
-          if ((m & 1) != 0) {
-            _require(ptr + 2 <= b.length, 'PD(Δ) pose[$p] dxdy short @pt $g');
-            final int xyIndex = g << 1;
-
-            int xq = baseXY[xyIndex] + _asInt8(b[ptr]);
-            int yq = baseXY[xyIndex + 1] + _asInt8(b[ptr + 1]);
-            ptr += 2;
-
-            if (hasZ) {
-              _require(ptr + 1 <= b.length, 'PD(Δ) pose[$p] dz short @pt $g');
-              // _baseZ is non-null when hasZ true (checked above)
-              int zq = _baseZ![g] + _asInt8(b[ptr]);
-              ptr += 1;
-              zq = _clampZq(zq);
-              _baseZ![g] = zq;
-              zBuf![g] = zq / zScale;
-            }
-
-            xq = _clampQ(xq, wq);
-            yq = _clampQ(yq, hq);
-
-            baseXY[xyIndex] = xq;
-            baseXY[xyIndex + 1] = yq;
-            posBuf[xyIndex] = xq * invScale;
-            posBuf[xyIndex + 1] = yq * invScale;
-          }
-          m >>= 1;
-        }
-      }
     }
 
     _lastRangesBuf = rangesBuf;
