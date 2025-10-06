@@ -26,7 +26,6 @@
 // - No se construyen enteros gigantes para la máscara; se leen bytes on-the-fly.
 // - Clamp en dominio quantized; expone w,h en px; PosePoint(x,y,z?) en px / z normalizado.
 
-import 'dart:math' as math;
 import 'dart:typed_data';
 
 enum PacketKind { po, pd }
@@ -299,6 +298,7 @@ class PoseBinaryParser {
     int startPt = 0;
     int writeXY = 0;
 
+    final bool doClamp = enforceBounds;
     for (int p = 0; p < nposes; p++) {
       _require(i + 2 <= b.length, 'PO pose[$p] missing npts');
       final npts = _u16le(b, i);
@@ -315,8 +315,30 @@ class PoseBinaryParser {
         i += 2;
         int yq = _u16le(b, i);
         i += 2;
-        xq = _clampQ(xq, wq);
-        yq = _clampQ(yq, hq);
+        if (!doClamp) {
+          baseXY[writeXY++] = xq;
+          baseXY[writeXY++] = yq;
+          positionsBuf[writePos++] = xq * invScale;
+          positionsBuf[writePos++] = yq * invScale;
+          if (hasZ) {
+            int zq = _i16le(b, i);
+            i += 2;
+            zq = _clampZq(zq);
+            baseZ![writeZ] = zq;
+            zBuf![writeZ++] = zq / zScale;
+          }
+          continue;
+        }
+        if (xq < 0) {
+          xq = 0;
+        } else if (xq >= wq) {
+          xq = wq - 1;
+        }
+        if (yq < 0) {
+          yq = 0;
+        } else if (yq >= hq) {
+          yq = hq - 1;
+        }
         baseXY[writeXY++] = xq;
         baseXY[writeXY++] = yq;
         positionsBuf[writePos++] = xq * invScale;
@@ -465,6 +487,7 @@ class PoseBinaryParser {
       int startPt = 0;
       int writeXY = 0;
 
+      final bool doClamp = enforceBounds;
       for (int p = 0; p < nposes; p++) {
         _require(i + 2 <= b.length, 'PD(KF) pose[$p] missing npts');
         final npts = _u16le(b, i);
@@ -481,8 +504,30 @@ class PoseBinaryParser {
           i += 2;
           int yq = _u16le(b, i);
           i += 2;
-          xq = _clampQ(xq, wq);
-          yq = _clampQ(yq, hq);
+          if (!doClamp) {
+            baseXY[writeXY++] = xq;
+            baseXY[writeXY++] = yq;
+            positionsBuf[writePos++] = xq * invScale;
+            positionsBuf[writePos++] = yq * invScale;
+            if (hasZ) {
+              int zq = _i16le(b, i);
+              i += 2;
+              zq = _clampZq(zq);
+              baseZ![writeZ] = zq;
+              zBuf![writeZ++] = zq / zScale;
+            }
+            continue;
+          }
+          if (xq < 0) {
+            xq = 0;
+          } else if (xq >= wq) {
+            xq = wq - 1;
+          }
+          if (yq < 0) {
+            yq = 0;
+          } else if (yq >= hq) {
+            yq = hq - 1;
+          }
           baseXY[writeXY++] = xq;
           baseXY[writeXY++] = yq;
           positionsBuf[writePos++] = xq * invScale;
@@ -595,8 +640,8 @@ class PoseBinaryParser {
     int deltaPtr = headerEnd;
     _require(deltaPtr <= b.length, 'PD(Δ) missing delta region');
     int maskOr = 0;
-    final int deltaStride = hasZ ? 3 : 2;
 
+    final bool doClamp = enforceBounds;
     for (int p = 0; p < nposes; p++) {
       _require(maskPtr + 2 <= headerEnd, 'PD(Δ) pose[$p] missing npts');
       final int cachedCount = cachedRanges[(p << 1) + 1];
@@ -620,12 +665,6 @@ class PoseBinaryParser {
           continue;
         }
 
-        final int bytesNeeded = changed * deltaStride;
-        _require(
-          deltaPtr + bytesNeeded <= b.length,
-          'PD(Δ) pose[$p] deltas short',
-        );
-
         int bits = m;
         for (int bit = 0; bit < upto; bit++, g++) {
           if ((bits & 1) != 0) {
@@ -643,13 +682,27 @@ class PoseBinaryParser {
               zBuf![g] = zq / zScale;
             }
 
-            xq = _clampQ(xq, wq);
-            yq = _clampQ(yq, hq);
-
-            baseXY[xyIndex] = xq;
-            baseXY[xyIndex + 1] = yq;
-            posBuf[xyIndex] = xq * invScale;
-            posBuf[xyIndex + 1] = yq * invScale;
+            if (!doClamp) {
+              baseXY[xyIndex] = xq;
+              baseXY[xyIndex + 1] = yq;
+              posBuf[xyIndex] = xq * invScale;
+              posBuf[xyIndex + 1] = yq * invScale;
+            } else {
+              if (xq < 0) {
+                xq = 0;
+              } else if (xq >= wq) {
+                xq = wq - 1;
+              }
+              if (yq < 0) {
+                yq = 0;
+              } else if (yq >= hq) {
+                yq = hq - 1;
+              }
+              baseXY[xyIndex] = xq;
+              baseXY[xyIndex + 1] = yq;
+              posBuf[xyIndex] = xq * invScale;
+              posBuf[xyIndex + 1] = yq * invScale;
+            }
           }
           bits >>= 1;
         }
@@ -805,11 +858,6 @@ class PoseBinaryParser {
       t >>= 1;
     }
     return c;
-  }
-
-  int _clampQ(int v, int limitQ) {
-    if (!enforceBounds) return v;
-    return math.max(0, math.min(limitQ - 1, v));
   }
 
   int _clampZq(int zq) {
