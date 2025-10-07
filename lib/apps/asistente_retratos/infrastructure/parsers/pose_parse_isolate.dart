@@ -64,47 +64,31 @@ void _handleJob(
     final res = parser.parse(buf);
 
     if (res is PoseParseOkPacked) {
-      reply.send(<String, dynamic>{
-        'type': 'result',
-        'status': 'ok',
-        'task': task,
-        'w': res.w,
-        'h': res.h,
-        'seq': res.seq,
-        'ackSeq': res.ackSeq,
-        'requestKF': res.requestKeyframe,
-        'keyframe': res.keyframe,
-        'kind': res.kind == PacketKind.po ? 'PO' : 'PD',
-        'positions': res.positions,
-        'ranges': res.ranges,
-        'hasZ': res.hasZ,
-        if (res.zPositions != null) 'zPositions': res.zPositions,
-      });
+      reply.send(<dynamic>[
+        0, // status: ok
+        task,
+        res.w,
+        res.h,
+        res.seq,
+        res.ackSeq,
+        res.requestKeyframe,
+        res.keyframe,
+        res.kind == PacketKind.po ? 0 : 1,
+        res.positions,
+        res.ranges,
+        res.hasZ,
+        res.zPositions,
+      ]);
       return;
     }
 
     if (res is PoseParseNeedKF) {
-      reply.send(<String, dynamic>{
-        'type': 'result',
-        'status': 'need_kf',
-        'task': (msg['task'] as String?) ?? 'pose',
-        'error': res.reason,
-      });
+      reply.send(<dynamic>[1, task, res.reason]);
       return;
     }
 
-    reply.send(<String, dynamic>{
-      'type': 'result',
-      'status': 'err',
-      'task': (msg['task'] as String?) ?? 'pose',
-      'error': 'Unknown parse result type',
-    });
+    reply.send(<dynamic>[2, task, 'Unknown parse result type']);
   } catch (e) {
-    reply.send(<String, dynamic>{
-      'type': 'result',
-      'status': 'err',
-      'task': (msg['task'] as String?) ?? 'pose',
-      'error': e.toString(),
-    });
+    reply.send(<dynamic>[2, (msg['task'] as String?) ?? 'pose', e.toString()]);
   }
 }

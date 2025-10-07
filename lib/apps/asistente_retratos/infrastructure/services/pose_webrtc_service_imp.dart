@@ -79,6 +79,20 @@ class _ParseWorker {
   }
 }
 
+const int _kPacketStatus = 0;
+const int _kPacketTask = 1;
+const int _kPacketW = 2;
+const int _kPacketH = 3;
+const int _kPacketSeq = 4;
+const int _kPacketAckSeq = 5;
+const int _kPacketRequestKf = 6;
+const int _kPacketKeyframe = 7;
+const int _kPacketKind = 8;
+const int _kPacketPositions = 9;
+const int _kPacketRanges = 10;
+const int _kPacketHasZ = 11;
+const int _kPacketZPositions = 12;
+
 // ======================= Helpers y extensiones compactas =======================
 
 extension _DCX on RTCDataChannel? {
@@ -806,34 +820,130 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _bumpOverlay();
   }
 
-  void _handleParsed2D(Map msg, {String? fallbackTask}) {
+  void _handleParsed2DMap(Map msg, {String? fallbackTask}) {
     final t = (msg['task'] as String? ?? fallbackTask ?? 'pose').toLowerCase();
     final int w = (msg['w'] as int?) ?? _lastW ?? _localRenderer.videoWidth;
     final int h = (msg['h'] as int?) ?? _lastH ?? _localRenderer.videoHeight;
     if (w == 0 || h == 0) return;
 
     final int? seq = msg['seq'] as int?;
-    final bool kf = (msg['keyframe'] as bool?) ?? false;
+    final bool requestKF = (msg['requestKF'] as bool?) ?? false;
+    final bool keyframe = (msg['keyframe'] as bool?) ?? false;
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
-    final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
-
-    _lastW = w; _lastH = h;
-    if (seq != null) {
-      final last = _lastSeqPerTask[t];
-      if (last != null && !_isNewer16(seq, last)) return; // drop stale PDs
-      _lastSeqPerTask[t] = seq;
-    }
+    final int kindCode = kindStr == 'PO' ? 0 : 1;
 
     final Float32List? positions = msg['positions'] as Float32List?;
     final Int32List? ranges = msg['ranges'] as Int32List?;
     final bool hasZ = (msg['hasZ'] as bool?) ?? false;
     final Float32List? zPositions = hasZ ? msg['zPositions'] as Float32List? : null;
+    final List<Float32List>? poses2d =
+        (msg['poses'] as List?)?.cast<Float32List>() ??
+        (msg['poses2d'] as List?)?.cast<Float32List>();
+    final List<Float32List>? posesZ = hasZ
+        ? (msg['posesZ'] as List?)?.cast<Float32List>()
+        : null;
+
+    _handleParsed2DPayload(
+      task: t,
+      w: w,
+      h: h,
+      seq: seq,
+      requestKF: requestKF,
+      keyframe: keyframe,
+      kindCode: kindCode,
+      positions: positions,
+      ranges: ranges,
+      zPositions: zPositions,
+      legacy2D: poses2d,
+      legacyZ: posesZ,
+    );
+  }
+
+  void _handleParsed2DPacked(List<dynamic> packet, String task) {
+    final int? rawW =
+        packet.length > _kPacketW ? packet[_kPacketW] as int? : null;
+    final int? rawH =
+        packet.length > _kPacketH ? packet[_kPacketH] as int? : null;
+    final int w = (rawW != null && rawW > 0)
+        ? rawW
+        : (_lastW ?? _localRenderer.videoWidth);
+    final int h = (rawH != null && rawH > 0)
+        ? rawH
+        : (_lastH ?? _localRenderer.videoHeight);
+    if (w == 0 || h == 0) return;
+
+    final int? seq =
+        packet.length > _kPacketSeq ? packet[_kPacketSeq] as int? : null;
+    final bool requestKF = packet.length > _kPacketRequestKf
+        ? (packet[_kPacketRequestKf] as bool?) ?? false
+        : false;
+    final bool keyframe = packet.length > _kPacketKeyframe
+        ? (packet[_kPacketKeyframe] as bool?) ?? false
+        : false;
+    final int kindCode = packet.length > _kPacketKind
+        ? (packet[_kPacketKind] as int?) ?? 1
+        : 1;
+
+    final Float32List? positions = packet.length > _kPacketPositions
+        ? packet[_kPacketPositions] as Float32List?
+        : null;
+    final Int32List? ranges = packet.length > _kPacketRanges
+        ? packet[_kPacketRanges] as Int32List?
+        : null;
+    final bool hasZ = packet.length > _kPacketHasZ
+        ? (packet[_kPacketHasZ] as bool?) ?? false
+        : false;
+    final Float32List? zPositions = hasZ && packet.length > _kPacketZPositions
+        ? packet[_kPacketZPositions] as Float32List?
+        : null;
+
+    _handleParsed2DPayload(
+      task: task,
+      w: w,
+      h: h,
+      seq: seq,
+      requestKF: requestKF,
+      keyframe: keyframe,
+      kindCode: kindCode,
+      positions: positions,
+      ranges: ranges,
+      zPositions: zPositions,
+      legacy2D: null,
+      legacyZ: null,
+    );
+  }
+
+  void _handleParsed2DPayload({
+    required String task,
+    required int w,
+    required int h,
+    int? seq,
+    required bool requestKF,
+    required bool keyframe,
+    required int kindCode,
+    Float32List? positions,
+    Int32List? ranges,
+    Float32List? zPositions,
+    List<Float32List>? legacy2D,
+    List<Float32List>? legacyZ,
+  }) {
+    final String emitKind =
+        (kindCode == 0) ? 'PO' : (keyframe ? 'PD(KF)' : 'PD');
+
+    _lastW = w;
+    _lastH = h;
+
+    if (seq != null) {
+      final last = _lastSeqPerTask[task];
+      if (last != null && !_isNewer16(seq, last)) return;
+      _lastSeqPerTask[task] = seq;
+    }
 
     if (positions != null && ranges != null) {
       final imageSize = _szWHCached(w, h);
-      _lastPosesPerTask[t] = mkPose3DFromPacked(positions, ranges, zPositions);
+      _lastPosesPerTask[task] = mkPose3DFromPacked(positions, ranges, zPositions);
 
-      if (t == 'face') {
+      if (task == 'face') {
         final current = _faceLmk.value;
         final nextSeq = seq ?? (current.lastSeq + 1);
         if (nextSeq != current.lastSeq ||
@@ -850,7 +960,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           );
           _bumpOverlay();
         }
-      } else if (t == 'pose') {
+      } else if (task == 'pose') {
         final current = _poseLmk.value;
         final nextSeq = seq ?? (current.lastSeq + 1);
         if (nextSeq != current.lastSeq ||
@@ -874,46 +984,56 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         ranges,
         zPositions: zPositions,
       );
-      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
-      if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
+      _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: task);
+      if (requestKF) _maybeSendKF();
       return;
     }
 
-    // legacy path from isolate
     final List<Float32List> poses2d =
-        (msg['poses'] as List?)?.cast<Float32List>() ??
-        (msg['poses2d'] as List?)?.cast<Float32List>() ??
-        const <Float32List>[];
-    if (t == 'face') {
+        legacy2D ?? const <Float32List>[];
+    if (task == 'face') {
       _publishFaceLmk(w, h, poses2d, seq: seq);
-      _lastPosesPerTask[t] = mkPose3D(poses2d, null);
+      _lastPosesPerTask[task] = mkPose3D(poses2d, null);
     } else {
-      final posesZ = hasZ ? (msg['posesZ'] as List?)?.cast<Float32List>() : null;
-      _lastPosesPerTask[t] = mkPose3D(poses2d, posesZ);
+      final posesZ = legacyZ;
+      _lastPosesPerTask[task] = mkPose3D(poses2d, posesZ);
     }
 
-    if ((msg['requestKF'] as bool?) == true) _maybeSendKF();
+    if (requestKF) _maybeSendKF();
 
     final frame = PoseFrame(imageSize: _szWHCached(w, h), posesPxFlat: poses2d);
-    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: t);
+    _emitBinaryThrottled(frame, kind: emitKind, seq: seq, task: task);
   }
 
   void _onParseResultFromIsolate(dynamic msg) {
-    if (_disposed || msg is! Map) return;
+    if (_disposed) return;
 
-    final String? rawTask = (msg['task'] as String?)?.toLowerCase();
-    final String? type = msg['type'] as String?;
+    String? rawTask;
+    int? ackSeq;
+
+    if (msg is List) {
+      if (msg.isEmpty) return;
+      rawTask = msg.length > _kPacketTask ? msg[_kPacketTask] as String? : null;
+      ackSeq = msg.length > _kPacketAckSeq ? msg[_kPacketAckSeq] as int? : null;
+    } else if (msg is Map) {
+      rawTask = (msg['task'] as String?)?.toLowerCase();
+      ackSeq = msg['ackSeq'] as int?;
+    } else {
+      return;
+    }
+
     final String? task = rawTask == null ? null : _normalizeTask(rawTask);
 
     if (task != null) {
-      msg['task'] = task;
       final worker = _parseWorkers[task];
       if (worker != null) {
         worker.busy = false;
       }
+      if (msg is Map) {
+        msg['task'] = task;
+      }
       if (_pendingBin.containsKey(task)) {
         if (_tooSoonForParse(task)) {
-          // Try next frame instead of right-now microtask (keeps CPU cooler)
           SchedulerBinding.instance.scheduleFrameCallback((_) {
             if (_disposed) return;
             if (!_pendingBin.containsKey(task)) return;
@@ -927,11 +1047,36 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
     }
 
-    final int? ackSeq = msg['ackSeq'] as int?;
     if (ackSeq != null) _sendCtrlAck(ackSeq);
 
+    if (msg is List) {
+      final int status = msg.length > _kPacketStatus
+          ? (msg[_kPacketStatus] as int?) ?? 2
+          : 2;
+      switch (status) {
+        case 0:
+          if (task != null) {
+            _handleParsed2DPacked(msg, task);
+          }
+          return;
+        case 1:
+          _log('parse[$task]: request keyframe ${msg.length > 2 ? msg[2] : ''}');
+          _maybeSendKF();
+          return;
+        default:
+          _warn('parse[$task]: error ${msg.length > 2 ? msg[2] : 'unknown'}');
+          _maybeSendKF();
+          return;
+      }
+    }
+
+    if (msg is! Map) {
+      return;
+    }
+
+    final String? type = msg['type'] as String?;
     if (type == 'result' || type == 'ok2d') {
-      _handleParsed2D(msg, fallbackTask: task);
+      _handleParsed2DMap(msg, fallbackTask: task);
       return;
     }
 
@@ -1273,7 +1418,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         msg['zPositions'] = res.zPositions;
       }
 
-      _handleParsed2D(msg, fallbackTask: task);
+      _handleParsed2DMap(msg, fallbackTask: task);
 
       if (task == _primaryTask && res.ackSeq != null) {
         _sendCtrlAck(res.ackSeq!);
