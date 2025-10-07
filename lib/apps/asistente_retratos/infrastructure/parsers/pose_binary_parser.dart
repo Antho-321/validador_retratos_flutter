@@ -239,12 +239,21 @@ class PoseBinaryParser {
     final int positionsFloats = totalPts * 2;
     final int rangesLen = nposes * 2;
 
-    final Float32List positionsBuf = allowReuse
-        ? _ensurePositions(positionsFloats, reusePositions)
-        : Float32List(positionsFloats);
+    final Float32List? prevPositions = _positions;
+    final Float32List positionsBuf;
+    if (prevPositions != null && prevPositions.length >= positionsFloats) {
+      positionsBuf = prevPositions;
+    } else {
+      positionsBuf = allowReuse
+          ? _ensurePositions(positionsFloats, reusePositions)
+          : Float32List(positionsFloats);
+    }
+    final bool positionsChanged = !identical(prevPositions, positionsBuf);
     _positions = positionsBuf;
-    _positionsView = null;
-    _positionsViewLen = positionsFloats;
+    if (positionsChanged || _positionsViewLen != positionsFloats) {
+      _positionsView = null;
+      _positionsViewLen = positionsFloats;
+    }
     final Float32List positions = allowReuse
         ? _viewPositions(positionsBuf, positionsFloats)
         : positionsBuf;
@@ -252,12 +261,20 @@ class PoseBinaryParser {
     Float32List? zBuf;
     Float32List? zPositions;
     if (hasZ) {
-      zBuf = allowReuse
-          ? _ensureZ(totalPts, reuseZ)
-          : Float32List(totalPts);
+      final Float32List? prevZ = _z;
+      if (prevZ != null && prevZ.length >= totalPts) {
+        zBuf = prevZ;
+      } else {
+        zBuf = allowReuse
+            ? _ensureZ(totalPts, reuseZ)
+            : Float32List(totalPts);
+      }
+      final bool zChanged = !identical(prevZ, zBuf);
       _z = zBuf;
-      _zView = null;
-      _zViewLen = totalPts;
+      if (zChanged || _zViewLen != totalPts) {
+        _zView = null;
+        _zViewLen = totalPts;
+      }
       zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
     } else {
       _z = null;
@@ -265,12 +282,21 @@ class PoseBinaryParser {
       _zViewLen = 0;
     }
 
-    final Int32List rangesBuf = allowReuse
-        ? _ensureRanges(rangesLen, reuseRanges)
-        : Int32List(rangesLen);
+    final Int32List? prevRanges = _ranges;
+    final Int32List rangesBuf;
+    if (prevRanges != null && prevRanges.length >= rangesLen) {
+      rangesBuf = prevRanges;
+    } else {
+      rangesBuf = allowReuse
+          ? _ensureRanges(rangesLen, reuseRanges)
+          : Int32List(rangesLen);
+    }
+    final bool rangesChanged = !identical(prevRanges, rangesBuf);
     _ranges = rangesBuf;
-    _rangesView = null;
-    _rangesViewLen = rangesLen;
+    if (rangesChanged || _rangesViewLen != rangesLen) {
+      _rangesView = null;
+      _rangesViewLen = rangesLen;
+    }
     final Int32List ranges = allowReuse
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
@@ -436,12 +462,21 @@ class PoseBinaryParser {
       final int positionsFloats = totalPts * 2;
       final int rangesLen = nposes * 2;
 
-      final Float32List positionsBuf = allowReuse
-          ? _ensurePositions(positionsFloats, reusePositions)
-          : Float32List(positionsFloats);
+      final Float32List? prevPositions = _positions;
+      final Float32List positionsBuf;
+      if (prevPositions != null && prevPositions.length >= positionsFloats) {
+        positionsBuf = prevPositions;
+      } else {
+        positionsBuf = allowReuse
+            ? _ensurePositions(positionsFloats, reusePositions)
+            : Float32List(positionsFloats);
+      }
+      final bool positionsChanged = !identical(prevPositions, positionsBuf);
       _positions = positionsBuf;
-      _positionsView = null;
-      _positionsViewLen = positionsFloats;
+      if (positionsChanged || _positionsViewLen != positionsFloats) {
+        _positionsView = null;
+        _positionsViewLen = positionsFloats;
+      }
       final Float32List positions = allowReuse
           ? _viewPositions(positionsBuf, positionsFloats)
           : positionsBuf;
@@ -449,12 +484,20 @@ class PoseBinaryParser {
       Float32List? zBuf;
       Float32List? zPositions;
       if (hasZ) {
-        zBuf = allowReuse
-            ? _ensureZ(totalPts, reuseZ)
-            : Float32List(totalPts);
+        final Float32List? prevZ = _z;
+        if (prevZ != null && prevZ.length >= totalPts) {
+          zBuf = prevZ;
+        } else {
+          zBuf = allowReuse
+              ? _ensureZ(totalPts, reuseZ)
+              : Float32List(totalPts);
+        }
+        final bool zChanged = !identical(prevZ, zBuf);
         _z = zBuf;
-        _zView = null;
-        _zViewLen = totalPts;
+        if (zChanged || _zViewLen != totalPts) {
+          _zView = null;
+          _zViewLen = totalPts;
+        }
         zPositions = allowReuse ? _viewZ(zBuf, totalPts) : zBuf;
       } else {
         _z = null;
@@ -462,12 +505,21 @@ class PoseBinaryParser {
         _zViewLen = 0;
       }
 
-      final Int32List rangesBuf = allowReuse
-          ? _ensureRanges(rangesLen, reuseRanges)
-          : Int32List(rangesLen);
+      final Int32List? prevRanges = _ranges;
+      final Int32List rangesBuf;
+      if (prevRanges != null && prevRanges.length >= rangesLen) {
+        rangesBuf = prevRanges;
+      } else {
+        rangesBuf = allowReuse
+            ? _ensureRanges(rangesLen, reuseRanges)
+            : Int32List(rangesLen);
+      }
+      final bool rangesChanged = !identical(prevRanges, rangesBuf);
       _ranges = rangesBuf;
-      _rangesView = null;
-      _rangesViewLen = rangesLen;
+      if (rangesChanged || _rangesViewLen != rangesLen) {
+        _rangesView = null;
+        _rangesViewLen = rangesLen;
+      }
       final Int32List ranges = allowReuse
           ? _viewRanges(rangesBuf, rangesLen)
           : rangesBuf;
@@ -596,17 +648,21 @@ class PoseBinaryParser {
     final int rangesLen = nposes * 2;
 
     // Ensure output buffers
-    Float32List posBuf;
-    if (_positions != null && _positions!.length >= positionsFloats) {
-      posBuf = _positions!;
+    final Float32List? prevPositions = _positions;
+    final Float32List posBuf;
+    if (prevPositions != null && prevPositions.length >= positionsFloats) {
+      posBuf = prevPositions;
     } else {
       posBuf = allowReuse
           ? _ensurePositions(positionsFloats, reusePositions)
           : Float32List(positionsFloats);
     }
+    final bool positionsChanged = !identical(prevPositions, posBuf);
     _positions = posBuf;
-    _positionsView = null;
-    _positionsViewLen = positionsFloats;
+    if (positionsChanged || _positionsViewLen != positionsFloats) {
+      _positionsView = null;
+      _positionsViewLen = positionsFloats;
+    }
     final Float32List positions = allowReuse
         ? _viewPositions(posBuf, positionsFloats)
         : posBuf;
@@ -616,26 +672,34 @@ class PoseBinaryParser {
       if (_baseZ == null) {
         throw StateError('PD(Δ) missing Z baseline');
       }
-      if (_z != null && _z!.length >= totalPts) {
-        zBuf = _z!;
+      final Float32List? prevZ = _z;
+      if (prevZ != null && prevZ.length >= totalPts) {
+        zBuf = prevZ;
       } else {
         zBuf = allowReuse
             ? _ensureZ(totalPts, reuseZ)
             : Float32List(totalPts);
       }
+      final bool zChanged = !identical(prevZ, zBuf);
       _z = zBuf;
-      _zView = null;
-      _zViewLen = totalPts;
+      if (zChanged || _zViewLen != totalPts) {
+        _zView = null;
+        _zViewLen = totalPts;
+      }
     } else {
       _z = null;
       _zView = null;
       _zViewLen = 0;
     }
 
+    final Int32List? prevRanges = _ranges;
     final Int32List rangesBuf = cachedRanges;
+    final bool rangesChanged = !identical(prevRanges, rangesBuf);
     _ranges = rangesBuf;
-    _rangesView = null;
-    _rangesViewLen = rangesLen;
+    if (rangesChanged || _rangesViewLen != rangesLen) {
+      _rangesView = null;
+      _rangesViewLen = rangesLen;
+    }
     final Int32List ranges = allowReuse
         ? _viewRanges(rangesBuf, rangesLen)
         : rangesBuf;
