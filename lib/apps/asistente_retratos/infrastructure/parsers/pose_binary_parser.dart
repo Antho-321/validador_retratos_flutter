@@ -323,7 +323,11 @@ class PoseBinaryParser {
           if (hasZ) {
             int zq = _i16le(b, i);
             i += 2;
-            zq = _clampZq(zq);
+            if (zq < -32768) {
+              zq = -32768;
+            } else if (zq > 32767) {
+              zq = 32767;
+            }
             baseZ![writeZ] = zq;
             zBuf![writeZ++] = zq / zScale;
           }
@@ -346,7 +350,11 @@ class PoseBinaryParser {
         if (hasZ) {
           int zq = _i16le(b, i);
           i += 2;
-          zq = _clampZq(zq);
+          if (zq < -32768) {
+            zq = -32768;
+          } else if (zq > 32767) {
+            zq = 32767;
+          }
           baseZ![writeZ] = zq;
           zBuf![writeZ++] = zq / zScale;
         }
@@ -512,7 +520,11 @@ class PoseBinaryParser {
             if (hasZ) {
               int zq = _i16le(b, i);
               i += 2;
-              zq = _clampZq(zq);
+              if (zq < -32768) {
+                zq = -32768;
+              } else if (zq > 32767) {
+                zq = 32767;
+              }
               baseZ![writeZ] = zq;
               zBuf![writeZ++] = zq / zScale;
             }
@@ -535,7 +547,11 @@ class PoseBinaryParser {
           if (hasZ) {
             int zq = _i16le(b, i);
             i += 2;
-            zq = _clampZq(zq);
+            if (zq < -32768) {
+              zq = -32768;
+            } else if (zq > 32767) {
+              zq = 32767;
+            }
             baseZ![writeZ] = zq;
             zBuf![writeZ++] = zq / zScale;
           }
@@ -677,7 +693,11 @@ class PoseBinaryParser {
             if (hasZ) {
               int zq = _baseZ![g] + _asInt8(b[deltaPtr]);
               deltaPtr += 1;
-              zq = _clampZq(zq);
+              if (zq < -32768) {
+                zq = -32768;
+              } else if (zq > 32767) {
+                zq = 32767;
+              }
               _baseZ![g] = zq;
               zBuf![g] = zq / zScale;
             }
@@ -840,13 +860,16 @@ class PoseBinaryParser {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
+  @pragma('vm:prefer-inline')
   static int _u16le(Uint8List b, int i) => b[i] | (b[i + 1] << 8);
 
+  @pragma('vm:prefer-inline')
   static int _i16le(Uint8List b, int i) {
     final v = b[i] | (b[i + 1] << 8);
     return (v & 0x8000) != 0 ? (v - 0x10000) : v;
   }
 
+  @pragma('vm:prefer-inline')
   static int _asInt8(int u) => (u & 0x80) != 0 ? (u - 256) : u;
 
   // (ya no se usa en el flujo optimizado; se deja por si te sirve en debug)
@@ -858,13 +881,6 @@ class PoseBinaryParser {
       t >>= 1;
     }
     return c;
-  }
-
-  int _clampZq(int zq) {
-    // int16 clamp
-    if (zq < -32768) return -32768;
-    if (zq > 32767) return 32767;
-    return zq;
   }
 
   static int _deriveScale(int ver, int wq, int hq) {
@@ -881,6 +897,11 @@ class PoseBinaryParser {
   }
 
   static void _require(bool cond, String msg) {
-    if (!cond) throw StateError(msg);
+    assert(() {
+      if (!cond) {
+        throw StateError(msg);
+      }
+      return true;
+    }());
   }
 }
