@@ -752,41 +752,47 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     if (_curIdx < 0 || _curIdx >= _rules.length) _curIdx = 0;
 
-    final current = _rules[_curIdx];
+    while (true) {
+      if (_curIdx < 0 || _curIdx >= _rules.length) return;
 
-    // Bloquear retroceso durante el primer dwell si la regla lo pide
-    final bool lockCurrentFirstDwell =
-        current.blockInterruptionDuranteValidacion &&
-            !current.gate.hasConfirmedOnce;
+      final current = _rules[_curIdx];
 
-    // Backtracking condicional: no si está en dwell ni si bloquea interrupción (primer dwell)
-    final allowBacktrack = !current.gate.isDwell && !lockCurrentFirstDwell;
-    if (allowBacktrack) {
-      final prevBreak = _firstPrevNotHoldingFiltered(_curIdx, c, current);
-      if (prevBreak != null) {
-        _curIdx = _rules.indexOf(prevBreak);
+      // Bloquear retroceso durante el primer dwell si la regla lo pide
+      final bool lockCurrentFirstDwell =
+          current.blockInterruptionDuranteValidacion &&
+              !current.gate.hasConfirmedOnce;
+
+      // Backtracking condicional: no si está en dwell ni si bloquea interrupción (primer dwell)
+      final allowBacktrack = !current.gate.isDwell && !lockCurrentFirstDwell;
+      if (allowBacktrack) {
+        final prevBreak = _firstPrevNotHoldingFiltered(_curIdx, c, current);
+        if (prevBreak != null) {
+          _curIdx = _rules.indexOf(prevBreak);
+          continue;
+        }
+      }
+
+      // Actualiza/Confirma el gate de la regla actual
+      final m = current.metric(c);
+      final confirmed =
+          c.faceOk && (m != null) && current.gate.update(m, c.now);
+      if (!confirmed) return;
+
+      // Revisa rupturas previas tras confirmar (si aún aplica el lock del primer dwell, no retrocedas)
+      final prevBreakAfter =
+          _firstPrevNotHoldingFiltered(_curIdx, c, current);
+      if (prevBreakAfter != null && !lockCurrentFirstDwell) {
+        _curIdx = _rules.indexOf(prevBreakAfter);
+        continue;
+      }
+
+      // Avanza o termina. Si la siguiente regla ya está confirmada en este frame,
+      // la iteración continuará y la marcará sin mostrar su hint.
+      if (_curIdx == _rules.length - 1) {
+        _curIdx = _rules.length; // DONE
         return;
       }
-    }
 
-    // Actualiza/Confirma el gate de la regla actual
-    final m = current.metric(c);
-    final confirmed =
-        c.faceOk && (m != null) && current.gate.update(m, c.now);
-    if (!confirmed) return;
-
-    // Revisa rupturas previas tras confirmar (si aún aplica el lock del primer dwell, no retrocedas)
-    final prevBreakAfter =
-        _firstPrevNotHoldingFiltered(_curIdx, c, current);
-    if (prevBreakAfter != null && !lockCurrentFirstDwell) {
-      _curIdx = _rules.indexOf(prevBreakAfter);
-      return;
-    }
-
-    // Avanza o termina
-    if (_curIdx == _rules.length - 1) {
-      _curIdx = _rules.length; // DONE
-    } else {
       _curIdx++;
     }
   }
