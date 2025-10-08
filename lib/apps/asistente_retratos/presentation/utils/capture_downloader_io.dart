@@ -1,5 +1,6 @@
 // capture_downloader_io.dart
 import 'dart:io' show File, Platform;
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:device_info_plus/device_info_plus.dart';
@@ -8,12 +9,15 @@ import 'package:media_store_plus/media_store_plus.dart';      // Android MediaSt
 import 'package:path_provider/path_provider.dart';            // temp file
 import 'package:permission_handler/permission_handler.dart';
 
+import 'capture_download_types.dart';
+
 /// Save bytes into **Downloads** automatically on Android (no picker).
 /// - Android: MediaStore → Downloads (scoped storage safe).
 /// - iOS: shows Files “Save to…” sheet (no true auto-Downloads on iOS).
 Future<bool> saveCaptured(
   List<int> bytes, {
   String filename = 'retrato.png',
+  SaveProgress? onProgress,
 }) async {
   final data = Uint8List.fromList(bytes);
 
@@ -43,7 +47,20 @@ Future<bool> saveCaptured(
     // Write to a temp file first (MediaStore API takes a file path)
     final tmpDir = await getTemporaryDirectory();
     final tmpPath = '${tmpDir.path}/$name.$ext';
-    await File(tmpPath).writeAsBytes(data, flush: true);
+    final tmpFile = File(tmpPath);
+    final sink = tmpFile.openWrite();
+    const chunkSize = 64 * 1024;
+    final total = data.length;
+    for (var offset = 0; offset < total; offset += chunkSize) {
+      final end = math.min(offset + chunkSize, total);
+      sink.add(data.sublist(offset, end));
+      onProgress?.call(0.8 * (end / total));
+      await Future<void>.delayed(Duration.zero);
+    }
+    await sink.flush();
+    await sink.close();
+
+    onProgress?.call(0.9);
 
     // Save directly into the public Downloads collection (no UI)
     final ms = MediaStore();
@@ -56,20 +73,27 @@ Future<bool> saveCaptured(
       relativePath: FilePath.root,
     );
 
-    if (info != null && info.isSuccessful) return true;
+    if (info != null && info.isSuccessful) {
+      onProgress?.call(1.0);
+      return true;
+    }
     throw StateError('MediaStore save failed: $info');
   }
 
   if (Platform.isIOS) {
     // iOS cannot auto-save to a public "Downloads" silently.
     // Present Files sheet so user picks a location.
+    onProgress?.call(0.5);
     final saved = await FileSaver.instance.saveAs(
       name: name,
       bytes: data,
       ext: ext,                    // note: `ext` is the correct named arg for this version
       mimeType: _mimeFromExt(ext),
     );
-    if (saved != null && saved.toString().isNotEmpty) return true;
+    if (saved != null && saved.toString().isNotEmpty) {
+      onProgress?.call(1.0);
+      return true;
+    }
     throw StateError('FileSaver failed on iOS');
   }
 
