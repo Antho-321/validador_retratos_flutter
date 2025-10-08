@@ -50,9 +50,45 @@ class PoseCapturePage extends StatefulWidget {
   State<PoseCapturePage> createState() => _PoseCapturePageState();
 }
 
+class _ProgressBadge extends StatelessWidget {
+  const _ProgressBadge({required this.value});
+
+  final double value;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      key: const ValueKey('progress'),
+      width: 22,
+      height: 22,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CircularProgressIndicator(
+            value: value,
+            strokeWidth: 2,
+            color: Colors.white,
+            backgroundColor: Colors.white24,
+          ),
+          Text(
+            '${(value * 100).round()}',
+            style: const TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w700,
+              color: Colors.white,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _PoseCapturePageState extends State<PoseCapturePage> {
   final GlobalKey _previewKey = GlobalKey();
   late final PoseCaptureController ctl;
+  bool _isDownloading = false;
+  double _downloadProgress = 0.0;
 
   @override
   void initState() {
@@ -92,13 +128,28 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     return byteData?.buffer.asUint8List();
   }
 
-  Future<void> _downloadCaptured() async {
+  Future<void> _downloadCapturedWithProgress() async {
     final bytes = ctl.capturedPng;
     if (bytes == null) return;
 
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+    });
+
     final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.png';
-    final success = await saveCapturedPortrait(bytes, filename: filename);
+    final success = await saveCapturedPortrait(
+      bytes,
+      filename: filename,
+      onProgress: (p) {
+        if (!mounted) return;
+        setState(() => _downloadProgress = p.clamp(0, 1));
+      },
+    );
+
     if (!mounted) return;
+
+    setState(() => _isDownloading = false);
 
     final messenger = ScaffoldMessenger.of(context);
     messenger.showSnackBar(
@@ -281,9 +332,25 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               child: SafeArea(
                                 child: Center(
                                   child: FilledButton.icon(
-                                    onPressed: _downloadCaptured,
-                                    icon: const Icon(Icons.download),
-                                    label: const Text('Descargar foto'),
+                                    onPressed: _isDownloading
+                                        ? null
+                                        : _downloadCapturedWithProgress,
+                                    icon: AnimatedSwitcher(
+                                      duration:
+                                          const Duration(milliseconds: 200),
+                                      child: _isDownloading
+                                          ? _ProgressBadge(
+                                              value: _downloadProgress,
+                                            )
+                                          : const Icon(
+                                              Icons.download,
+                                              key: ValueKey('download'),
+                                            ),
+                                    ),
+                                    label: Text(
+                                        _isDownloading
+                                            ? 'Descargando…'
+                                            : 'Descargar foto'),
                                   ),
                                 ),
                               ),
