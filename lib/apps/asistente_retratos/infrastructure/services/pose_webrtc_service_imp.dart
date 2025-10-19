@@ -547,6 +547,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       sdp = stripVideoRtxNackAndRemb(sdp, dropNack: true, dropRtx: true, keepTransportCcOnly: keepTransportCcOnly);
     }
     sdp = keepOnlyVideoCodecs(sdp, preferHevc ? const ['h265'] : const ['h264']);
+    sdp = patchAppMLinePorts(sdp);
     offer = RTCSessionDescription(sdp, offer.type);
 
     await _pc!.setLocalDescription(offer);

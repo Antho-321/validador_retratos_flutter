@@ -124,3 +124,25 @@ String keepOnlyVideoCodecs(String sdp, List<String> codecNamesLower) {
 
     return out.join('\r\n');
   }
+
+String patchAppMLinePorts(String sdp) {
+    final lines = sdp.split(RegExp(r'\r?\n'));
+    var changed = false;
+
+    final out = <String>[];
+    for (final l in lines) {
+      if (l.startsWith('m=application ')) {
+        final parts = l.split(' ');
+        if (parts.length >= 2 && parts[1] == '0') {
+          parts[1] = '9';
+          out.add(parts.join(' '));
+          changed = true;
+          continue;
+        }
+      }
+      out.add(l);
+    }
+
+    if (!changed) return sdp;
+    return out.join('\r\n');
+  }
