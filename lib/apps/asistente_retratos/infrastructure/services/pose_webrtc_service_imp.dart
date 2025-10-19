@@ -213,15 +213,29 @@ String sanitizeSdpOrigin(String sdp) {
   return sanitized;
 }
 
-int _dcIdFromTask(String name, {int mod = 1024}) {
+int _dcIdFromTask(String name,
+    {int mod = 1024, Set<int> reserved = const {1}}) {
   if (mod < 2) mod = 2;
+  if (mod.isOdd) {
+    mod -= 1;
+    if (mod < 2) mod = 2;
+  }
+
   final person = _pad8('DCMAP');
   final digestBytes = Blake2s(2, aad: person).convert(utf8.encode(name)).bytes;
   final base = digestBytes[0] | (digestBytes[1] << 8);
-  var id = (base % mod) & 0xFFFE;
-  if (id == 1) {
+  var id = (base % mod) & ~1;
+
+  if (reserved.isEmpty) {
+    return id;
+  }
+
+  final maxAttempts = (mod ~/ 2) + 1;
+  var attempts = 0;
+  while (reserved.contains(id) && attempts < maxAttempts) {
     id = (id + 2) % mod;
-    id &= 0xFFFE;
+    id &= ~1;
+    attempts++;
   }
   return id;
 }
