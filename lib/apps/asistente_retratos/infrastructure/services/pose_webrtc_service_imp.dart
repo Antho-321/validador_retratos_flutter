@@ -322,6 +322,40 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     debugPrint('[PoseWebRTC][WARN] $message');
   }
 
+  String _dcStateName(RTCDataChannelState? state) {
+    switch (state) {
+      case RTCDataChannelState.RTCDataChannelConnecting:
+        return 'connecting';
+      case RTCDataChannelState.RTCDataChannelOpen:
+        return 'open';
+      case RTCDataChannelState.RTCDataChannelClosing:
+        return 'closing';
+      case RTCDataChannelState.RTCDataChannelClosed:
+        return 'closed';
+      default:
+        return 'unknown';
+    }
+  }
+
+  void _dcl(String message) {
+    if (!logEverything) return;
+    debugPrint('[PoseWebRTC][DC] $message');
+  }
+
+  String _previewText(String? text, {int maxChars = 120}) {
+    if (text == null) return 'null';
+    final normalized = text.replaceAll('\n', '\\n');
+    if (normalized.length <= maxChars) return normalized;
+    return '${normalized.substring(0, maxChars)}…';
+  }
+
+  String _previewBinary(Uint8List data, {int maxBytes = 16}) {
+    if (data.isEmpty) return '';
+    final limit = data.length < maxBytes ? data.length : maxBytes;
+    final hex = [for (var i = 0; i < limit; i++) data[i].toRadixString(16).padLeft(2, '0')].join(' ');
+    return data.length > limit ? '$hex …' : hex;
+  }
+
   String get _primaryTask =>
       (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
 
@@ -608,6 +642,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     _pc!.onDataChannel = (RTCDataChannel ch) {
       final label = ch.label ?? '';
+      _dcl('pc.onDataChannel label="$label" id=${ch.id} state=${_dcStateName(ch.state)}');
       if (label == 'ctrl') {
         _ctrl = ch;
         _wireCtrl(ch);
@@ -705,7 +740,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       ..id = _dcIdFromTask(task, reserved: const {1})
       ..ordered = false
       ..maxRetransmits = 0;
+    _log(
+        'createLossyDC[$task]: negotiated=${lossy.negotiated} id=${lossy.id} ordered=${lossy.ordered} maxRetransmits=${lossy.maxRetransmits}');
     final ch = await _pc!.createDataChannel('results:$task', lossy);
+    _dcl(
+        'createLossyDC[$task]: created label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}');
     _resultsPerTask[task] = ch;
     if (task == _primaryTask) _dc = ch;
     _wireResults(ch, task: task);
@@ -718,6 +757,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       ..negotiated = true
       ..id = 1
       ..ordered = true);
+    _log('ensureCtrlDC: negotiated=true id=1 ordered=true');
+    final ctrl = _ctrl;
+    if (ctrl != null) {
+      _dcl(
+          'ensureCtrlDC: created label="${ctrl.label}" id=${ctrl.id} state=${_dcStateName(ctrl.state)} buffered=${ctrl.bufferedAmount}');
+    }
     _wireCtrl(_ctrl!);
   }
 
@@ -1046,8 +1091,24 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     final normalized = _normalizeTask(task);
-    ch.onDataChannelState = (s) {};
+    _dcl(
+        'wireResults[$normalized]: label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}');
+    ch.onDataChannelState = (s) {
+      final stateName = _dcStateName(s);
+      _dcl('results[$normalized]: state -> $stateName');
+      if (s == RTCDataChannelState.RTCDataChannelOpen) {
+        _dcl('results[$normalized]: opened buffered=${ch.bufferedAmount}');
+      }
+    };
     ch.onMessage = (RTCDataChannelMessage m) {
+      if (m.isBinary) {
+        final data = m.binary;
+        final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]';
+        _dcl('results[$normalized] <= binary ${data.length}B$preview');
+      } else {
+        final text = m.text;
+        _dcl('results[$normalized] <= text ${text?.length ?? 0}B "${_previewText(text)}"');
+      }
       if (_jsonTasks.contains(normalized)) {
         if (m.isBinary) {
           final data = m.binary;
@@ -1081,17 +1142,29 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _wireCtrl(RTCDataChannel ch) {
     _lastAckSeqSent = -1;
     _lastKfReqUs = 0;
+    _dcl(
+        'wireCtrl: label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}');
     ch.onDataChannelState = (s) {
+      _dcl('ctrl: state -> ${_dcStateName(s)}');
       if (s == RTCDataChannelState.RTCDataChannelOpen) {
+        _dcl('ctrl: opened buffered=${ch.bufferedAmount}');
         _nudgeServer();
       }
     };
     ch.onMessage = (RTCDataChannelMessage m) {
-      // ignore (no logs)
+      if (m.isBinary) {
+        final data = m.binary;
+        final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]';
+        _dcl('ctrl <= binary ${data.length}B$preview');
+        return;
+      }
+      final text = m.text;
+      _dcl('ctrl <= text ${text?.length ?? 0}B "${_previewText(text)}"');
     };
   }
 
   void _nudgeServer() {
+    _dcl('ctrl => HELLO');
     _ctrl.sendText('HELLO');
     _sendCtrlKF();
   }
@@ -1395,6 +1468,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       return;
     }
     _lastKfReqUs = nowUs;
+    _dcl('ctrl => KF');
     _ctrl.sendText('KF');
   }
 
@@ -1403,6 +1477,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _lastAckSeqSent = seq;
     _ackBuf[3] = (seq & 0xFF);
     _ackBuf[4] = ((seq >> 8) & 0xFF);
+    _dcl('ctrl => ACK seq=$seq [${_previewBinary(_ackBuf)}]');
     _ctrl.sendBin(_ackBuf);
   }
 
