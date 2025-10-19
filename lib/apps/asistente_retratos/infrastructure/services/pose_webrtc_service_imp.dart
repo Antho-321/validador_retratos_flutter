@@ -2,6 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
+import 'dart:math' show Random;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
@@ -125,6 +126,91 @@ Uint8List _pad8(String s) {
   final n = src.length > 8 ? 8 : src.length;
   out.setRange(0, n, src);
   return out;
+}
+
+final Random _originRandom = (() {
+  try {
+    return Random.secure();
+  } catch (_) {
+    return Random();
+  }
+})();
+
+BigInt _randomBigInt(int bytes) {
+  final buffer = Uint8List(bytes);
+  for (var i = 0; i < buffer.length; i++) {
+    buffer[i] = _originRandom.nextInt(256);
+  }
+  var value = BigInt.zero;
+  for (final b in buffer) {
+    value = (value << 8) | BigInt.from(b);
+  }
+  return value == BigInt.zero ? BigInt.one : value;
+}
+
+int _randomPositiveInt(int maxExclusive) {
+  var value = _originRandom.nextInt(maxExclusive);
+  if (value == 0) value = 1;
+  return value;
+}
+
+bool _isOriginLineValid(String line) {
+  final trimmed = line.trim();
+  if (!trimmed.startsWith('o=')) return false;
+
+  final payload = trimmed.substring(2).trim();
+  final parts = payload.split(RegExp(r'\s+'));
+  if (parts.length < 6) return false;
+
+  final username = parts[0];
+  final sessionId = parts[1];
+  final version = parts[2];
+  final netType = parts[3];
+  final addrType = parts[4];
+  final address = parts[5];
+
+  if (username.isEmpty || address.isEmpty) return false;
+  if (int.tryParse(sessionId) == null) return false;
+  if (int.tryParse(version) == null) return false;
+  if (netType != 'IN') return false;
+  if (addrType != 'IP4' && addrType != 'IP6') return false;
+
+  return true;
+}
+
+String _generateOriginLine() {
+  final sessionId = _randomBigInt(8);
+  final version = _randomPositiveInt(0x7FFFFFFF);
+  return 'o=- $sessionId $version IN IP4 127.0.0.1';
+}
+
+String sanitizeSdpOrigin(String sdp) {
+  if (sdp.isEmpty) return sdp;
+
+  final newline = sdp.contains('\r\n') ? '\r\n' : '\n';
+  final lines = sdp.split(RegExp(r'\r?\n'));
+  final hadTrailingEmpty = lines.isNotEmpty && lines.last.isEmpty;
+  if (hadTrailingEmpty) {
+    lines.removeLast();
+  }
+
+  final originIdx = lines.indexWhere((line) => line.trimLeft().startsWith('o='));
+  if (originIdx >= 0) {
+    if (_isOriginLineValid(lines[originIdx])) {
+      return sdp;
+    }
+    lines[originIdx] = _generateOriginLine();
+  } else {
+    final vIdx = lines.indexWhere((line) => line.trimLeft().startsWith('v='));
+    final insertIdx = vIdx >= 0 ? vIdx + 1 : 0;
+    lines.insert(insertIdx, _generateOriginLine());
+  }
+
+  var sanitized = lines.join(newline);
+  if (hadTrailingEmpty) {
+    sanitized += newline;
+  }
+  return sanitized;
 }
 
 int _dcIdFromTask(String name, {int mod = 1024}) {
@@ -582,9 +668,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     final ansMap = jsonDecode(res.body) as Map<String, dynamic>;
+    final rawSdp = ansMap['sdp'];
+    if (rawSdp is! String || rawSdp.isEmpty) {
+      throw Exception('Invalid SDP in answer');
+    }
+    final sanitizedSdp = sanitizeSdpOrigin(rawSdp);
     await _pc!.setRemoteDescription(
       RTCSessionDescription(
-        ansMap['sdp'] as String,
+        sanitizedSdp,
         (ansMap['type'] as String?) ?? 'answer',
       ),
     );
