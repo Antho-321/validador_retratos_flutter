@@ -9,7 +9,7 @@ import 'dart:isolate';
 
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/foundation.dart'
-    show ValueListenable, ValueNotifier, debugPrint;
+    show ValueListenable, ValueNotifier, debugPrint, kIsWeb;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
@@ -601,9 +601,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _localRenderer.onResize = _updateSize;
     _updateSize();
 
-    _silence(() async {
-      final dynamic dtrack = _localStream!.getVideoTracks().first;
-      await dtrack.setVideoContentHint('motion');
+    await _silenceAsync(() async {
+      if (kIsWeb) {
+        final track = _localStream!.getVideoTracks().first;
+        try {
+          await (track as dynamic).setVideoContentHint('motion');
+        } catch (_) {
+          // No soportado → ignorar
+        }
+      }
     });
   }
 
