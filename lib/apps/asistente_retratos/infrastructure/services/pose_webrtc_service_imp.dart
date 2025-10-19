@@ -702,7 +702,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Future<RTCDataChannel> _createLossyDC(String task) async {
     final lossy = RTCDataChannelInit()
       ..negotiated = true
-      ..id = _dcIdFromTask(task)
+      ..id = _dcIdFromTask(task, reserved: const {1})
       ..ordered = false
       ..maxRetransmits = 0;
     final ch = await _pc!.createDataChannel('results:$task', lossy);
