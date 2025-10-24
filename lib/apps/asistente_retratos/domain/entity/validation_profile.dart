@@ -128,7 +128,7 @@ class ValidationProfile {
     ),
 
     // Shoulders
-    shouldersBand: Band(-2.22, 2.22),
+    shouldersBand: Band(-2.22, 2.30),
     shouldersGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 0.7,
