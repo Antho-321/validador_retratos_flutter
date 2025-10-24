@@ -35,7 +35,8 @@ Future<void> main() async {
 
     // Flags por entorno (puedes hardcodear si quieres)
     const bool validationsEnabled = true;
-    const offerUrl = 'http://192.168.100.7:8000/webrtc/offer';
+    // ip casa: 192.168.100.7
+    const offerUrl = 'http://172.16.14.238:8000/webrtc/offer';
 
     // 1) Registrar dependencias (pasa la config del servicio aquí)
     registrarDependenciasPosture(

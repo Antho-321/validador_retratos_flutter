@@ -137,7 +137,7 @@ class ValidationProfile {
     ),
 
     // Torso azimut
-    azimutBand: Band(-3.72, 9.06),
+    azimutBand: Band(-5.19, 9.06),
     azimutGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 2.4,
