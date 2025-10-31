@@ -12,7 +12,8 @@ import 'package:flutter/foundation.dart'
     show ValueListenable, ValueNotifier, debugPrint, kIsWeb;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
-import 'package:hashlib/hashlib.dart'; 
+import 'package:crypto/crypto.dart' as crypto;
+import 'package:hashlib/hashlib.dart';
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
@@ -304,6 +305,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       updateLmkStateFromFlat: _updateLmkStateFromFlat,
       deliverTaskJsonEvent: _deliverTaskJsonEvent,
     );
+
+    _imagesLabelResolved =
+        preCreateDataChannels ? 'images:${_primaryTask}' : 'images';
+    _imagesIdResolved = _dcIdFromTask(_imagesLabelResolved, reserved: {1});
   }
 
   final Uri offerUri;
@@ -387,11 +392,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return 'jpeg';
   }
 
-  String _blake2s128(Uint8List bytes) {
-    // BLAKE2s “personalization” maps to `aad` in hashlib.
-    final algo = Blake2s(16, aad: _pad8('IMGV1')); // exactly 8 bytes
-    return algo.convert(bytes).hex();
-  }
+  String _md5Hex(Uint8List bytes) => crypto.md5.convert(bytes).toString();
 
   void _cancelImageAckTimer() {
     _imgAckTimer?.cancel();
@@ -529,8 +530,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // static const String _imagesLabel = 'images';
 
   // Now:
-  static const String _imagesLabel = 'images';
-  static final int _imagesId = _dcIdFromTask(_imagesLabel, reserved: {1});
+  late final String _imagesLabelResolved;
+  late final int _imagesIdResolved;
   static const int _imagesChunkSize = 32 * 1024;
   static const int _imagesAckTimeoutSeconds = 5;
 
@@ -763,7 +764,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _wireCtrl(ch);
         return;
       }
-      if (label == _imagesLabel) { // <-- ADDED
+      if (label == 'images' || label.startsWith('images:')) { // <-- ADDED
         _imagesDc = ch; // <-- ADDED
         _wireImagesDc(ch); // <-- ADDED
         return; // <-- ADDED
@@ -857,8 +858,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Future<RTCDataChannel> _createLossyDC(String task) async {
     final lossy = RTCDataChannelInit()
       ..negotiated = true
-      // Ensure reserved IDs include control (1) and images (_imagesId)
-      ..id = _dcIdFromTask(task, reserved: {1, _imagesId})
+      // Ensure reserved IDs include control (1) and images (_imagesIdResolved)
+      ..id = _dcIdFromTask(task, reserved: {1, _imagesIdResolved})
       ..ordered = false
       ..maxRetransmits = 0;
     _log(
@@ -891,12 +892,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (_pc == null || _imagesDc != null) return; // <-- ADDED
     final init = RTCDataChannelInit() // <-- ADDED
       ..negotiated = true // <-- ADDED
-      ..id = _imagesId // <-- ADDED
-      ..ordered = false // <-- ADDED
-      ..maxRetransmits = 0; // <-- ADDED
+      ..id = _imagesIdResolved // <-- ADDED
+      ..ordered = true; // <-- ADDED
     _log( // <-- ADDED
-        'ensureImagesDcCreatedByUs: negotiated=${init.negotiated} id=${init.id} ordered=${init.ordered} maxRetransmits=${init.maxRetransmits}'); // <-- ADDED
-    _imagesDc = await _pc!.createDataChannel(_imagesLabel, init); // <-- ADDED
+        'ensureImagesDcCreatedByUs: negotiated=${init.negotiated} id=${init.id} ordered=${init.ordered}'); // <-- ADDED
+    _imagesDc = await _pc!.createDataChannel(_imagesLabelResolved, init); // <-- ADDED
     _wireImagesDc(_imagesDc!); // <-- ADDED
   } // <-- ADDED
 
@@ -1709,7 +1709,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   @override // <-- ADDED
-  Future<void> sendImageBytes(Uint8List bytes) async { // <-- ADDED
+  Future<void> sendImageBytes(
+    Uint8List bytes, {
+    String? requestId,
+    String? basename,
+    String? formatOverride,
+  }) async {
     final ch = _imagesDc; // <-- ADDED
     if (ch == null || ch.state != RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
       _warn('sendImageBytes failed: images DC not open (state: ${_dcStateName(ch?.state)})'); // <-- ADDED
@@ -1721,40 +1726,44 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _pendingImageSend = null;
         _cancelImageAckTimer();
       }
-      final requestId = _nextImageRequestId();
-      final format = _detectImageFormat(bytes);
-      final hash = _blake2s128(bytes);
+      final rid = requestId ?? _nextImageRequestId();
+      final fmt = (formatOverride ?? _detectImageFormat(bytes)).toLowerCase();
+      final hash = _md5Hex(bytes);
       final header = jsonEncode({
         'type': 'image',
-        'request_id': requestId,
+        'request_id': rid,
         'mode': 'single',
-        'format': format,
+        'format': fmt,
         'bytes': bytes.length,
         'hash': hash,
+        'hash_algo': 'md5',
+        'request_basename': basename ?? '',
       });
       _dcl('images => header ${header.length}B "${_previewText(header)}"');
       await ch.send(RTCDataChannelMessage(header));
 
-      var sent = 0;
+      var sent = 0, lastYield = 0;
       while (sent < bytes.length) {
         final end = min(sent + _imagesChunkSize, bytes.length);
         final chunk = Uint8List.sublistView(bytes, sent, end);
         await ch.send(RTCDataChannelMessage.fromBinary(chunk));
         sent = end;
-        if (sent == bytes.length || sent % (256 * 1024) == 0) {
+        if (sent == bytes.length || (sent - lastYield) >= 262144) {
           _dcl('images => sent $sent/${bytes.length} bytes');
+          lastYield = sent;
+          await Future.delayed(const Duration(milliseconds: 1));
         }
       }
 
-      final eos = jsonEncode({'type': 'eos', 'request_id': requestId});
+      final eos = jsonEncode({'type': 'eos', 'request_id': rid});
       _dcl('images => eos ${eos.length}B "${_previewText(eos)}"');
       await ch.send(RTCDataChannelMessage(eos));
 
       _pendingImageSend = _PendingImageSend(
-        requestId: requestId,
+        requestId: rid,
         nbytes: bytes.length,
         hash: hash,
-        format: format,
+        format: fmt,
       );
       _scheduleImageAckTimeout();
     } catch (e) {
