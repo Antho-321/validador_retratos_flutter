@@ -2,7 +2,7 @@
 
 import 'dart:async';
 import 'dart:convert' show jsonDecode, jsonEncode, utf8;
-import 'dart:math' show Random;
+import 'dart:math' show Random, min;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
@@ -32,6 +32,21 @@ class _PendingEmit {
   final int? seq;
 
   const _PendingEmit(this.frame, this.kind, this.seq);
+}
+
+class _PendingImageSend {
+  _PendingImageSend({
+    required this.requestId,
+    required this.nbytes,
+    required this.hash,
+    required this.format,
+  }) : started = DateTime.now();
+
+  final String requestId;
+  final int nbytes;
+  final String hash;
+  final String format;
+  final DateTime started;
 }
 
 class _ParseWorker {
@@ -353,6 +368,81 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return data.length > limit ? '$hex …' : hex;
   }
 
+  String _nextImageRequestId() {
+    final seq = ++_imagesReqSeq;
+    return 'img-${_nowUs()}-$seq';
+  }
+
+  String _detectImageFormat(Uint8List bytes) {
+    if (bytes.length >= 4 &&
+        bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      return 'png';
+    }
+    if (bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
+      return 'jpeg';
+    }
+    return 'jpeg';
+  }
+
+  String _blake2s128(Uint8List bytes) {
+    final algo = Blake2s(digestSize: 16, person: utf8.encode('IMGV1'));
+    return algo.convert(bytes).hex();
+  }
+
+  void _cancelImageAckTimer() {
+    _imgAckTimer?.cancel();
+    _imgAckTimer = null;
+  }
+
+  void _scheduleImageAckTimeout() {
+    _cancelImageAckTimer();
+    final pending = _pendingImageSend;
+    if (pending == null) return;
+    _imgAckTimer = Timer(const Duration(seconds: _imagesAckTimeoutSeconds), () {
+      final stillPending = _pendingImageSend;
+      if (stillPending == null) return;
+      _warn(
+          'No IMGACK/IMGOK after ${_imagesAckTimeoutSeconds}s (id=${stillPending.requestId} bytes=${stillPending.nbytes} hash=${stillPending.hash})');
+    });
+  }
+
+  void _handleImageCtrlPacket(Map<String, dynamic> json) {
+    final type = (json['type'] as String?)?.toUpperCase();
+    if (type == null) return;
+    if (type == 'IMGPROC') {
+      // TODO: handle processed image payloads (not yet implemented)
+      return;
+    }
+    if (type == 'EOS') {
+      return;
+    }
+    if (type != 'IMGACK' && type != 'IMGOK' && type != 'IMGBEGIN') {
+      return;
+    }
+
+    final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
+    final pending = _pendingImageSend;
+    if (pending == null || requestId.isEmpty) {
+      return;
+    }
+    if (requestId != pending.requestId) {
+      return;
+    }
+
+    if (type == 'IMGOK') {
+      _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+      _pendingImageSend = null;
+      _cancelImageAckTimer();
+    } else if (type == 'IMGACK') {
+      _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+    } else if (type == 'IMGBEGIN') {
+      _dcl('images server begin id=$requestId expectedBytes=${json['bytes']}');
+    }
+  }
+
   String get _primaryTask =>
       (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
 
@@ -440,6 +530,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // Now:
   static const String _imagesLabel = 'images';
   static final int _imagesId = _dcIdFromTask(_imagesLabel, reserved: {1});
+  static const int _imagesChunkSize = 32 * 1024;
+  static const int _imagesAckTimeoutSeconds = 5;
+
+  int _imagesReqSeq = 0;
+  _PendingImageSend? _pendingImageSend;
+  Timer? _imgAckTimer;
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
@@ -836,6 +932,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();
+    _cancelImageAckTimer();
     await _framesCtrl.close();
     await _jsonEventsCtrl.close();
 
@@ -1142,10 +1239,22 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       if (m.isBinary) { // <-- ADDED
         final data = m.binary; // <-- ADDED
         final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]'; // <-- ADDED
-        _dcl('images <= unexpected binary ${data.length}B$preview'); // <-- ADDED
+        _dcl('images <= binary ${data.length}B$preview'); // <-- ADDED
       } else { // <-- ADDED
         final text = m.text; // <-- ADDED
-        _dcl('images <= unexpected text ${text?.length ?? 0}B "${_previewText(text)}"'); // <-- ADDED
+        final trimmed = text?.trim() ?? '';
+        Map<String, dynamic>? parsed;
+        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+          parsed = _silence(() => jsonDecode(trimmed) as Map<String, dynamic>?);
+        }
+        if (parsed != null) {
+          final type = (parsed['type'] as String?)?.toUpperCase();
+          if (type == 'IMGPROC' || type == 'EOS') {
+            _dcl('images <= ctrl $type json ${text?.length ?? 0}B');
+            return;
+          }
+        }
+        _dcl('images <= text ${text?.length ?? 0}B "${_previewText(text)}"'); // <-- ADDED
       } // <-- ADDED
     }; // <-- ADDED
   } // <-- ADDED
@@ -1221,6 +1330,28 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
       final text = m.text;
       _dcl('ctrl <= text ${text?.length ?? 0}B "${_previewText(text)}"');
+      if (text == null) return;
+      final trimmed = text.trim();
+      if (trimmed.isEmpty) return;
+      Map<String, dynamic>? parsed;
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        parsed = _silence(() => jsonDecode(trimmed) as Map<String, dynamic>?);
+      }
+      if (parsed != null) {
+        _handleImageCtrlPacket(parsed);
+        return;
+      }
+      final parts = trimmed.split(RegExp(r'\s+'));
+      if (parts.length >= 4 &&
+          (parts[0].toUpperCase() == 'IMGACK' || parts[0].toUpperCase() == 'IMGOK')) {
+        final legacy = <String, dynamic>{
+          'type': parts[0],
+          'request_id': parts[1],
+          'bytes': int.tryParse(parts[2]) ?? parts[2],
+          'hash': parts[3],
+        };
+        _handleImageCtrlPacket(legacy);
+      }
     };
   }
 
@@ -1579,12 +1710,53 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       _warn('sendImageBytes failed: images DC not open (state: ${_dcStateName(ch?.state)})'); // <-- ADDED
       throw StateError('images DC not open'); // <-- ADDED
     } // <-- ADDED
-    try { // <-- ADDED
-      _dcl('images => binary ${bytes.length}B'); // <-- ADDED
-      await ch.send(RTCDataChannelMessage.fromBinary(bytes)); // <-- ADDED
-    } catch (e) { // <-- ADDED
-      _warn('sendImageBytes error: $e'); // <-- ADDED
-      rethrow; // <-- ADDED
-    } // <-- ADDED
+    try {
+      if (_pendingImageSend != null) {
+        _warn('Replacing pending image delivery (${_pendingImageSend!.requestId})');
+        _pendingImageSend = null;
+        _cancelImageAckTimer();
+      }
+      final requestId = _nextImageRequestId();
+      final format = _detectImageFormat(bytes);
+      final hash = _blake2s128(bytes);
+      final header = jsonEncode({
+        'type': 'image',
+        'request_id': requestId,
+        'mode': 'single',
+        'format': format,
+        'bytes': bytes.length,
+        'hash': hash,
+      });
+      _dcl('images => header ${header.length}B "${_previewText(header)}"');
+      await ch.send(RTCDataChannelMessage(header));
+
+      var sent = 0;
+      while (sent < bytes.length) {
+        final end = min(sent + _imagesChunkSize, bytes.length);
+        final chunk = Uint8List.sublistView(bytes, sent, end);
+        await ch.send(RTCDataChannelMessage.fromBinary(chunk));
+        sent = end;
+        if (sent == bytes.length || sent % (256 * 1024) == 0) {
+          _dcl('images => sent $sent/${bytes.length} bytes');
+        }
+      }
+
+      final eos = jsonEncode({'type': 'eos', 'request_id': requestId});
+      _dcl('images => eos ${eos.length}B "${_previewText(eos)}"');
+      await ch.send(RTCDataChannelMessage(eos));
+
+      _pendingImageSend = _PendingImageSend(
+        requestId: requestId,
+        nbytes: bytes.length,
+        hash: hash,
+        format: format,
+      );
+      _scheduleImageAckTimeout();
+    } catch (e) {
+      _pendingImageSend = null;
+      _cancelImageAckTimer();
+      _warn('sendImageBytes error: $e');
+      rethrow;
+    }
   } // <-- ADDED
 }
