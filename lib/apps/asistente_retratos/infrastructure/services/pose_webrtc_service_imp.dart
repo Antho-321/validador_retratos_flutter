@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart'
     show ValueListenable, ValueNotifier, debugPrint, kIsWeb;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:hashlib/hashlib.dart'; 
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/lmk_state.dart';
@@ -20,7 +21,6 @@ import '../model/pose_frame.dart' show PoseFrame;
 import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
-import 'package:hashlib/hashlib.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_json_parser.dart';
@@ -213,8 +213,7 @@ String sanitizeSdpOrigin(String sdp) {
   return sanitized;
 }
 
-int _dcIdFromTask(String name,
-    {int mod = 1024, Set<int> reserved = const {1}}) {
+int _dcIdFromTask(String name, {int mod = 1024, Set<int> reserved = const {1}}) {
   if (mod < 2) mod = 2;
   if (mod.isOdd) {
     mod -= 1;
@@ -224,11 +223,9 @@ int _dcIdFromTask(String name,
   final person = _pad8('DCMAP');
   final digestBytes = Blake2s(2, aad: person).convert(utf8.encode(name)).bytes;
   final base = digestBytes[0] | (digestBytes[1] << 8);
-  var id = (base % mod) & ~1;
+  var id = (base % mod) & ~1; // keep it even
 
-  if (reserved.isEmpty) {
-    return id;
-  }
+  if (reserved.isEmpty) return id;
 
   final maxAttempts = (mod ~/ 2) + 1;
   var attempts = 0;
@@ -430,10 +427,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   RTCDataChannel? _dc;
   RTCDataChannel? _ctrl;
+  RTCDataChannel? _imagesDc; // <-- ADDED
   final Map<String, RTCDataChannel> _resultsPerTask = {};
   final Map<String, _PendingEmit> _pendingByTask = {};
   final Set<String> _emitScheduled = {};
   final Map<String, int> _lastEmitUsByTask = {};
+
+  // Was:
+  // static const int _imagesId = 342;
+  // static const String _imagesLabel = 'images';
+
+  // Now:
+  static const String _imagesLabel = 'images';
+  static final int _imagesId = _dcIdFromTask(_imagesLabel, reserved: {1});
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
@@ -476,6 +482,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final ValueNotifier<PoseFrame?> _latestFrame = ValueNotifier<PoseFrame?>(null);
   @override
   ValueListenable<PoseFrame?> get latestFrame => _latestFrame;
+
+  @override // <-- ADDED
+  bool get imagesReady => // <-- ADDED
+      _imagesDc != null && // <-- ADDED
+      _imagesDc!.state == RTCDataChannelState.RTCDataChannelOpen; // <-- ADDED
 
   // sync:true para evitar microtasks innecesarias
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
@@ -641,6 +652,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (preCreateDataChannels) {
       final tasks = (requestedTasks.isEmpty) ? const ['pose'] : requestedTasks;
       await _ensureCtrlDC();
+      await _ensureImagesDcCreatedByUs(); // <-- ADDED
       for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
         await _createLossyDC(t);
       }
@@ -654,6 +666,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _wireCtrl(ch);
         return;
       }
+      if (label == _imagesLabel) { // <-- ADDED
+        _imagesDc = ch; // <-- ADDED
+        _wireImagesDc(ch); // <-- ADDED
+        return; // <-- ADDED
+      } // <-- ADDED
       if (label.startsWith('results:')) {
         final task = label.substring('results:'.length).toLowerCase().trim();
         final t = task.isNotEmpty ? task : _primaryTask;
@@ -743,7 +760,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Future<RTCDataChannel> _createLossyDC(String task) async {
     final lossy = RTCDataChannelInit()
       ..negotiated = true
-      ..id = _dcIdFromTask(task, reserved: const {1})
+      // Ensure reserved IDs include control (1) and images (_imagesId)
+      ..id = _dcIdFromTask(task, reserved: {1, _imagesId})
       ..ordered = false
       ..maxRetransmits = 0;
     _log(
@@ -772,6 +790,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _wireCtrl(_ctrl!);
   }
 
+  Future<void> _ensureImagesDcCreatedByUs() async { // <-- ADDED
+    if (_pc == null || _imagesDc != null) return; // <-- ADDED
+    final init = RTCDataChannelInit() // <-- ADDED
+      ..negotiated = true // <-- ADDED
+      ..id = _imagesId // <-- ADDED
+      ..ordered = false // <-- ADDED
+      ..maxRetransmits = 0; // <-- ADDED
+    _log( // <-- ADDED
+        'ensureImagesDcCreatedByUs: negotiated=${init.negotiated} id=${init.id} ordered=${init.ordered} maxRetransmits=${init.maxRetransmits}'); // <-- ADDED
+    _imagesDc = await _pc!.createDataChannel(_imagesLabel, init); // <-- ADDED
+    _wireImagesDc(_imagesDc!); // <-- ADDED
+  } // <-- ADDED
+
   @override
   Future<void> switchCamera() async {
     final tracks = _localStream?.getVideoTracks();
@@ -794,6 +825,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     await _dc.safeClose();
     await _ctrl.safeClose();
+    await _imagesDc.safeClose(); // <-- ADDED
     await _silenceAsync(() async { await _pc?.close(); });
 
     _silence(() => _localStream?.getTracks().forEach((t) { _silence(() { t.stop(); }); }));
@@ -856,7 +888,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final nextSeq = seq ?? (current.lastSeq + 1);
     if (nextSeq != current.lastSeq || !identical(current.lastFlat, _lastFaceFlat)) {
       _faceLmk.value = LmkState(
-        last: null,                 // lazy
+        last: null,               // lazy
         lastFlat: _lastFaceFlat,    // source of truth
         lastFlatZ: null,
         lastSeq: nextSeq,
@@ -1095,6 +1127,29 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _maybeSendKF();
   }
 
+  void _wireImagesDc(RTCDataChannel ch) { // <-- ADDED
+    _dcl( // <-- ADDED
+        'wireImagesDc: label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}'); // <-- ADDED
+    ch.onDataChannelState = (s) { // <-- ADDED
+      final stateName = _dcStateName(s); // <-- ADDED
+      _dcl('images: state -> $stateName'); // <-- ADDED
+      if (s == RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
+        _dcl('images: opened buffered=${ch.bufferedAmount}'); // <-- ADDED
+      } // <-- ADDED
+    }; // <-- ADDED
+    ch.onMessage = (RTCDataChannelMessage m) { // <-- ADDED
+      // We don't expect messages, but good to log if we get them. // <-- ADDED
+      if (m.isBinary) { // <-- ADDED
+        final data = m.binary; // <-- ADDED
+        final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]'; // <-- ADDED
+        _dcl('images <= unexpected binary ${data.length}B$preview'); // <-- ADDED
+      } else { // <-- ADDED
+        final text = m.text; // <-- ADDED
+        _dcl('images <= unexpected text ${text?.length ?? 0}B "${_previewText(text)}"'); // <-- ADDED
+      } // <-- ADDED
+    }; // <-- ADDED
+  } // <-- ADDED
+
   void _wireResults(RTCDataChannel ch, {required String task}) {
     final normalized = _normalizeTask(task);
     _dcl(
@@ -1182,10 +1237,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     await _dc.safeClose();
     await _ctrl.safeClose();
+    await _imagesDc.safeClose(); // <-- ADDED
     _dc = null;
     _ctrl = null;
+    _imagesDc = null; // <-- ADDED
 
     await _ensureCtrlDC();
+    await _ensureImagesDcCreatedByUs(); // <-- ADDED
     final tasks = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
     for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
       await _createLossyDC(t);
@@ -1384,7 +1442,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _latestFrame.value = frame;
 
     if (task == 'face') {
-      final lf  = _lastFace2D;   // puede ser null por lazy
+      final lf  = _lastFace2D;    // puede ser null por lazy
       final lff = _lastFaceFlat;
       if (lf != null || lff != null) {
         _faceLmk.value = LmkState(
@@ -1513,4 +1571,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       },
     );
   }
+
+  @override // <-- ADDED
+  Future<void> sendImageBytes(Uint8List bytes) async { // <-- ADDED
+    final ch = _imagesDc; // <-- ADDED
+    if (ch == null || ch.state != RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
+      _warn('sendImageBytes failed: images DC not open (state: ${_dcStateName(ch?.state)})'); // <-- ADDED
+      throw StateError('images DC not open'); // <-- ADDED
+    } // <-- ADDED
+    try { // <-- ADDED
+      _dcl('images => binary ${bytes.length}B'); // <-- ADDED
+      await ch.send(RTCDataChannelMessage.fromBinary(bytes)); // <-- ADDED
+    } catch (e) { // <-- ADDED
+      _warn('sendImageBytes error: $e'); // <-- ADDED
+      rethrow; // <-- ADDED
+    } // <-- ADDED
+  } // <-- ADDED
 }

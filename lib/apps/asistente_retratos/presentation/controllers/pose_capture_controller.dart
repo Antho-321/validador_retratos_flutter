@@ -429,6 +429,21 @@ class PoseCaptureController extends ChangeNotifier {
         final bytes = await _Capture.tryAll(poseService, _fallbackSnapshot);
         if (bytes != null && bytes.isNotEmpty) {
           capturedPng = bytes;
+
+          // ⬇️ NEW: enviar la imagen al servidor por el DataChannel "images"
+          try {
+            if (poseService.imagesReady) {
+              await poseService.sendImageBytes(bytes);
+            } else {
+              if (kDebugMode) {
+                print('[pose] images DC not ready; skipping send');
+              }
+            }
+          } catch (e) {
+            if (kDebugMode) {
+              print('[pose] images DC send failed: $e');
+            }
+          }
         }
 
         isCapturing = false;

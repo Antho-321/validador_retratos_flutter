@@ -26,7 +26,7 @@ void registrarDependenciasPosture({
       jsonTasks: const {'face_recog'},
       initialTaskParams: const {
         // Subdirector: 1001506052
-        'face_recog': {'ref_image_path': '1002120028'},
+        'face_recog': {'ref_image_path': '1050298650'},
       },
     ),
   );

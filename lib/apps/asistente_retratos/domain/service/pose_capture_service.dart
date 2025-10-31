@@ -1,12 +1,13 @@
 // lib/apps/asistente_retratos/domain/service/pose_capture_service.dart
 import 'dart:async';
 import 'dart:ui' show Offset;
+import 'dart:typed_data' show Uint8List;            // ⬅️ NEW
 import 'package:flutter/foundation.dart' show ValueListenable;
-import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoRenderer, MediaStream;
+import 'package:flutter_webrtc/flutter_webrtc.dart'
+    show RTCVideoRenderer, MediaStream;
 
-import '../model/lmk_state.dart'; // ⬅️ añade esto
+import '../model/lmk_state.dart';
 import '../model/face_recog_result.dart';
-
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
 
@@ -25,15 +26,17 @@ abstract class PoseCaptureService {
   ValueListenable<PoseFrame?> get latestFrame;
   Stream<PoseFrame> get frames;
 
-  // Accesos opcionales (puedes mantenerlos por compatibilidad)
+  // Accesos opcionales
   List<List<Offset>>? get latestFaceLandmarks;
   List<Offset>? get latestPoseLandmarks;
   List<PosePoint>? get latestPoseLandmarks3D;
 
-  // ✅ Estado reactivo con “hold-last” para evitar parpadeo
+  // Estado reactivo
   ValueListenable<LmkState> get faceLandmarks;
-  // ⬅️ NUEVO: POSE landmarks para usar con PosePainter
   ValueListenable<LmkState> get poseLandmarks;
-
   ValueListenable<FaceRecogResult?> get faceRecogResult;
+
+  // ⬇️ NEW: Images DataChannel
+  bool get imagesReady;                          // DC open?
+  Future<void> sendImageBytes(Uint8List bytes);  // send raw image bytes
 }
