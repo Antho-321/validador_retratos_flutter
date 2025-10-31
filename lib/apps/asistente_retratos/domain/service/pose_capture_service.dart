@@ -37,6 +37,11 @@ abstract class PoseCaptureService {
   ValueListenable<FaceRecogResult?> get faceRecogResult;
 
   // ⬇️ NEW: Images DataChannel
-  bool get imagesReady;                          // DC open?
-  Future<void> sendImageBytes(Uint8List bytes);  // send raw image bytes
+  bool get imagesReady; // DC open?
+  Future<void> sendImageBytes(
+    Uint8List bytes, {
+    String? requestId,
+    String? basename,
+    String? formatOverride,
+  });
 }
