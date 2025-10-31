@@ -1245,7 +1245,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         final trimmed = text?.trim() ?? '';
         Map<String, dynamic>? parsed;
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          parsed = _silence(() => jsonDecode(trimmed) as Map<String, dynamic>?);
+          parsed = _silence<Map<String, dynamic>>(
+                () => (jsonDecode(trimmed) as Map).cast<String, dynamic>()) ??
+            <String, dynamic>{};
         }
         if (parsed != null) {
           final type = (parsed['type'] as String?)?.toUpperCase();
@@ -1335,7 +1337,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       if (trimmed.isEmpty) return;
       Map<String, dynamic>? parsed;
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        parsed = _silence(() => jsonDecode(trimmed) as Map<String, dynamic>?);
+        parsed = _silence<Map<String, dynamic>>(
+              () => (jsonDecode(trimmed) as Map).cast<String, dynamic>()) ??
+            <String, dynamic>{};
       }
       if (parsed != null) {
         _handleImageCtrlPacket(parsed);
