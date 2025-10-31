@@ -388,7 +388,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   String _blake2s128(Uint8List bytes) {
-    final algo = Blake2s(16, person: utf8.encode('IMGV1'));
+    // BLAKE2s “personalization” maps to `aad` in hashlib.
+    final algo = Blake2s(16, aad: _pad8('IMGV1')); // exactly 8 bytes
     return algo.convert(bytes).hex();
   }
 
