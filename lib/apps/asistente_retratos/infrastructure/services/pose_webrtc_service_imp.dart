@@ -57,10 +57,13 @@ class _RxPending {
 
   final String requestId;
   final String format;
-  final int expectedBytes;
+  int expectedBytes;
   final BytesBuilder sink;
   bool? okHash;
   bool? okSize;
+  String? hdrHash;
+  String? hdrAlgo;
+  String? reqBase;
 }
 
 class _ParseWorker {
@@ -463,7 +466,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final type = (json['type'] as String?)?.toUpperCase();
     if (type == null) return;
 
-    if (type == 'IMGBEGIN') {
+    if (type == 'IMGBEGIN' || type == 'IMGPROC') {
       final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
       if (rid.isEmpty) return;
 
@@ -477,17 +480,27 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final bytes = (json['bytes'] is int)
           ? json['bytes'] as int
           : int.tryParse('${json['bytes']}') ?? 0;
-      _rxPending = _RxPending(rid, fmt, bytes);
-      _dcl('images RX begin id=$rid expected=$bytes fmt=$fmt');
-      return;
-    }
 
-    if (type == 'IMGPROC') {
-      final pending = _rxPending;
-      if (pending != null) {
-        pending.okHash = (json['ok_hash'] as bool?) ?? (json['okHash'] as bool?);
-        pending.okSize = (json['ok_size'] as bool?) ?? (json['okSize'] as bool?);
+      if (_rxPending == null || _rxPending!.requestId != rid) {
+        _rxPending = _RxPending(rid, fmt, bytes);
+      } else {
+        _rxPending!.expectedBytes =
+            (bytes > 0) ? bytes : _rxPending!.expectedBytes;
       }
+
+      if (type == 'IMGPROC') {
+        _rxPending!.okHash =
+            (json['ok_hash'] as bool?) ?? (json['okHash'] as bool?);
+        _rxPending!.okSize =
+            (json['ok_size'] as bool?) ?? (json['okSize'] as bool?);
+        _rxPending!.hdrHash = (json['hash'] as String?)?.toString();
+        _rxPending!.hdrAlgo =
+            (json['hash_algo'] as String?)?.toString().toLowerCase();
+        _rxPending!.reqBase =
+            (json['request_basename'] ?? json['requestBase'] ?? '').toString();
+      }
+
+      _dcl('images RX begin id=$rid expected=$bytes fmt=$fmt via=$type');
       return;
     }
 
@@ -528,19 +541,39 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     final bytes = pending.sink.takeBytes();
-    final bool? okSize;
+    bool? okSize;
     if (pending.expectedBytes > 0) {
-      final matches = received == pending.expectedBytes;
-      okSize = pending.okSize ?? matches;
+      final equal = received == pending.expectedBytes;
+      final atleast = received >= pending.expectedBytes;
+      okSize = pending.okSize ?? (equal || atleast);
     } else {
-      okSize = null;
+      okSize = pending.okSize ?? null;
     }
+
+    bool? okHash = pending.okHash;
+    if (okHash == null &&
+        (pending.hdrHash != null && pending.hdrHash!.isNotEmpty)) {
+      final algo = (pending.hdrAlgo ?? 'md5').toLowerCase();
+      String calc;
+      if (algo.startsWith('blake2s')) {
+        final d = Blake2s(16, aad: _pad8('IMGV1')).convert(bytes).bytes;
+        final sb = StringBuffer();
+        for (final x in d) {
+          sb.write(x.toRadixString(16).padLeft(2, '0'));
+        }
+        calc = sb.toString();
+      } else {
+        calc = _md5Hex(bytes);
+      }
+      okHash = pending.hdrHash!.toLowerCase() == calc.toLowerCase();
+    }
+
     if (!_imagesProcessedCtrl.isClosed) {
       _imagesProcessedCtrl.add(ImagesRx(
         requestId: pending.requestId,
         format: pending.format,
         bytes: bytes,
-        okHash: pending.okHash,
+        okHash: okHash,
         okSize: okSize,
       ));
     }
