@@ -321,11 +321,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         : 'images';
 
     _imagesIdResolved = preCreateDataChannels
-        ? (dcImagesIdOverride ??
+        ? (this.dcImagesIdOverride ??
             _dcIdFromTask(
               'images:${_primaryTask}',
-              mod: sctpStreamMod,
-              reserved: <int>{ctrlDcId},
+              mod: this.sctpStreamMod,
+              reserved: <int>{this.ctrlDcId},
               defaultTask: _primaryTask,
             ))
         : -1;
