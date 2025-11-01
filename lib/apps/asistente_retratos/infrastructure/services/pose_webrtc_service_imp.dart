@@ -144,6 +144,17 @@ Uint8List _pad8(String s) {
   return out;
 }
 
+String _normalizeLabelForDcid(String name, String defaultTask) {
+  name = name.trim().toLowerCase();
+  if (name.startsWith('results:')) {
+    final i = name.indexOf(':');
+    final task = (i >= 0 && i + 1 < name.length) ? name.substring(i + 1) : '';
+    return (task.isEmpty ? defaultTask : task).toLowerCase();
+  }
+  if (name == 'results') return defaultTask.toLowerCase();
+  return name;
+}
+
 final Random _originRandom = (() {
   try {
     return Random.secure();
@@ -237,11 +248,12 @@ int _dcIdFromTask(
 }) {
   if (mod < 2) mod = 2;
 
-  // ensure "name:task" form, like the sample (e.g., "images:pose")
-  if (!name.contains(':')) name = '$name:$defaultTask';
+  final normalized = _normalizeLabelForDcid(name, defaultTask);
 
-  // blake2s(2) with 8-byte personalization "DCMAP" via aad
-  final digest = Blake2s(2, aad: _pad8('DCMAP')).convert(utf8.encode(name)).bytes;
+  // Blake2s(2) with personalization "DCMAP" via aad (8 bytes)
+  final digest = Blake2s(2, aad: _pad8('DCMAP'))
+      .convert(utf8.encode(normalized))
+      .bytes;
   final base = digest[0] | (digest[1] << 8);
 
   // even & bounded < mod (exactly like: (base % mod) & 0xFFFE)
@@ -882,7 +894,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final lossy = RTCDataChannelInit()
       ..negotiated = true
       ..id = _dcIdFromTask(
-        task,
+        'results:$task',
         mod: sctpStreamMod,
         reserved: <int>{ctrlDcId, _imagesIdResolved},
         defaultTask: _primaryTask,
