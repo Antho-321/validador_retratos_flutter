@@ -462,6 +462,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     });
   }
 
+  int _toInt(dynamic v) {
+    if (v is int) return v;
+    if (v is num) return v.toInt();
+    if (v is String) return int.tryParse(v.trim()) ?? 0;
+    return 0;
+  }
+
   void _handleImageCtrlPacket(Map<String, dynamic> json) {
     final type = (json['type'] as String?)?.toUpperCase();
     if (type == null) return;
@@ -477,9 +484,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
 
       final fmt = (json['format'] ?? 'jpeg').toString().toLowerCase();
-      final bytes = (json['bytes'] is int)
-          ? json['bytes'] as int
-          : int.tryParse('${json['bytes']}') ?? 0;
+      // OLD:
+      // final bytes = (json['bytes'] is int)
+      //     ? json['bytes'] as int
+      //     : int.tryParse('${json['bytes']}') ?? 0;
+
+      // NEW:
+      final dynamic bfield = json['bytes'] ??
+          json['nbytes'] ??
+          json['size'] ??
+          json['length'] ??
+          json['total'];
+      final bytes = _toInt(bfield);
 
       if (_rxPending == null || _rxPending!.requestId != rid) {
         _rxPending = _RxPending(rid, fmt, bytes);
@@ -510,6 +526,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       if (current != null && rid.isNotEmpty && rid != current.requestId) {
         _warn('EOS con requestId distinto: got=$rid current=${current.requestId}');
       }
+
+      // 👇 Make EOS authoritative to avoid okSize=false due to header mismatch
+      if (_rxPending != null) {
+        final received = _rxPending!.sink.length;
+        if (_rxPending!.expectedBytes <= 0 || received < _rxPending!.expectedBytes) {
+          _rxPending!.expectedBytes = received;
+        }
+      }
+
       _emitPendingImage(force: true);
       return;
     }
@@ -541,6 +566,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     final bytes = pending.sink.takeBytes();
+
+    _dcl('images RX done id=${pending.requestId} recv=$received expect=${pending.expectedBytes} '
+      'hdrHash=${pending.hdrHash ?? '-'} algo=${pending.hdrAlgo ?? '-'}');
+
     bool? okSize;
     if (pending.expectedBytes > 0) {
       final equal = received == pending.expectedBytes;
