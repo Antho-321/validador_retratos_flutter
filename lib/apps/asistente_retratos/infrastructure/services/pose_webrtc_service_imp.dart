@@ -50,6 +50,51 @@ class _PendingImageSend {
   final DateTime started;
 }
 
+class _RxImage {
+  _RxImage({
+    required this.requestId,
+    required this.expectedBytes,
+    required this.format,
+    required this.hash,
+  }) : started = DateTime.now();
+
+  final String requestId;
+  final int expectedBytes;
+  final String format; // 'jpeg' | 'png'
+  final String hash; // md5 opcional
+  final DateTime started;
+
+  final BytesBuilder _builder = BytesBuilder(copy: false);
+  int received = 0;
+
+  void add(Uint8List chunk) {
+    _builder.add(chunk);
+    received += chunk.length;
+  }
+
+  Uint8List takeBytes() => _builder.takeBytes();
+}
+
+class ImagesRx {
+  ImagesRx({
+    required this.requestId,
+    required this.bytes,
+    required this.format,
+    required this.hash,
+    required this.okHash,
+    required this.okSize,
+    required this.elapsedMs,
+  });
+
+  final String requestId;
+  final Uint8List bytes;
+  final String format;
+  final String hash; // calculado local
+  final bool okHash; // coincide con header (si vino)
+  final bool okSize; // coincide con expectedBytes
+  final int elapsedMs; // telemetría simple
+}
+
 class _ParseWorker {
   _ParseWorker(this.task, this._onMessage)
       : _receivePort = ReceivePort(),
@@ -449,35 +494,91 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _handleImageCtrlPacket(Map<String, dynamic> json) {
     final type = (json['type'] as String?)?.toUpperCase();
     if (type == null) return;
+    // Inicio de una imagen procesada que el servidor nos envía de vuelta
     if (type == 'IMGPROC') {
-      // TODO: handle processed image payloads (not yet implemented)
+      final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      final fmt = ((json['format'] ?? 'jpeg').toString()).toLowerCase();
+      final expected = (json['bytes'] is num)
+          ? (json['bytes'] as num).toInt()
+          : int.tryParse('${json['bytes']}') ?? 0;
+      final hash = (json['hash'] ?? '').toString();
+
+      if (rid.isEmpty || expected <= 0) {
+        _warn('IMGPROC inválido: rid="$rid" bytes=$expected');
+        return;
+      }
+      if (_rxImage != null) {
+        _warn(
+            'IMGPROC recibido pero había recepción en curso (rid=${_rxImage!.requestId}), se reemplaza.');
+      }
+      _rxImage = _RxImage(
+        requestId: rid,
+        expectedBytes: expected,
+        format: (fmt == 'png' || fmt == 'jpeg') ? fmt : 'jpeg',
+        hash: hash,
+      );
+      _dcl('images RX begin id=$rid expected=$expected fmt=$fmt');
       return;
     }
+
+    // Fin explícito (por si no cerramos por tamaño exacto)
     if (type == 'EOS') {
-      return;
-    }
-    if (type != 'IMGACK' && type != 'IMGOK' && type != 'IMGBEGIN') {
-      return;
-    }
-
-    final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
-    final pending = _pendingImageSend;
-    if (pending == null || requestId.isEmpty) {
-      return;
-    }
-    if (requestId != pending.requestId) {
+      final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      _finishRxImage(expectedRid: rid);
       return;
     }
 
-    if (type == 'IMGOK') {
-      _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
-      _pendingImageSend = null;
-      _cancelImageAckTimer();
-    } else if (type == 'IMGACK') {
-      _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
-    } else if (type == 'IMGBEGIN') {
-      _dcl('images server begin id=$requestId expectedBytes=${json['bytes']}');
+    // Señales de workflow Tx -> seguimos igual que antes
+    if (type == 'IMGACK' || type == 'IMGOK' || type == 'IMGBEGIN') {
+      final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      final pending = _pendingImageSend;
+      if (pending == null || requestId.isEmpty || requestId != pending.requestId) {
+        return;
+      }
+
+      if (type == 'IMGOK') {
+        _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+        _pendingImageSend = null;
+        _cancelImageAckTimer();
+      } else if (type == 'IMGACK') {
+        _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+      } else if (type == 'IMGBEGIN') {
+        _dcl('images server begin id=$requestId expectedBytes=${json['bytes']}');
+      }
+      return;
     }
+  }
+
+  void _finishRxImage({String? expectedRid}) {
+    final rx = _rxImage;
+    if (rx == null) return;
+    if (expectedRid != null && expectedRid.isNotEmpty && expectedRid != rx.requestId) {
+      _warn('EOS con requestId distinto: got=$expectedRid current=${rx.requestId}');
+    }
+
+    final bytes = rx.takeBytes();
+    final okSize = (rx.expectedBytes <= 0) ? true : (bytes.length == rx.expectedBytes);
+    final calcHash = _md5Hex(bytes);
+    final okHash = (rx.hash.isEmpty)
+        ? true
+        : (rx.hash.toLowerCase() == calcHash.toLowerCase());
+
+    final elapsed = DateTime.now().difference(rx.started).inMilliseconds;
+    _dcl(
+        'images RX end id=${rx.requestId} size=${bytes.length} okSize=$okSize okHash=$okHash ${elapsed}ms');
+
+    if (!_imagesRxCtrl.isClosed) {
+      _imagesRxCtrl.add(ImagesRx(
+        requestId: rx.requestId,
+        bytes: bytes,
+        format: rx.format,
+        hash: calcHash,
+        okHash: okHash,
+        okSize: okSize,
+        elapsedMs: elapsed,
+      ));
+    }
+    _rxImage = null;
   }
 
   String get _primaryTask =>
@@ -572,7 +673,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   int _imagesReqSeq = 0;
   _PendingImageSend? _pendingImageSend;
+  _RxImage? _rxImage;
   Timer? _imgAckTimer;
+  final _imagesRxCtrl = StreamController<ImagesRx>.broadcast(sync: true);
+  Stream<ImagesRx> get imagesProcessed => _imagesRxCtrl.stream;
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
@@ -973,6 +1077,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();
     _cancelImageAckTimer();
+    await _imagesRxCtrl.close();
+    _rxImage = null;
     await _framesCtrl.close();
     await _jsonEventsCtrl.close();
 
@@ -1264,42 +1370,46 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _maybeSendKF();
   }
 
-  void _wireImagesDc(RTCDataChannel ch) { // <-- ADDED
-    _dcl( // <-- ADDED
-        'wireImagesDc: label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}'); // <-- ADDED
-    ch.onDataChannelState = (s) { // <-- ADDED
-      final stateName = _dcStateName(s); // <-- ADDED
-      _dcl('images: state -> $stateName'); // <-- ADDED
-      if (s == RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
-        _dcl('images: opened buffered=${ch.bufferedAmount}'); // <-- ADDED
-      } // <-- ADDED
-    }; // <-- ADDED
-    ch.onMessage = (RTCDataChannelMessage m) { // <-- ADDED
-      // We don't expect messages, but good to log if we get them. // <-- ADDED
-      if (m.isBinary) { // <-- ADDED
-        final data = m.binary; // <-- ADDED
-        final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]'; // <-- ADDED
-        _dcl('images <= binary ${data.length}B$preview'); // <-- ADDED
-      } else { // <-- ADDED
-        final text = m.text; // <-- ADDED
-        final trimmed = text?.trim() ?? '';
-        Map<String, dynamic>? parsed;
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          parsed = _silence<Map<String, dynamic>>(
-                () => (jsonDecode(trimmed) as Map).cast<String, dynamic>()) ??
+  void _wireImagesDc(RTCDataChannel ch) {
+    _dcl(
+        'wireImagesDc: label="${ch.label}" id=${ch.id} state=${_dcStateName(ch.state)} buffered=${ch.bufferedAmount}');
+    ch.onDataChannelState = (s) {
+      final stateName = _dcStateName(s);
+      _dcl('images: state -> $stateName');
+      if (s == RTCDataChannelState.RTCDataChannelOpen) {
+        _dcl('images: opened buffered=${ch.bufferedAmount}');
+      }
+    };
+    ch.onMessage = (RTCDataChannelMessage m) {
+      if (m.isBinary) {
+        final data = m.binary;
+        final rx = _rxImage;
+        if (rx == null) {
+          _warn('images <= binary ${data.length}B sin IMGPROC previo (se ignora)');
+          return;
+        }
+        rx.add(data);
+        if (rx.received >= rx.expectedBytes && rx.expectedBytes > 0) {
+          _finishRxImage();
+        }
+        return;
+      }
+
+      final text = m.text;
+      final trimmed = text?.trim() ?? '';
+      if (trimmed.isEmpty) return;
+
+      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+        final parsed = _silence<Map<String, dynamic>>(
+              () => (jsonDecode(trimmed) as Map).cast<String, dynamic>()) ??
             <String, dynamic>{};
-        }
-        if (parsed != null) {
-          final type = (parsed['type'] as String?)?.toUpperCase();
-          if (type == 'IMGPROC' || type == 'EOS') {
-            _dcl('images <= ctrl $type json ${text?.length ?? 0}B');
-            return;
-          }
-        }
-        _dcl('images <= text ${text?.length ?? 0}B "${_previewText(text)}"'); // <-- ADDED
-      } // <-- ADDED
-    }; // <-- ADDED
-  } // <-- ADDED
+        _handleImageCtrlPacket(parsed);
+        return;
+      }
+
+      _dcl('images <= text ${text?.length ?? 0}B "${_previewText(text)}"');
+    };
+  }
 
   void _wireResults(RTCDataChannel ch, {required String task}) {
     final normalized = _normalizeTask(task);
@@ -1416,6 +1526,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _dc = null;
     _ctrl = null;
     _imagesDc = null; // <-- ADDED
+    _rxImage = null;
 
     await _ensureCtrlDC();
     await _ensureImagesDcCreatedByUs(); // <-- ADDED
