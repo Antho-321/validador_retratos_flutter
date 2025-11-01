@@ -229,28 +229,30 @@ String sanitizeSdpOrigin(String sdp) {
   return sanitized;
 }
 
-int _dcIdFromTask(String name, {int mod = 1024, Set<int> reserved = const {1}}) {
+int _dcIdFromTask(
+  String name, {
+  required int mod,
+  Set<int> reserved = const {},
+  String defaultTask = 'pose',
+}) {
   if (mod < 2) mod = 2;
-  if (mod.isOdd) {
-    mod -= 1;
-    if (mod < 2) mod = 2;
+
+  // ensure "name:task" form, like the sample (e.g., "images:pose")
+  if (!name.contains(':')) name = '$name:$defaultTask';
+
+  // blake2s(2) with 8-byte personalization "DCMAP" via aad
+  final digest = Blake2s(2, aad: _pad8('DCMAP')).convert(utf8.encode(name)).bytes;
+  final base = digest[0] | (digest[1] << 8);
+
+  // even & bounded < mod (exactly like: (base % mod) & 0xFFFE)
+  var dcid = (base % mod) & 0xFFFE;
+
+  // walk by +2 while colliding with reserved
+  while (reserved.contains(dcid)) {
+    dcid = (dcid + 2) % mod;
+    dcid &= 0xFFFE;
   }
-
-  final person = _pad8('DCMAP');
-  final digestBytes = Blake2s(2, aad: person).convert(utf8.encode(name)).bytes;
-  final base = digestBytes[0] | (digestBytes[1] << 8);
-  var id = (base % mod) & ~1; // keep it even
-
-  if (reserved.isEmpty) return id;
-
-  final maxAttempts = (mod ~/ 2) + 1;
-  var attempts = 0;
-  while (reserved.contains(id) && attempts < maxAttempts) {
-    id = (id + 2) % mod;
-    id &= ~1;
-    attempts++;
-  }
-  return id;
+  return dcid;
 }
 
 class PoseWebrtcServiceImp implements PoseCaptureService {
@@ -277,10 +279,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     Map<String, Map<String, dynamic>>? initialTaskParams,
     RtcVideoEncoder? encoder,
     Set<String>? jsonTasks,
+    int? sctpStreamMod,
+    int? ctrlDcId,
+    int? dcImagesIdOverride,
   })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
         _turnPassword = turnPassword,
+        sctpStreamMod = sctpStreamMod ?? 128,
+        ctrlDcId = ctrlDcId ?? 1,
+        dcImagesIdOverride = (dcImagesIdOverride != null && dcImagesIdOverride >= 0)
+            ? dcImagesIdOverride
+            : null,
         _encoder = encoder ??
             RtcVideoEncoder(
               idealFps: idealFps,
@@ -306,9 +316,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       deliverTaskJsonEvent: _deliverTaskJsonEvent,
     );
 
-    _imagesLabelResolved =
-        preCreateDataChannels ? 'images:${_primaryTask}' : 'images';
-    _imagesIdResolved = _dcIdFromTask(_imagesLabelResolved, reserved: {1});
+    _imagesLabelResolved = preCreateDataChannels
+        ? 'images:${_primaryTask}'
+        : 'images';
+
+    _imagesIdResolved = preCreateDataChannels
+        ? (dcImagesIdOverride ??
+            _dcIdFromTask(
+              'images:${_primaryTask}',
+              mod: sctpStreamMod,
+              reserved: {ctrlDcId},
+              defaultTask: _primaryTask,
+            ))
+        : -1;
   }
 
   final Uri offerUri;
@@ -327,6 +347,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final List<String> requestedTasks;
   final Map<String, Map<String, dynamic>> taskParams;
   final int kfMinGapMs;
+  final int sctpStreamMod;
+  final int ctrlDcId;
+  final int? dcImagesIdOverride;
   final Set<String> _jsonTasks;
   late final PoseJsonParser _jsonParser;
 
@@ -858,8 +881,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Future<RTCDataChannel> _createLossyDC(String task) async {
     final lossy = RTCDataChannelInit()
       ..negotiated = true
-      // Ensure reserved IDs include control (1) and images (_imagesIdResolved)
-      ..id = _dcIdFromTask(task, reserved: {1, _imagesIdResolved})
+      ..id = _dcIdFromTask(
+        task,
+        mod: sctpStreamMod,
+        reserved: {ctrlDcId, _imagesIdResolved},
+        defaultTask: _primaryTask,
+      )
       ..ordered = false
       ..maxRetransmits = 0;
     _log(
@@ -877,9 +904,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (_ctrl.isOpen) return;
     _ctrl = await _pc!.createDataChannel('ctrl', RTCDataChannelInit()
       ..negotiated = true
-      ..id = 1
+      ..id = ctrlDcId
       ..ordered = true);
-    _log('ensureCtrlDC: negotiated=true id=1 ordered=true');
+    _log('ensureCtrlDC: negotiated=true id=$ctrlDcId ordered=true');
     final ctrl = _ctrl;
     if (ctrl != null) {
       _dcl(
