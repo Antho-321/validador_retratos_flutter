@@ -22,6 +22,7 @@ import '../model/pose_frame.dart' show PoseFrame;
 import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
+import '../model/images_rx.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_json_parser.dart';
@@ -50,49 +51,16 @@ class _PendingImageSend {
   final DateTime started;
 }
 
-class _RxImage {
-  _RxImage({
-    required this.requestId,
-    required this.expectedBytes,
-    required this.format,
-    required this.hash,
-  }) : started = DateTime.now();
+class _RxPending {
+  _RxPending(this.requestId, this.format, this.expectedBytes)
+      : sink = BytesBuilder(copy: false);
 
   final String requestId;
-  final int expectedBytes;
-  final String format; // 'jpeg' | 'png'
-  final String hash; // md5 opcional
-  final DateTime started;
-
-  final BytesBuilder _builder = BytesBuilder(copy: false);
-  int received = 0;
-
-  void add(Uint8List chunk) {
-    _builder.add(chunk);
-    received += chunk.length;
-  }
-
-  Uint8List takeBytes() => _builder.takeBytes();
-}
-
-class ImagesRx {
-  ImagesRx({
-    required this.requestId,
-    required this.bytes,
-    required this.format,
-    required this.hash,
-    required this.okHash,
-    required this.okSize,
-    required this.elapsedMs,
-  });
-
-  final String requestId;
-  final Uint8List bytes;
   final String format;
-  final String hash; // calculado local
-  final bool okHash; // coincide con header (si vino)
-  final bool okSize; // coincide con expectedBytes
-  final int elapsedMs; // telemetría simple
+  final int expectedBytes;
+  final BytesBuilder sink;
+  bool? okHash;
+  bool? okSize;
 }
 
 class _ParseWorker {
@@ -494,42 +462,46 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _handleImageCtrlPacket(Map<String, dynamic> json) {
     final type = (json['type'] as String?)?.toUpperCase();
     if (type == null) return;
-    // Inicio de una imagen procesada que el servidor nos envía de vuelta
-    if (type == 'IMGPROC') {
-      final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
-      final fmt = ((json['format'] ?? 'jpeg').toString()).toLowerCase();
-      final expected = (json['bytes'] is num)
-          ? (json['bytes'] as num).toInt()
-          : int.tryParse('${json['bytes']}') ?? 0;
-      final hash = (json['hash'] ?? '').toString();
 
-      if (rid.isEmpty || expected <= 0) {
-        _warn('IMGPROC inválido: rid="$rid" bytes=$expected');
+    if (type == 'IMGBEGIN') {
+      final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      if (rid.isEmpty) return;
+
+      final pending = _pendingImageSend;
+      if (pending != null && rid == pending.requestId) {
+        _dcl('images server begin id=$rid expectedBytes=${json['bytes']}');
         return;
       }
-      if (_rxImage != null) {
-        _warn(
-            'IMGPROC recibido pero había recepción en curso (rid=${_rxImage!.requestId}), se reemplaza.');
-      }
-      _rxImage = _RxImage(
-        requestId: rid,
-        expectedBytes: expected,
-        format: (fmt == 'png' || fmt == 'jpeg') ? fmt : 'jpeg',
-        hash: hash,
-      );
-      _dcl('images RX begin id=$rid expected=$expected fmt=$fmt');
+
+      final fmt = (json['format'] ?? 'jpeg').toString().toLowerCase();
+      final bytes = (json['bytes'] is int)
+          ? json['bytes'] as int
+          : int.tryParse('${json['bytes']}') ?? 0;
+      _rxPending = _RxPending(rid, fmt, bytes);
+      _dcl('images RX begin id=$rid expected=$bytes fmt=$fmt');
       return;
     }
 
-    // Fin explícito (por si no cerramos por tamaño exacto)
+    if (type == 'IMGPROC') {
+      final pending = _rxPending;
+      if (pending != null) {
+        pending.okHash = (json['ok_hash'] as bool?) ?? (json['okHash'] as bool?);
+        pending.okSize = (json['ok_size'] as bool?) ?? (json['okSize'] as bool?);
+      }
+      return;
+    }
+
     if (type == 'EOS') {
       final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
-      _finishRxImage(expectedRid: rid);
+      final current = _rxPending;
+      if (current != null && rid.isNotEmpty && rid != current.requestId) {
+        _warn('EOS con requestId distinto: got=$rid current=${current.requestId}');
+      }
+      _emitPendingImage(force: true);
       return;
     }
 
-    // Señales de workflow Tx -> seguimos igual que antes
-    if (type == 'IMGACK' || type == 'IMGOK' || type == 'IMGBEGIN') {
+    if (type == 'IMGACK' || type == 'IMGOK') {
       final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
       final pending = _pendingImageSend;
       if (pending == null || requestId.isEmpty || requestId != pending.requestId) {
@@ -540,45 +512,33 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
         _pendingImageSend = null;
         _cancelImageAckTimer();
-      } else if (type == 'IMGACK') {
+      } else {
         _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
-      } else if (type == 'IMGBEGIN') {
-        _dcl('images server begin id=$requestId expectedBytes=${json['bytes']}');
       }
       return;
     }
   }
 
-  void _finishRxImage({String? expectedRid}) {
-    final rx = _rxImage;
-    if (rx == null) return;
-    if (expectedRid != null && expectedRid.isNotEmpty && expectedRid != rx.requestId) {
-      _warn('EOS con requestId distinto: got=$expectedRid current=${rx.requestId}');
+  void _emitPendingImage({bool force = false}) {
+    final pending = _rxPending;
+    if (pending == null) return;
+    final received = pending.sink.length;
+    if (!force && pending.expectedBytes > 0 && received < pending.expectedBytes) {
+      return;
     }
 
-    final bytes = rx.takeBytes();
-    final okSize = (rx.expectedBytes <= 0) ? true : (bytes.length == rx.expectedBytes);
-    final calcHash = _md5Hex(bytes);
-    final okHash = (rx.hash.isEmpty)
-        ? true
-        : (rx.hash.toLowerCase() == calcHash.toLowerCase());
-
-    final elapsed = DateTime.now().difference(rx.started).inMilliseconds;
-    _dcl(
-        'images RX end id=${rx.requestId} size=${bytes.length} okSize=$okSize okHash=$okHash ${elapsed}ms');
-
-    if (!_imagesRxCtrl.isClosed) {
-      _imagesRxCtrl.add(ImagesRx(
-        requestId: rx.requestId,
+    final bytes = pending.sink.takeBytes();
+    final okSize = pending.okSize ?? (received == pending.expectedBytes);
+    if (!_imagesProcessedCtrl.isClosed) {
+      _imagesProcessedCtrl.add(ImagesRx(
+        requestId: pending.requestId,
+        format: pending.format,
         bytes: bytes,
-        format: rx.format,
-        hash: calcHash,
-        okHash: okHash,
+        okHash: pending.okHash,
         okSize: okSize,
-        elapsedMs: elapsed,
       ));
     }
-    _rxImage = null;
+    _rxPending = null;
   }
 
   String get _primaryTask =>
@@ -673,10 +633,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   int _imagesReqSeq = 0;
   _PendingImageSend? _pendingImageSend;
-  _RxImage? _rxImage;
+  _RxPending? _rxPending;
   Timer? _imgAckTimer;
-  final _imagesRxCtrl = StreamController<ImagesRx>.broadcast(sync: true);
-  Stream<ImagesRx> get imagesProcessed => _imagesRxCtrl.stream;
+  final _imagesProcessedCtrl =
+      StreamController<ImagesRx>.broadcast(sync: true);
+  @override
+  Stream<ImagesRx> get imagesProcessed => _imagesProcessedCtrl.stream;
 
   int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
 
@@ -1077,8 +1039,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _rtpStatsTimer?.cancel();
     _dcGuardTimer?.cancel();
     _cancelImageAckTimer();
-    await _imagesRxCtrl.close();
-    _rxImage = null;
+    await _imagesProcessedCtrl.close();
+    _rxPending = null;
     await _framesCtrl.close();
     await _jsonEventsCtrl.close();
 
@@ -1382,32 +1344,35 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     };
     ch.onMessage = (RTCDataChannelMessage m) {
       if (m.isBinary) {
-        final data = m.binary;
-        final rx = _rxImage;
-        if (rx == null) {
-          _warn('images <= binary ${data.length}B sin IMGPROC previo (se ignora)');
-          return;
-        }
-        rx.add(data);
-        if (rx.received >= rx.expectedBytes && rx.expectedBytes > 0) {
-          _finishRxImage();
+        final pending = _rxPending;
+        if (pending != null) {
+          pending.sink.add(m.binary);
+          if (pending.expectedBytes <= 0 ||
+              pending.sink.length >= pending.expectedBytes) {
+            _emitPendingImage();
+          }
+        } else {
+          _warn('images <= binary ${m.binary.length}B sin IMGBEGIN previo (se ignora)');
         }
         return;
       }
 
-      final text = m.text;
-      final trimmed = text?.trim() ?? '';
-      if (trimmed.isEmpty) return;
+      final text = m.text?.trim() ?? '';
+      if (text.isEmpty) return;
 
-      if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-        final parsed = _silence<Map<String, dynamic>>(
-              () => (jsonDecode(trimmed) as Map).cast<String, dynamic>()) ??
+      Map<String, dynamic>? parsed;
+      if (text.startsWith('{') && text.endsWith('}')) {
+        parsed = _silence<Map<String, dynamic>>(
+              () => (jsonDecode(text) as Map).cast<String, dynamic>()) ??
             <String, dynamic>{};
-        _handleImageCtrlPacket(parsed);
+      }
+      if (parsed == null) {
+        _dcl('images <= text ${m.text?.length ?? 0}B "${_previewText(m.text)}"');
         return;
       }
 
-      _dcl('images <= text ${text?.length ?? 0}B "${_previewText(text)}"');
+      _handleImageCtrlPacket(parsed);
+      return;
     };
   }
 
@@ -1526,7 +1491,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _dc = null;
     _ctrl = null;
     _imagesDc = null; // <-- ADDED
-    _rxImage = null;
+    _rxPending = null;
 
     await _ensureCtrlDC();
     await _ensureImagesDcCreatedByUs(); // <-- ADDED
