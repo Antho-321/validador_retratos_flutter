@@ -325,7 +325,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             _dcIdFromTask(
               'images:${_primaryTask}',
               mod: sctpStreamMod,
-              reserved: {ctrlDcId},
+              reserved: <int>{ctrlDcId},
               defaultTask: _primaryTask,
             ))
         : -1;
@@ -884,7 +884,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       ..id = _dcIdFromTask(
         task,
         mod: sctpStreamMod,
-        reserved: {ctrlDcId, _imagesIdResolved},
+        reserved: <int>{ctrlDcId, _imagesIdResolved},
         defaultTask: _primaryTask,
       )
       ..ordered = false
