@@ -528,7 +528,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
 
     final bytes = pending.sink.takeBytes();
-    final okSize = pending.okSize ?? (received == pending.expectedBytes);
+    final bool? okSize;
+    if (pending.expectedBytes > 0) {
+      final matches = received == pending.expectedBytes;
+      okSize = pending.okSize ?? matches;
+    } else {
+      okSize = null;
+    }
     if (!_imagesProcessedCtrl.isClosed) {
       _imagesProcessedCtrl.add(ImagesRx(
         requestId: pending.requestId,
