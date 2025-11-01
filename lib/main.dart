@@ -38,7 +38,7 @@ Future<void> main() async {
     // ip casa: 192.168.100.7
     // ip DDTI: 172.16.14.238
     // EDUROAM: 172.20.152.53
-    const offerUrl = 'http://172.20.152.53:8000/webrtc/offer';
+    const offerUrl = 'http://192.168.100.7:8000/webrtc/offer';
 
     // 1) Registrar dependencias (pasa la config del servicio aquí)
     registrarDependenciasPosture(
