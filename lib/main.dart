@@ -8,6 +8,7 @@ import 'package:get_it/get_it.dart';
 
 import 'apps/asistente_retratos/dependencias_posture.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
+import 'apps/asistente_retratos/infrastructure/services/pose_webrtc_service_imp.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart';
 
@@ -48,13 +49,20 @@ Future<void> main() async {
 
     // 2) Obtener el servicio por contrato e iniciarlo
     final poseService = GetIt.I<PoseCaptureService>();
+    final poseImpl = GetIt.I<PoseWebrtcServiceImp>();
     await poseService.init();
     unawaited(poseService.connect());
+
+    final imagesProcessedSub = poseImpl.imagesProcessed.listen((metadata) {
+      debugPrint('Pose metadata: $metadata');
+      // TODO(any): add additional processing logic if needed.
+    });
 
     // 3) Lanzar la app
     runApp(PoseApp(
       service: poseService,
       validationsEnabled: validationsEnabled,
+      imagesProcessedSubscription: imagesProcessedSub,
     ));
   }, (Object error, StackTrace stack) {
     // ignore: avoid_print
@@ -67,10 +75,12 @@ class PoseApp extends StatefulWidget {
     super.key,
     required this.service,
     required this.validationsEnabled,
+    required this.imagesProcessedSubscription,
   });
 
   final PoseCaptureService service;
   final bool validationsEnabled;
+  final StreamSubscription<dynamic> imagesProcessedSubscription;
 
   @override
   State<PoseApp> createState() => _PoseAppState();
@@ -79,6 +89,7 @@ class PoseApp extends StatefulWidget {
 class _PoseAppState extends State<PoseApp> {
   @override
   void dispose() {
+    widget.imagesProcessedSubscription.cancel();
     widget.service.dispose();
     super.dispose();
   }
