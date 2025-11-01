@@ -1,15 +1,16 @@
 // lib/apps/asistente_retratos/domain/service/pose_capture_service.dart
 import 'dart:async';
 import 'dart:ui' show Offset;
-import 'dart:typed_data' show Uint8List;            // ⬅️ NEW
+import 'dart:typed_data' show Uint8List;
 import 'package:flutter/foundation.dart' show ValueListenable;
-import 'package:flutter_webrtc/flutter_webrtc.dart'
-    show RTCVideoRenderer, MediaStream;
+import 'package:flutter_webrtc/flutter_webrtc.dart' show RTCVideoRenderer, MediaStream;
 
 import '../model/lmk_state.dart';
 import '../model/face_recog_result.dart';
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
+// ⬇️ NUEVO: el tipo del stream
+import '../../infrastructure/model/images_rx.dart' show ImagesRx;
 
 abstract class PoseCaptureService {
   Future<void> init();
@@ -36,12 +37,13 @@ abstract class PoseCaptureService {
   ValueListenable<LmkState> get poseLandmarks;
   ValueListenable<FaceRecogResult?> get faceRecogResult;
 
-  // ⬇️ NEW: Images DataChannel
+  // ⬇️ NUEVO: Images DataChannel
+  Stream<ImagesRx> get imagesProcessed;                 // <<--- AÑADIR
   bool get imagesReady; // DC open?
   Future<void> sendImageBytes(
     Uint8List bytes, {
-    String? requestId,
-    String? basename,
-    String? formatOverride,
+      String? requestId,
+      String? basename,
+      String? formatOverride,
   });
 }
