@@ -178,6 +178,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final bytes = ctl.capturedPng;
     if (bytes == null) return;
 
+    const double resizePhaseWeight = 0.2; // treat resize as 20% of the progress bar
+
+    setState(() {
+      _isDownloading = true;
+      _downloadProgress = 0.0;
+    });
+
     late final Uint8List resizedBytes;
     try {
       resizedBytes = await _resizeCaptureForDownload(
@@ -191,6 +198,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         // ignore: avoid_print
         print('[pose] Failed to prepare capture for download: $e');
       }
+      setState(() {
+        _isDownloading = false;
+        _downloadProgress = 0.0;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('No se pudo preparar la foto para descargar. Intenta de nuevo.'),
@@ -199,10 +210,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       return;
     }
 
-    setState(() {
-      _isDownloading = true;
-      _downloadProgress = 0.0;
-    });
+    if (!mounted) return;
+
+    setState(() => _downloadProgress = resizePhaseWeight);
 
     final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
     final success = await saveCapturedPortrait(
@@ -210,7 +220,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       filename: filename,
       onProgress: (p) {
         if (!mounted) return;
-        setState(() => _downloadProgress = p.clamp(0, 1));
+        final scaled =
+            resizePhaseWeight + p.clamp(0, 1) * (1 - resizePhaseWeight);
+        setState(() => _downloadProgress = scaled);
       },
     );
 
