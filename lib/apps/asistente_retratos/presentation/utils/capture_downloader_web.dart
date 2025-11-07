@@ -4,6 +4,17 @@ import 'dart:typed_data';
 
 import 'capture_download_types.dart';
 
+String _inferMimeType(String filename) {
+  final lower = filename.toLowerCase();
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+  if (lower.endsWith('.png')) {
+    return 'image/png';
+  }
+  return 'application/octet-stream';
+}
+
 Future<bool> saveCaptured(
   Uint8List bytes, {
   required String filename,
@@ -11,7 +22,7 @@ Future<bool> saveCaptured(
 }) async {
   onProgress?.call(0.25);
 
-  final blob = html.Blob([bytes]);
+  final blob = html.Blob([bytes], _inferMimeType(filename));
   final url = html.Url.createObjectUrlFromBlob(blob);
   final anchor = html.AnchorElement(href: url)
     ..download = filename

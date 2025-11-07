@@ -7,7 +7,7 @@ import 'capture_downloader_stub.dart'
 
 Future<bool> saveCapturedPortrait(
   Uint8List bytes, {
-  String filename = 'retrato.png',
+  String filename = 'retrato.jpg',
   SaveProgress? onProgress,
 }) {
   onProgress?.call(0.0);

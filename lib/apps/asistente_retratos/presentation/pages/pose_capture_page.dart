@@ -5,9 +5,11 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat;
 
+import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:image/image.dart' as img;
 
 import '../../domain/service/pose_capture_service.dart';
 
@@ -84,6 +86,27 @@ class _ProgressBadge extends StatelessWidget {
   }
 }
 
+bool _looksLikeJpeg(Uint8List bytes) =>
+    bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
+
+Future<Uint8List> _encodeCaptureAsJpg(Uint8List bytes) async {
+  if (_looksLikeJpeg(bytes)) return bytes;
+  try {
+    return await compute(_encodeJpgOnWorker, bytes);
+  } catch (_) {
+    return _encodeJpgOnWorker(bytes);
+  }
+}
+
+Uint8List _encodeJpgOnWorker(Uint8List bytes) {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) {
+    throw StateError('No se pudo decodificar la captura.');
+  }
+  final encoded = img.encodeJpg(decoded, quality: 95);
+  return Uint8List.fromList(encoded);
+}
+
 class _PoseCapturePageState extends State<PoseCapturePage> {
   final GlobalKey _previewKey = GlobalKey();
   late final PoseCaptureController ctl;
@@ -132,14 +155,31 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final bytes = ctl.capturedPng;
     if (bytes == null) return;
 
+    late final Uint8List jpgBytes;
+    try {
+      jpgBytes = await _encodeCaptureAsJpg(bytes);
+    } catch (e) {
+      if (!mounted) return;
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[pose] Failed to convert capture to JPG: $e');
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No se pudo convertir la foto a JPG. Intenta de nuevo.'),
+        ),
+      );
+      return;
+    }
+
     setState(() {
       _isDownloading = true;
       _downloadProgress = 0.0;
     });
 
-    final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.png';
+    final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
     final success = await saveCapturedPortrait(
-      bytes,
+      jpgBytes,
       filename: filename,
       onProgress: (p) {
         if (!mounted) return;
