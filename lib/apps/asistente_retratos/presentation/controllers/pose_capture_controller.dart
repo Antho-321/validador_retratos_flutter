@@ -12,6 +12,7 @@ import 'package:flutter/painting.dart' show BoxFit;
 
 import '../../domain/service/pose_capture_service.dart';
 import '../../domain/model/face_recog_result.dart';
+import '../../infrastructure/model/images_rx.dart'; // <-- RUTA CORREGIDA
 import '../widgets/portrait_validator_hud.dart'
     show PortraitValidatorHUD, PortraitUiController, PortraitUiModel, Tri;
 import '../widgets/frame_sequence_overlay.dart'
@@ -421,35 +422,78 @@ class PoseCaptureController extends ChangeNotifier {
           // puedes mantener force:false aquí
         );
       },
+      
+      // 2. <-- BLOQUE onFire ACTUALIZADO
       onFire: () async {
         // Disparo/captura
         isCapturing = true;
         notifyListeners();
 
         final bytes = await _Capture.tryAll(poseService, _fallbackSnapshot);
-        if (bytes != null && bytes.isNotEmpty) {
-          capturedPng = bytes;
 
-          // ⬇️ NEW: enviar la imagen al servidor por el DataChannel "images"
-          try {
-            if (poseService.imagesReady) {
-              await poseService.sendImageBytes(bytes);
-            } else {
-              if (kDebugMode) {
-                print('[pose] images DC not ready; skipping send');
-              }
-            }
-          } catch (e) {
-            if (kDebugMode) {
-              print('[pose] images DC send failed: $e');
-            }
+        // Verifica si la captura local falló
+        if (bytes == null || bytes.isEmpty) {
+          if (kDebugMode) {
+            print('[pose] Local capture failed (bytes empty)');
           }
+          isCapturing = false;
+          _readySince = null;
+          notifyListeners();
+          return; // Aborta
         }
 
-        isCapturing = false;
-        _readySince = null;
-        notifyListeners();
+        // ⬇️ NEW: Enviar, esperar respuesta, y asignar.
+        
+        final String captureId = 'cap_${DateTime.now().millisecondsSinceEpoch}';
+        
+        // Prepara la escucha de la respuesta
+        final responseFuture = poseService.imagesProcessed.firstWhere(
+          (imgRx) => imgRx.requestId == captureId,
+        );
+
+        try {
+          // Intenta enviar la imagen
+          if (poseService.imagesReady) {
+            await poseService.sendImageBytes(bytes, requestId: captureId);
+          } else {
+            // Fallback 1: Canal no listo. Usa local.
+            if (kDebugMode) {
+              print('[pose] images DC not ready; using local fallback');
+            }
+            capturedPng = bytes; 
+            return; // Sale del 'try', el 'finally' se ejecutará
+          }
+
+          // Espera la respuesta del servidor (con timeout)
+          final ImagesRx serverResponse = await responseFuture.timeout(
+            const Duration(seconds: 10), // Timeout de 10s
+          );
+          
+          // Éxito: Asigna la imagen procesada del servidor
+          if (serverResponse.bytes.isNotEmpty) {
+             capturedPng = serverResponse.bytes;
+          } else {
+             // Respuesta vacía, usa local
+             if (kDebugMode) print('[pose] Server response empty; using local fallback');
+             capturedPng = bytes;
+          }
+
+        } catch (e) {
+          // Fallback 2: Error en envío/espera (ej. TimeoutException)
+          if (kDebugMode) {
+            print('[pose] Failed to get server response, using local fallback: $e');
+          }
+          capturedPng = bytes; // Usa local
+        } finally {
+          // Pase lo que pase (éxito, error, canal no listo), 
+          // actualiza la UI para mostrar la imagen (sea cual sea)
+          isCapturing = false;
+          _readySince = null;
+          notifyListeners();
+        }
       },
+      // FIN DEL BLOQUE onFire ACTUALIZADO
+
       onAbort: () {
         // Limpia HUD de countdown si aborta
         final cur = hud.value;
