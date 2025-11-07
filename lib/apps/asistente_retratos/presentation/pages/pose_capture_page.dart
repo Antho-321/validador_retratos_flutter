@@ -86,25 +86,48 @@ class _ProgressBadge extends StatelessWidget {
   }
 }
 
-bool _looksLikeJpeg(Uint8List bytes) =>
-    bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF;
-
-Future<Uint8List> _encodeCaptureAsJpg(Uint8List bytes) async {
-  if (_looksLikeJpeg(bytes)) return bytes;
+Future<Uint8List> _resizeCaptureForDownload(
+  Uint8List bytes, {
+  int width = 375,
+  int height = 425,
+}) async {
+  final payload = <String, Object?>{
+    'bytes': bytes,
+    'width': width,
+    'height': height,
+  };
   try {
-    return await compute(_encodeJpgOnWorker, bytes);
+    return await compute(_resizeCaptureWorker, payload);
   } catch (_) {
-    return _encodeJpgOnWorker(bytes);
+    return _resizeCaptureWorker(payload);
   }
 }
 
-Uint8List _encodeJpgOnWorker(Uint8List bytes) {
+Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
+  final bytes = payload['bytes'] as Uint8List;
+  final width = payload['width'] as int;
+  final height = payload['height'] as int;
+
   final decoded = img.decodeImage(bytes);
   if (decoded == null) {
     throw StateError('No se pudo decodificar la captura.');
   }
-  final encoded = img.encodeJpg(decoded, quality: 95);
+
+  final resized = _resizeImage(decoded, width, height);
+  final encoded = img.encodeJpg(resized, quality: 95);
   return Uint8List.fromList(encoded);
+}
+
+img.Image _resizeImage(img.Image source, int width, int height) {
+  if (source.width == width && source.height == height) {
+    return source;
+  }
+  return img.copyResize(
+    source,
+    width: width,
+    height: height,
+    interpolation: img.Interpolation.average,
+  );
 }
 
 class _PoseCapturePageState extends State<PoseCapturePage> {
@@ -155,18 +178,22 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final bytes = ctl.capturedPng;
     if (bytes == null) return;
 
-    late final Uint8List jpgBytes;
+    late final Uint8List resizedBytes;
     try {
-      jpgBytes = await _encodeCaptureAsJpg(bytes);
+      resizedBytes = await _resizeCaptureForDownload(
+        bytes,
+        width: 375,
+        height: 425,
+      );
     } catch (e) {
       if (!mounted) return;
       if (kDebugMode) {
         // ignore: avoid_print
-        print('[pose] Failed to convert capture to JPG: $e');
+        print('[pose] Failed to prepare capture for download: $e');
       }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('No se pudo convertir la foto a JPG. Intenta de nuevo.'),
+          content: Text('No se pudo preparar la foto para descargar. Intenta de nuevo.'),
         ),
       );
       return;
@@ -179,7 +206,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
     final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
     final success = await saveCapturedPortrait(
-      jpgBytes,
+      resizedBytes,
       filename: filename,
       onProgress: (p) {
         if (!mounted) return;
