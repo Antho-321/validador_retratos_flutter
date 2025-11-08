@@ -136,6 +136,17 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   bool _isDownloading = false;
   double _downloadProgress = 0.0;
 
+  String _resolveDownloadFilename() {
+    final svc = widget.poseService;
+    if (svc is PoseWebrtcServiceImp) {
+      final ref = svc.taskParams['face_recog']?['ref_image_path'];
+      if (ref is String && ref.trim().isNotEmpty) {
+        return ref.trim();
+      }
+    }
+    return 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -214,7 +225,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
     setState(() => _downloadProgress = resizePhaseWeight);
 
-    final filename = 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    final filename = _resolveDownloadFilename();
     final success = await saveCapturedPortrait(
       resizedBytes,
       filename: filename,
