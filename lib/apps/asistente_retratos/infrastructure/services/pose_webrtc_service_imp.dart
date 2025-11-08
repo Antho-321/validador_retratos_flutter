@@ -36,6 +36,36 @@ class _PendingEmit {
   const _PendingEmit(this.frame, this.kind, this.seq);
 }
 
+class _ResolutionTarget {
+  const _ResolutionTarget(this.width, this.height);
+  final int width;
+  final int height;
+}
+
+const List<Size> _defaultResolutionHints = <Size>[
+  Size(4032, 3024),
+  Size(3840, 2160),
+  Size(3264, 2448),
+  Size(2560, 1600),
+  Size(2560, 1440),
+  Size(2304, 1296),
+  Size(1920, 1440),
+  Size(1920, 1080),
+  Size(1600, 1200),
+  Size(1600, 900),
+  Size(1440, 1080),
+  Size(1280, 960),
+  Size(1280, 720),
+  Size(1024, 768),
+  Size(960, 720),
+  Size(960, 540),
+  Size(854, 480),
+  Size(800, 600),
+  Size(768, 576),
+  Size(640, 480),
+  Size(640, 360),
+];
+
 class _PendingImageSend {
   _PendingImageSend({
     required this.requestId,
@@ -291,6 +321,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.idealHeight = 360,
     this.idealFps = 30,
     this.maxBitrateKbps = 800,
+    this.preferBestResolution = true,
+    List<Size>? captureResolutionHints,
     String? stunUrl,
     String? turnUrl,
     String? turnUsername,
@@ -310,7 +342,15 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     int? sctpStreamMod,
     int? ctrlDcId,
     int? dcImagesIdOverride,
-  })  : _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
+  })  : _captureResolutionHints =
+            (captureResolutionHints != null && captureResolutionHints.isNotEmpty)
+                ? List<Size>.unmodifiable(
+                    captureResolutionHints
+                        .where((s) => s.width > 0 && s.height > 0)
+                        .map((s) => Size(s.width, s.height)),
+                  )
+                : null,
+        _stunUrl = stunUrl ?? 'stun:stun.l.google.com:19302',
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
         _turnPassword = turnPassword,
@@ -365,6 +405,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final int idealHeight;
   final int idealFps;
   final int maxBitrateKbps;
+  final bool preferBestResolution;
   final bool preferHevc;
   final bool preCreateDataChannels;
   final int negotiatedFallbackAfterSeconds;
@@ -373,6 +414,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool stripRtxAndNackFromSdp;
   final bool keepTransportCcOnly;
   final List<String> requestedTasks;
+  final List<Size>? _captureResolutionHints;
   final Map<String, Map<String, dynamic>> taskParams;
   final int kfMinGapMs;
   final int sctpStreamMod;
@@ -842,20 +884,16 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
   // ===========================================================================
 
-  @override
-  Future<void> init() async {
-    await _localRenderer.initialize();
-    await _remoteRenderer.initialize();
-
-    final mediaConstraints = <String, dynamic>{
+  Map<String, dynamic> _videoConstraintsFor(int width, int height) {
+    return {
       'audio': false,
       'video': {
         'facingMode': facingMode,
         'mandatory': {
-          'minWidth': '$idealWidth',
-          'maxWidth': '$idealWidth',
-          'minHeight': '$idealHeight',
-          'maxHeight': '$idealHeight',
+          'minWidth': '$width',
+          'maxWidth': '$width',
+          'minHeight': '$height',
+          'maxHeight': '$height',
           'minFrameRate': '$idealFps',
           'maxFrameRate': '$idealFps',
         },
@@ -863,8 +901,62 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         'degradationPreference': 'maintain-framerate',
       },
     };
+  }
 
-    _localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
+  Iterable<_ResolutionTarget> _preferredResolutionTargets() sync* {
+    final wantLandscape = idealWidth >= idealHeight;
+    final seen = <String>{};
+    final seeds = <Size>[
+      if (_captureResolutionHints != null) ..._captureResolutionHints!,
+      ..._defaultResolutionHints,
+      Size(idealWidth.toDouble(), idealHeight.toDouble()),
+    ];
+
+    for (final seed in seeds) {
+      if (seed.width <= 0 || seed.height <= 0) continue;
+      final bool isLandscape = seed.width >= seed.height;
+      final double resolvedW = wantLandscape == isLandscape ? seed.width : seed.height;
+      final double resolvedH = wantLandscape == isLandscape ? seed.height : seed.width;
+      final int width = resolvedW.round();
+      final int height = resolvedH.round();
+      if (width <= 0 || height <= 0) continue;
+      final key = '${width}x$height';
+      if (seen.add(key)) {
+        yield _ResolutionTarget(width, height);
+      }
+    }
+  }
+
+  Future<MediaStream> _createPreferredLocalStream() async {
+    final Iterable<_ResolutionTarget> targets = preferBestResolution
+        ? _preferredResolutionTargets()
+        : <_ResolutionTarget>[ _ResolutionTarget(idealWidth, idealHeight) ];
+
+    Object? lastError;
+    for (final target in targets) {
+      try {
+        final stream = await navigator.mediaDevices
+            .getUserMedia(_videoConstraintsFor(target.width, target.height));
+        _log('Local camera initialized at ${target.width}x${target.height}');
+        return stream;
+      } catch (error) {
+        lastError = error;
+        _log('Resolution ${target.width}x${target.height} unavailable: $error');
+      }
+    }
+
+    if (lastError != null) {
+      throw lastError;
+    }
+    throw StateError('No capture resolution candidates available');
+  }
+
+  @override
+  Future<void> init() async {
+    await _localRenderer.initialize();
+    await _remoteRenderer.initialize();
+
+    _localStream = await _createPreferredLocalStream();
     _localRenderer.srcObject = _localStream;
 
     void _updateSize() {
