@@ -415,6 +415,33 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                 ),
                               ),
                             ),
+                            if (ctl.isProcessingCapture)
+                              Positioned.fill(
+                                child: IgnorePointer(
+                                  ignoring: true,
+                                  child: Container(
+                                    color: Colors.black38,
+                                    child: const Center(
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          CircularProgressIndicator(
+                                            color: Colors.white,
+                                          ),
+                                          SizedBox(height: 12),
+                                          Text(
+                                            'Procesando…',
+                                            style: TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
                             Positioned(
                               bottom: 32,
                               left: 0,
@@ -422,7 +449,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               child: SafeArea(
                                 child: Center(
                                   child: FilledButton.icon(
-                                    onPressed: _isDownloading
+                                    onPressed: (_isDownloading ||
+                                            ctl.isProcessingCapture)
                                         ? null
                                         : _downloadCapturedWithProgress,
                                     icon: AnimatedSwitcher(
@@ -440,7 +468,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                     label: Text(
                                         _isDownloading
                                             ? 'Descargando…'
-                                            : 'Descargar foto'),
+                                            : (ctl.isProcessingCapture
+                                                ? 'Procesando…'
+                                                : 'Descargar foto')),
                                   ),
                                 ),
                               ),

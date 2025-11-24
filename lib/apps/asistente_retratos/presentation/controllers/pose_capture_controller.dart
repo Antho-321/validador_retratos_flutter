@@ -427,6 +427,7 @@ class PoseCaptureController extends ChangeNotifier {
       onFire: () async {
         // Disparo/captura
         isCapturing = true;
+        isProcessingCapture = false;
         notifyListeners();
 
         final bytes = await _Capture.tryAll(poseService, _fallbackSnapshot);
@@ -437,36 +438,43 @@ class PoseCaptureController extends ChangeNotifier {
             print('[pose] Local capture failed (bytes empty)');
           }
           isCapturing = false;
+          isProcessingCapture = false;
           _readySince = null;
           notifyListeners();
           return; // Aborta
         }
 
-        // ⬇️ NEW: Enviar, esperar respuesta, y asignar.
-        
-        final String captureId = 'cap_${DateTime.now().millisecondsSinceEpoch}';
-        
-        // Prepara la escucha de la respuesta
-        final responseFuture = poseService.imagesProcessed.firstWhere(
-          (imgRx) => imgRx.requestId == captureId,
-        );
+        // Muestra la captura local de inmediato
+        capturedPng = bytes;
+        notifyListeners();
 
+        // ⬇️ NEW: Enviar, esperar respuesta, y asignar.
         try {
-          // Intenta enviar la imagen
-          if (poseService.imagesReady) {
-            await poseService.sendImageBytes(bytes, requestId: captureId);
-          } else {
-            // Fallback 1: Canal no listo. Usa local.
+          // Si el canal no está listo, deja la captura local y sal.
+          if (!poseService.imagesReady) {
             if (kDebugMode) {
               print('[pose] images DC not ready; using local fallback');
             }
-            capturedPng = bytes; 
             return; // Sale del 'try', el 'finally' se ejecutará
           }
 
+          final String captureId =
+              'cap_${DateTime.now().millisecondsSinceEpoch}';
+          // Prepara la escucha de la respuesta
+          final responseFuture = poseService.imagesProcessed.firstWhere(
+            (imgRx) => imgRx.requestId == captureId,
+          );
+
+          // Activa loader mientras esperamos al servidor
+          isProcessingCapture = true;
+          notifyListeners();
+
+          // Intenta enviar la imagen
+          await poseService.sendImageBytes(bytes, requestId: captureId);
+
           // Espera la respuesta del servidor (con timeout)
           final ImagesRx serverResponse = await responseFuture.timeout(
-            const Duration(seconds: 10), // Timeout de 10s
+            const Duration(seconds: 12), // Timeout acotado a ~11-12s
           );
           
           // Éxito: Asigna la imagen procesada del servidor
@@ -475,7 +483,7 @@ class PoseCaptureController extends ChangeNotifier {
           } else {
              // Respuesta vacía, usa local
              if (kDebugMode) print('[pose] Server response empty; using local fallback');
-             capturedPng = bytes;
+             // mantenemos la captura local ya visible
           }
 
         } catch (e) {
@@ -483,11 +491,11 @@ class PoseCaptureController extends ChangeNotifier {
           if (kDebugMode) {
             print('[pose] Failed to get server response, using local fallback: $e');
           }
-          capturedPng = bytes; // Usa local
         } finally {
           // Pase lo que pase (éxito, error, canal no listo), 
           // actualiza la UI para mostrar la imagen (sea cual sea)
           isCapturing = false;
+          isProcessingCapture = false;
           _readySince = null;
           notifyListeners();
         }
@@ -570,6 +578,7 @@ class PoseCaptureController extends ChangeNotifier {
   // Snapshot state (exposed)
   Uint8List? capturedPng; // captured bytes (from WebRTC track or boundary fallback)
   bool isCapturing = false; // Capture-mode flag to hide preview/HUD instantly at T=0
+  bool isProcessingCapture = false; // waiting for server-processed image
 
   // Face recognition gating state
   bool _faceRecogMatch = false;
@@ -756,6 +765,7 @@ class PoseCaptureController extends ChangeNotifier {
   void closeCaptured() {
     capturedPng = null;
     isCapturing = false;
+    isProcessingCapture = false;
     _readySince = null;
     notifyListeners();
   }
