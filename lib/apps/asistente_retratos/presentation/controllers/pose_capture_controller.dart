@@ -304,15 +304,17 @@ class _Countdown {
       // Early fire al llegar a "1"
       if (!firedAtOne && seconds == 1) {
         firedAtOne = true;
-        await onFire();
         stop();
+        await onFire();
         return;
       }
 
       // Fin normal
       if (!firedAtOne && elapsedScaled >= totalScaledMs) {
-        await onFire();
+        firedAtOne = true;
         stop();
+        await onFire();
+        return;
       }
     });
   }
