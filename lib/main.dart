@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart'; // ⬅️ para FlutterError, debugPrint, etc.
 import 'package:get_it/get_it.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'apps/asistente_retratos/dependencias_posture.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
@@ -34,12 +35,17 @@ Future<void> main() async {
     WidgetsFlutterBinding.ensureInitialized();
     await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
+    await dotenv.load(fileName: ".env");
+
     // Flags por entorno (puedes hardcodear si quieres)
     const bool validationsEnabled = true;
     // ip casa: 192.168.100.7
     // ip DDTI: 172.16.14.238
     // EDUROAM: 172.20.152.53
-    const offerUrl = 'http://192.168.100.6:8000/webrtc/offer';
+    final offerUrl = dotenv.env['WEBRTC_OFFER_URL'];
+    if (offerUrl == null) {
+      throw Exception('WEBRTC_OFFER_URL not found in .env');
+    }
 
     // 1) Registrar dependencias (pasa la config del servicio aquí)
     registrarDependenciasPosture(
