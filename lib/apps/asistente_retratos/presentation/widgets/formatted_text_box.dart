@@ -13,6 +13,8 @@ class FormattedTextBox extends StatefulWidget {
     this.maxHeight,
     this.child,
     this.copyText,
+    this.collapsible = false,
+    this.initiallyExpanded = true,
   });
 
   final String text;
@@ -20,6 +22,8 @@ class FormattedTextBox extends StatefulWidget {
   final double? maxHeight;
   final Widget? child;
   final String? copyText;
+  final bool collapsible;
+  final bool initiallyExpanded;
 
   @override
   State<FormattedTextBox> createState() => _FormattedTextBoxState();
@@ -27,11 +31,17 @@ class FormattedTextBox extends StatefulWidget {
 
 class _FormattedTextBoxState extends State<FormattedTextBox> {
   late final ScrollController _scrollController = ScrollController();
+  late bool _expanded = widget.initiallyExpanded;
 
   @override
   void dispose() {
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _toggleExpanded() {
+    if (!widget.collapsible) return;
+    setState(() => _expanded = !_expanded);
   }
 
   @override
@@ -87,6 +97,8 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
       ),
     );
 
+    final shouldShowContent = !widget.collapsible || _expanded;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(16),
       child: BackdropFilter(
@@ -103,6 +115,9 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
             children: [
               _Header(
                 title: widget.title,
+                collapsible: widget.collapsible,
+                expanded: _expanded,
+                onToggle: _toggleExpanded,
                 onCopy: () async {
                   await Clipboard.setData(ClipboardData(text: copySource));
                   if (!context.mounted) return;
@@ -111,9 +126,18 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
                   );
                 },
               ),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: effectiveMaxHeight),
-                child: content,
+              AnimatedCrossFade(
+                firstChild: const SizedBox.shrink(),
+                secondChild: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: effectiveMaxHeight),
+                  child: content,
+                ),
+                crossFadeState: shouldShowContent
+                    ? CrossFadeState.showSecond
+                    : CrossFadeState.showFirst,
+                duration: const Duration(milliseconds: 220),
+                reverseDuration: const Duration(milliseconds: 160),
+                sizeCurve: Curves.easeOutCubic,
               ),
             ],
           ),
@@ -221,10 +245,16 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
 class _Header extends StatelessWidget {
   const _Header({
     required this.title,
+    required this.collapsible,
+    required this.expanded,
+    required this.onToggle,
     required this.onCopy,
   });
 
   final String title;
+  final bool collapsible;
+  final bool expanded;
+  final VoidCallback onToggle;
   final VoidCallback onCopy;
 
   @override
@@ -246,10 +276,33 @@ class _Header extends StatelessWidget {
           Icon(Icons.data_object, color: scheme.primary),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
-              title,
-              style: textStyle,
-              overflow: TextOverflow.ellipsis,
+            child: InkWell(
+              onTap: collapsible ? onToggle : null,
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: textStyle,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (collapsible)
+                      AnimatedRotation(
+                        turns: expanded ? 0.5 : 0.0,
+                        duration: const Duration(milliseconds: 180),
+                        curve: Curves.easeOut,
+                        child: Icon(
+                          Icons.expand_more_rounded,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
             ),
           ),
           IconButton(

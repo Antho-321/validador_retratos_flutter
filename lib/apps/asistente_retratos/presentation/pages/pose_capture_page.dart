@@ -935,6 +935,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                             text: (_validationResultText ??
                                                 _validationErrorText)!,
                                             title: 'Detalles',
+                                            collapsible: true,
+                                            initiallyExpanded: true,
                                             maxHeight:
                                                 constraints.maxHeight * 0.34,
                                             child: _buildChecklistTable(

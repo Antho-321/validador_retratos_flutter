@@ -113,9 +113,12 @@ class _PoseAppState extends State<PoseApp> {
         throw Exception('WEBRTC_OFFER_URL not found in .env');
       }
 
+      final cedula = dotenv.env['CEDULA']?.trim();
+
       if (!GetIt.I.isRegistered<PoseCaptureService>()) {
         registrarDependenciasPosture(
           offerUri: Uri.parse(offerUrl),
+          cedula: cedula,
           logEverything: false,
         );
       }

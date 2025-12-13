@@ -14,8 +14,13 @@ final sl = GetIt.instance;
 /// Pasa aquí la configuración del servicio WebRTC.
 void registrarDependenciasPosture({
   required Uri offerUri,
+  String? cedula,
   bool logEverything = false,
 }) {
+  final cedulaTrimmed = cedula?.trim() ?? '';
+  final refImagePath =
+      cedulaTrimmed.isNotEmpty ? cedulaTrimmed : '1050298650';
+
   // Service (infra) — registra UNA sola instancia y expón tanto el contrato
   // como la implementación (útil si tu repo aún depende de la clase concreta).
   sl.registerLazySingleton<PoseWebrtcServiceImp>(
@@ -25,9 +30,9 @@ void registrarDependenciasPosture({
       preferBestResolution: false,
       requestedTasks: const ['pose', 'face', 'face_recog'],
       jsonTasks: const {'face_recog'},
-      initialTaskParams: const {
-        // Subdirector: 1001506052
-        'face_recog': {'ref_image_path': '1050298650'},
+      initialTaskParams: {
+        // Se envía como task_params.face_recog.ref_image_path en el offer (WebRTC).
+        'face_recog': {'ref_image_path': refImagePath},
       },
     ),
   );
