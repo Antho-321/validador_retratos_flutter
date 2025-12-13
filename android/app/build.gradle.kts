@@ -7,6 +7,37 @@ plugins {
 
 android {
     val includeX86 = (project.findProperty("includeX86") as String?)?.toBoolean() == true
+    val targetPlatforms = (project.findProperty("target-platform") as String?)
+        ?.split(',')
+        ?.map { it.trim() }
+        ?.filter { it.isNotEmpty() }
+        .orEmpty()
+
+    fun abiForTargetPlatform(platform: String): String? =
+        when (platform) {
+            "android-arm" -> "armeabi-v7a"
+            "android-arm64" -> "arm64-v8a"
+            "android-x86" -> "x86"
+            "android-x64" -> "x86_64"
+            else -> null
+        }
+
+    // Flutter passes -Ptarget-platform=... for `flutter run`, so we can build only the
+    // ABI required by the current device. This drastically reduces APK size and the
+    // time spent installing over wireless ADB.
+    val flutterAbis = targetPlatforms.mapNotNull(::abiForTargetPlatform).distinct()
+
+    // Fallback for builds that don't set -Ptarget-platform (e.g. some Gradle/IDE builds).
+    val defaultAbis = buildList {
+        add("armeabi-v7a")
+        add("arm64-v8a")
+        if (includeX86) {
+            add("x86")
+            add("x86_64")
+        }
+    }
+
+    val selectedAbis = if (flutterAbis.isNotEmpty()) flutterAbis else defaultAbis
 
     namespace = "com.example.validador_retratos_flutter"
     compileSdk = 36
@@ -31,13 +62,11 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
-        // Keep debug installs smaller/faster by skipping x86/x86_64.
+        // Keep `flutter run` installs smaller/faster by building only the device ABI.
+        // (Override for non-Flutter builds with: -PincludeX86=true)
         ndk {
             abiFilters.clear()
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a")
-            if (includeX86) {
-                abiFilters += listOf("x86", "x86_64")
-            }
+            abiFilters += selectedAbis
         }
     }
 
@@ -51,9 +80,13 @@ android {
 
     packaging {
         jniLibs {
-            if (!includeX86) {
-                excludes += setOf("**/x86/**", "**/x86_64/**")
+            val excluded = buildSet {
+                if (!selectedAbis.contains("armeabi-v7a")) add("**/armeabi-v7a/**")
+                if (!selectedAbis.contains("arm64-v8a")) add("**/arm64-v8a/**")
+                if (!selectedAbis.contains("x86")) add("**/x86/**")
+                if (!selectedAbis.contains("x86_64")) add("**/x86_64/**")
             }
+            excludes += excluded
         }
     }
 }
