@@ -599,6 +599,7 @@ class PoseCaptureController extends ChangeNotifier {
   bool isCapturing = false; // Capture-mode flag to hide preview/HUD instantly at T=0
   bool isProcessingCapture = false; // waiting for server-processed image
   String? _activeCaptureId; // requestId currently shown/processed
+  String? get activeCaptureId => _activeCaptureId;
   String? _imagesWaitCaptureId;
   StreamSubscription<ImagesRx>? _imagesWaitSub;
   Completer<ImagesRx>? _imagesWaitCompleter;

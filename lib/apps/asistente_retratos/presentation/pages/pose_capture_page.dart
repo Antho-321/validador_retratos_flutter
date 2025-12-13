@@ -1,6 +1,7 @@
 // ==========================
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
+import 'dart:async' show unawaited;
 import 'dart:convert' show jsonDecode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
@@ -10,6 +11,7 @@ import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:image/image.dart' as img;
 
 import '../../domain/service/pose_capture_service.dart';
@@ -27,6 +29,8 @@ import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 import '../controllers/pose_capture_controller.dart';
 import '../utils/capture_downloader.dart' show saveCapturedPortrait;
 import '../widgets/formatted_text_box.dart' show FormattedTextBox;
+import '../../infrastructure/services/portrait_validation_api.dart'
+    show PortraitValidationApi;
 
 // ✅ acceso a CaptureTheme (para color de landmarks)
 import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
@@ -114,6 +118,7 @@ _ChecklistData? _tryParseChecklistData(String raw) {
     final decoded = jsonDecode(trimmed);
     if (decoded is! Map) return null;
     final root = Map<String, dynamic>.from(decoded);
+    if (!root.containsKey('valido')) return null;
 
     final obs = root['observaciones'];
     final observations = obs is String ? obs.trim() : '';
@@ -488,6 +493,25 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   late final PoseCaptureController ctl;
   bool _isDownloading = false;
   double _downloadProgress = 0.0;
+  bool _isValidatingRemote = false;
+  String? _validationResultText;
+  String? _validationErrorText;
+  String? _lastValidatedCaptureId;
+
+  void _resetValidationState() {
+    if (_validationResultText == null &&
+        _validationErrorText == null &&
+        !_isValidatingRemote &&
+        _lastValidatedCaptureId == null) {
+      return;
+    }
+    setState(() {
+      _isValidatingRemote = false;
+      _validationResultText = null;
+      _validationErrorText = null;
+      _lastValidatedCaptureId = null;
+    });
+  }
 
   String _resolveDownloadFilename() {
     final svc = widget.poseService;
@@ -517,10 +541,101 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     );
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
     ctl.attach();
+    ctl.addListener(_handleControllerChanged);
+  }
+
+  void _handleControllerChanged() {
+    final captureId = ctl.activeCaptureId;
+    if (captureId == null || ctl.capturedPng == null) {
+      if (_lastValidatedCaptureId != null ||
+          _validationResultText != null ||
+          _validationErrorText != null ||
+          _isValidatingRemote) {
+        _resetValidationState();
+      }
+      return;
+    }
+
+    final shouldStart = !ctl.isCapturing &&
+        !ctl.isProcessingCapture &&
+        !_isValidatingRemote &&
+        _lastValidatedCaptureId != captureId;
+
+    if (!shouldStart) return;
+
+    _lastValidatedCaptureId = captureId;
+    _validationResultText = null;
+    _validationErrorText = null;
+    _isValidatingRemote = true;
+    if (mounted) setState(() {});
+
+    unawaited(_runRemoteValidation(captureId, ctl.capturedPng!));
+  }
+
+  Future<void> _runRemoteValidation(String captureId, Uint8List bytes) async {
+    try {
+      final endpointRaw = (dotenv.env['VALIDAR_IMAGEN_URL'] ?? '').trim();
+      final endpoint = Uri.parse(
+        endpointRaw.isNotEmpty
+            ? endpointRaw
+            : 'https://127.0.0.1:5001/validar-imagen',
+      );
+
+      final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
+          ? dotenv.env['CEDULA']!.trim()
+          : '1050298650';
+      final nacionalidad =
+          (dotenv.env['NACIONALIDAD'] ?? '').trim().isNotEmpty
+              ? dotenv.env['NACIONALIDAD']!.trim()
+              : 'Ecuatoriana';
+      final etnia = (dotenv.env['ETNIA'] ?? '').trim().isNotEmpty
+          ? dotenv.env['ETNIA']!.trim()
+          : 'Mestiza';
+
+      final allowInsecureFromEnv =
+          (dotenv.env['ALLOW_INSECURE_SSL'] ?? '').trim().toLowerCase() == 'true';
+      final isLocalHost = endpoint.host == '127.0.0.1' ||
+          endpoint.host == 'localhost' ||
+          endpoint.host == '10.0.2.2';
+      final allowInsecure = allowInsecureFromEnv || (kDebugMode && isLocalHost);
+
+      final resizedJpeg = await _resizeCaptureForDownload(
+        bytes,
+        width: 375,
+        height: 425,
+      );
+
+      final api = PortraitValidationApi(
+        endpoint: endpoint,
+        allowInsecure: allowInsecure,
+      );
+
+      final result = await api.validarImagen(
+        jpegBytes: resizedJpeg,
+        cedula: cedula,
+        nacionalidad: nacionalidad,
+        etnia: etnia,
+      );
+
+      if (!mounted || ctl.activeCaptureId != captureId) return;
+      setState(() {
+        _isValidatingRemote = false;
+        _validationResultText = result;
+        _validationErrorText = null;
+      });
+    } catch (e) {
+      if (!mounted || ctl.activeCaptureId != captureId) return;
+      setState(() {
+        _isValidatingRemote = false;
+        _validationErrorText = e.toString();
+        _validationResultText = null;
+      });
+    }
   }
 
   @override
   void dispose() {
+    ctl.removeListener(_handleControllerChanged);
     ctl.dispose();
     super.dispose();
   }
@@ -787,17 +902,19 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                 ),
                               ),
                             ),
-                            if (ctl.isProcessingCapture)
+                            if (ctl.isProcessingCapture || _isValidatingRemote)
                               Positioned.fill(
                                 child: IgnorePointer(
                                   ignoring: true,
-                                  child: const _PhotoValidationOverlay(
-                                    activeStep:
-                                        _ValidationOverlayStep.processingImage,
+                                  child: _PhotoValidationOverlay(
+                                    activeStep: ctl.isProcessingCapture
+                                        ? _ValidationOverlayStep.processingImage
+                                        : _ValidationOverlayStep
+                                            .validatingRequirements,
                                   ),
                                 ),
                               ),
-                            if (!ctl.isProcessingCapture)
+                            if (!ctl.isProcessingCapture && !_isValidatingRemote)
                               Positioned(
                                 left: 0,
                                 right: 0,
@@ -806,27 +923,37 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                   child: Column(
                                     mainAxisSize: MainAxisSize.min,
                                     children: [
-                                      if ((widget.resultText ?? '').trim().isNotEmpty)
+                                      if (((_validationResultText ??
+                                                  _validationErrorText ??
+                                                  '')
+                                              .trim()
+                                              .isNotEmpty))
                                         Padding(
                                           padding: const EdgeInsets.fromLTRB(
                                               16, 0, 16, 12),
                                           child: FormattedTextBox(
-                                            text: widget.resultText!,
+                                            text: (_validationResultText ??
+                                                _validationErrorText)!,
                                             title: 'Detalles',
                                             maxHeight:
                                                 constraints.maxHeight * 0.34,
                                             child: _buildChecklistTable(
-                                              widget.resultText!,
+                                              (_validationResultText ??
+                                                  _validationErrorText)!,
                                               context,
                                             ),
                                             copyText: _buildChecklistText(
-                                              widget.resultText!,
+                                              (_validationResultText ??
+                                                  _validationErrorText)!,
                                             ),
                                           ),
                                         ),
                                       Center(
                                         child: FilledButton.icon(
-                                          onPressed: ctl.restartBackend,
+                                          onPressed: () {
+                                            _resetValidationState();
+                                            unawaited(ctl.restartBackend());
+                                          },
                                           icon: const Icon(Icons.refresh),
                                           label: const Text('Reintentar'),
                                         ),
