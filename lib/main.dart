@@ -17,6 +17,44 @@ import 'apps/asistente_retratos/presentation/styles/theme.dart';
 const drawLandmarks = true;
 const validationsEnabled = true;
 
+const exampleValidationJson = r'''
+{
+  "cedula": "1050298650",
+  "nacionalidad": "ecuatoriana",
+  "etnia": "mestiza",
+  "metadatos": {
+    "valido": "True",
+    "nombre": "1050298650",
+    "extension": ".jpg",
+    "formato": "JPEG",
+    "ancho": 375,
+    "alto": 425,
+    "peso": 56565
+  },
+  "fondo": {
+    "valido": "True",
+    "porcentaje_blanco": 34.15780392156863,
+    "h": 0,
+    "s": 0,
+    "l": 100
+  },
+  "rostro": {
+    "valido": "True"
+  },
+  "postura_cuerpo": {
+    "valido": "True"
+  },
+  "postura_rostro": {
+    "valido": "True"
+  },
+  "color_vestimenta": {
+    "valido": "True"
+  },
+  "observaciones": "",
+  "valido": "True"
+}
+''';
+
 Future<void> main() async {
   // ── Ganchos globales de errores de Flutter y plataforma ────────────────────
   FlutterError.onError = (FlutterErrorDetails details) {
@@ -148,6 +186,7 @@ class _PoseAppState extends State<PoseApp> {
         poseService: _poseService!,
         validationsEnabled: validationsEnabled,
         drawLandmarks: drawLandmarks,
+        resultText: exampleValidationJson,
       );
     }
 
@@ -169,16 +208,19 @@ class _BootstrapLoadingPage extends StatelessWidget {
     final theme = Theme.of(context);
     return Scaffold(
       body: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const CircularProgressIndicator(),
-            const SizedBox(height: 16),
-            Text(
-              'Inicializando…',
-              style: theme.textTheme.titleMedium,
-            ),
-          ],
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              Text(
+                'Inicializando…',
+                style: theme.textTheme.titleMedium,
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -199,7 +241,7 @@ class _BootstrapErrorPage extends StatelessWidget {
     final theme = Theme.of(context);
     return Scaffold(
       body: Center(
-        child: Padding(
+        child: SingleChildScrollView(
           padding: const EdgeInsets.symmetric(horizontal: 24),
           child: Column(
             mainAxisSize: MainAxisSize.min,

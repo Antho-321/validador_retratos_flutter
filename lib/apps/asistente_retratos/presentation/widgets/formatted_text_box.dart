@@ -1,0 +1,247 @@
+// lib/apps/asistente_retratos/presentation/widgets/formatted_text_box.dart
+import 'dart:convert' show JsonEncoder, jsonDecode;
+import 'dart:ui' as ui show ImageFilter;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+
+class FormattedTextBox extends StatefulWidget {
+  const FormattedTextBox({
+    super.key,
+    required this.text,
+    this.title = 'Resultado',
+    this.maxHeight,
+  });
+
+  final String text;
+  final String title;
+  final double? maxHeight;
+
+  @override
+  State<FormattedTextBox> createState() => _FormattedTextBoxState();
+}
+
+class _FormattedTextBoxState extends State<FormattedTextBox> {
+  late final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final formatted = _prettyFormat(widget.text);
+    if (formatted.isEmpty) return const SizedBox.shrink();
+    final effectiveMaxHeight = widget.maxHeight ?? 240.0;
+
+    final baseStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
+          fontFamily: 'monospace',
+          height: 1.35,
+          color: scheme.onSurface,
+        ) ??
+        TextStyle(
+          fontFamily: 'monospace',
+          fontSize: 12,
+          height: 1.35,
+          color: scheme.onSurface,
+        );
+
+    final spans = _jsonSyntaxHighlight(
+      formatted,
+      scheme,
+      baseStyle,
+    );
+
+    final content = Scrollbar(
+      controller: _scrollController,
+      thumbVisibility: true,
+      child: SingleChildScrollView(
+        controller: _scrollController,
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+        child: SelectionArea(
+          child: Text.rich(
+            TextSpan(children: spans),
+            style: baseStyle,
+          ),
+        ),
+      ),
+    );
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+        child: DecoratedBox(
+          decoration: BoxDecoration(
+            color: scheme.surface.withOpacity(0.72),
+            border: Border.all(
+              color: scheme.outlineVariant.withOpacity(0.35),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _Header(
+                title: widget.title,
+                onCopy: () async {
+                  await Clipboard.setData(ClipboardData(text: formatted));
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Copiado al portapapeles')),
+                  );
+                },
+              ),
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: effectiveMaxHeight),
+                child: content,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _prettyFormat(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return '';
+    try {
+      final obj = jsonDecode(trimmed);
+      return const JsonEncoder.withIndent('  ').convert(obj);
+    } catch (_) {
+      return trimmed;
+    }
+  }
+
+  static List<TextSpan> _jsonSyntaxHighlight(
+    String source,
+    ColorScheme scheme,
+    TextStyle baseStyle,
+  ) {
+    final re = RegExp(
+      r'"(?:\\.|[^"\\])*"'
+      r'|\s+'
+      r'|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?'
+      r'|true|false|null'
+      r'|[{}\[\]:,]',
+    );
+
+    final matches = re.allMatches(source).toList(growable: false);
+    if (matches.isEmpty) {
+      return [TextSpan(text: source)];
+    }
+
+    final tokens = <String>[];
+    var lastEnd = 0;
+    for (final m in matches) {
+      if (m.start > lastEnd) {
+        tokens.add(source.substring(lastEnd, m.start));
+      }
+      tokens.add(m.group(0)!);
+      lastEnd = m.end;
+    }
+    if (lastEnd < source.length) {
+      tokens.add(source.substring(lastEnd));
+    }
+
+    final spans = <TextSpan>[];
+    for (var i = 0; i < tokens.length; i++) {
+      final t = tokens[i];
+      final isWhitespace = t.trim().isEmpty;
+
+      TextStyle? style;
+      if (isWhitespace) {
+        style = null;
+      } else if (t.startsWith('"')) {
+        final isKey = _isJsonKeyToken(tokens, i);
+        style = baseStyle.copyWith(
+          color: isKey ? scheme.primary : scheme.onSurface,
+          fontWeight: isKey ? FontWeight.w600 : FontWeight.w400,
+        );
+      } else if (t == 'true' || t == 'false' || t == 'null') {
+        style = baseStyle.copyWith(
+          color: scheme.secondary,
+          fontWeight: FontWeight.w600,
+        );
+      } else if (_looksLikeNumber(t)) {
+        style = baseStyle.copyWith(
+          color: scheme.tertiary,
+          fontWeight: FontWeight.w600,
+        );
+      } else if (_isPunctuation(t)) {
+        style = baseStyle.copyWith(color: scheme.outline);
+      } else {
+        style = baseStyle;
+      }
+
+      spans.add(TextSpan(text: t, style: style));
+    }
+    return spans;
+  }
+
+  static bool _isJsonKeyToken(List<String> tokens, int i) {
+    for (var j = i + 1; j < tokens.length; j++) {
+      final next = tokens[j];
+      if (next.trim().isEmpty) continue;
+      return next == ':';
+    }
+    return false;
+  }
+
+  static bool _looksLikeNumber(String t) {
+    if (t.isEmpty) return false;
+    final c = t.codeUnitAt(0);
+    return (c >= 48 && c <= 57) || c == 45;
+  }
+
+  static bool _isPunctuation(String t) =>
+      t.length == 1 && '{}[]:,'.contains(t);
+}
+
+class _Header extends StatelessWidget {
+  const _Header({
+    required this.title,
+    required this.onCopy,
+  });
+
+  final String title;
+  final VoidCallback onCopy;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textStyle = Theme.of(context).textTheme.titleSmall?.copyWith(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w700,
+        ) ??
+        TextStyle(
+          color: scheme.onSurface,
+          fontWeight: FontWeight.w700,
+        );
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 10, 8, 6),
+      child: Row(
+        children: [
+          Icon(Icons.data_object, color: scheme.primary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              title,
+              style: textStyle,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          IconButton(
+            onPressed: onCopy,
+            tooltip: 'Copiar',
+            icon: const Icon(Icons.copy_rounded),
+          ),
+        ],
+      ),
+    );
+  }
+}

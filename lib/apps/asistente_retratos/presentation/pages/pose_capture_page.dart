@@ -1,6 +1,7 @@
 // ==========================
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
+import 'dart:convert' show jsonDecode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
@@ -25,6 +26,7 @@ import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 
 import '../controllers/pose_capture_controller.dart';
 import '../utils/capture_downloader.dart' show saveCapturedPortrait;
+import '../widgets/formatted_text_box.dart' show FormattedTextBox;
 
 // ✅ acceso a CaptureTheme (para color de landmarks)
 import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
@@ -34,6 +36,7 @@ class PoseCapturePage extends StatefulWidget {
   const PoseCapturePage({
     super.key,
     required this.poseService,
+    this.resultText,
     this.countdownDuration = const Duration(seconds: 3),
     this.countdownFps = 30,
     this.countdownSpeed = 1.6,
@@ -42,6 +45,7 @@ class PoseCapturePage extends StatefulWidget {
   });
 
   final PoseCaptureService poseService;
+  final String? resultText;
   final Duration countdownDuration;
   final int countdownFps;
   final double countdownSpeed;
@@ -50,6 +54,56 @@ class PoseCapturePage extends StatefulWidget {
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
+}
+
+bool _isTrue(dynamic v) {
+  if (v is bool) return v;
+  if (v is num) return v != 0;
+  if (v is String) return v.trim().toLowerCase() == 'true';
+  return false;
+}
+
+String _mark(bool ok) => ok ? '✅' : '❌';
+
+bool _okSection(Map<String, dynamic> root, String key) {
+  final section = root[key];
+  if (section is Map) {
+    final map = Map<String, dynamic>.from(section);
+    return _isTrue(map['valido']);
+  }
+  return false;
+}
+
+String _buildChecklistText(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is! Map) return trimmed;
+    final root = Map<String, dynamic>.from(decoded);
+
+    final lines = <String>[
+      'Metadatos (Formato/Resolución/Peso) → ${_mark(_okSection(root, 'metadatos'))}',
+      if (root['fondo'] is Map)
+        'Fondo blanco → ${_mark(_okSection(root, 'fondo'))}',
+      if (root['rostro'] is Map)
+        'Rostro → ${_mark(_okSection(root, 'rostro'))}',
+      'Postura del cuerpo → ${_mark(_okSection(root, 'postura_cuerpo'))}',
+      'Postura del rostro → ${_mark(_okSection(root, 'postura_rostro'))}',
+      'Vestimenta oscura → ${_mark(_okSection(root, 'color_vestimenta'))}',
+    ];
+
+    final obs = root['observaciones'];
+    if (obs is String && obs.trim().isNotEmpty) {
+      lines.add('');
+      lines.add('Observaciones: ${obs.trim()}');
+    }
+
+    return lines.join('\n');
+  } catch (_) {
+    return trimmed;
+  }
 }
 
 class _ProgressBadge extends StatelessWidget {
@@ -608,16 +662,33 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               ),
                             if (!ctl.isProcessingCapture)
                               Positioned(
-                                bottom: 32,
                                 left: 0,
                                 right: 0,
+                                bottom: 32,
                                 child: SafeArea(
-                                  child: Center(
-                                    child: FilledButton.icon(
-                                      onPressed: ctl.restartBackend,
-                                      icon: const Icon(Icons.refresh),
-                                      label: const Text('Reintentar'),
-                                    ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if ((widget.resultText ?? '').trim().isNotEmpty)
+                                        Padding(
+                                          padding: const EdgeInsets.fromLTRB(
+                                              16, 0, 16, 12),
+                                          child: FormattedTextBox(
+                                            text:
+                                                _buildChecklistText(widget.resultText!),
+                                            title: 'Detalles',
+                                            maxHeight:
+                                                constraints.maxHeight * 0.34,
+                                          ),
+                                        ),
+                                      Center(
+                                        child: FilledButton.icon(
+                                          onPressed: ctl.restartBackend,
+                                          icon: const Icon(Icons.refresh),
+                                          label: const Text('Reintentar'),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ),
                               ),
