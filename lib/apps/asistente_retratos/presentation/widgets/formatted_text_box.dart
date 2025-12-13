@@ -11,11 +11,15 @@ class FormattedTextBox extends StatefulWidget {
     required this.text,
     this.title = 'Resultado',
     this.maxHeight,
+    this.child,
+    this.copyText,
   });
 
   final String text;
   final String title;
   final double? maxHeight;
+  final Widget? child;
+  final String? copyText;
 
   @override
   State<FormattedTextBox> createState() => _FormattedTextBoxState();
@@ -33,8 +37,15 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
-    final formatted = _prettyFormat(widget.text);
-    if (formatted.isEmpty) return const SizedBox.shrink();
+    final rawTrimmed = widget.text.trim();
+    final formatted = widget.child == null ? _prettyFormat(widget.text) : '';
+    final copySource = (widget.copyText ??
+            (widget.child == null ? formatted : rawTrimmed))
+        .trim();
+    if (widget.child == null && formatted.isEmpty) return const SizedBox.shrink();
+    if (widget.child != null && rawTrimmed.isEmpty && copySource.isEmpty) {
+      return const SizedBox.shrink();
+    }
     final effectiveMaxHeight = widget.maxHeight ?? 240.0;
 
     final baseStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -49,11 +60,20 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
           color: scheme.onSurface,
         );
 
-    final spans = _jsonSyntaxHighlight(
-      formatted,
-      scheme,
-      baseStyle,
-    );
+    final Widget scrollChild;
+    if (widget.child != null) {
+      scrollChild = widget.child!;
+    } else {
+      final spans = _jsonSyntaxHighlight(
+        formatted,
+        scheme,
+        baseStyle,
+      );
+      scrollChild = Text.rich(
+        TextSpan(children: spans),
+        style: baseStyle,
+      );
+    }
 
     final content = Scrollbar(
       controller: _scrollController,
@@ -62,10 +82,7 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
         controller: _scrollController,
         padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
         child: SelectionArea(
-          child: Text.rich(
-            TextSpan(children: spans),
-            style: baseStyle,
-          ),
+          child: scrollChild,
         ),
       ),
     );
@@ -87,7 +104,7 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
               _Header(
                 title: widget.title,
                 onCopy: () async {
-                  await Clipboard.setData(ClipboardData(text: formatted));
+                  await Clipboard.setData(ClipboardData(text: copySource));
                   if (!context.mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Copiado al portapapeles')),

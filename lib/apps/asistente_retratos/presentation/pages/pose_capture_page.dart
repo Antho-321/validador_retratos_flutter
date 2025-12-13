@@ -74,36 +74,173 @@ bool _okSection(Map<String, dynamic> root, String key) {
   return false;
 }
 
+typedef _ChecklistItem = ({String label, bool ok});
+typedef _ChecklistData = ({List<_ChecklistItem> items, String observations});
+
+List<_ChecklistItem> _buildChecklistItems(Map<String, dynamic> root) => [
+      (
+        label: 'Metadatos (Formato/Resolución/Peso)',
+        ok: _okSection(root, 'metadatos'),
+      ),
+      if (root['fondo'] is Map)
+        (
+          label: 'Fondo blanco',
+          ok: _okSection(root, 'fondo'),
+        ),
+      if (root['rostro'] is Map)
+        (
+          label: 'Rostro',
+          ok: _okSection(root, 'rostro'),
+        ),
+      (
+        label: 'Postura del cuerpo',
+        ok: _okSection(root, 'postura_cuerpo'),
+      ),
+      (
+        label: 'Postura del rostro',
+        ok: _okSection(root, 'postura_rostro'),
+      ),
+      (
+        label: 'Vestimenta oscura',
+        ok: _okSection(root, 'color_vestimenta'),
+      ),
+    ];
+
+_ChecklistData? _tryParseChecklistData(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return null;
+
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is! Map) return null;
+    final root = Map<String, dynamic>.from(decoded);
+
+    final obs = root['observaciones'];
+    final observations = obs is String ? obs.trim() : '';
+
+    return (
+      items: _buildChecklistItems(root),
+      observations: observations,
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 String _buildChecklistText(String raw) {
   final trimmed = raw.trim();
   if (trimmed.isEmpty) return '';
 
-  try {
-    final decoded = jsonDecode(trimmed);
-    if (decoded is! Map) return trimmed;
-    final root = Map<String, dynamic>.from(decoded);
+  final data = _tryParseChecklistData(trimmed);
+  if (data == null) return trimmed;
 
-    final lines = <String>[
-      'Metadatos (Formato/Resolución/Peso) → ${_mark(_okSection(root, 'metadatos'))}',
-      if (root['fondo'] is Map)
-        'Fondo blanco → ${_mark(_okSection(root, 'fondo'))}',
-      if (root['rostro'] is Map)
-        'Rostro → ${_mark(_okSection(root, 'rostro'))}',
-      'Postura del cuerpo → ${_mark(_okSection(root, 'postura_cuerpo'))}',
-      'Postura del rostro → ${_mark(_okSection(root, 'postura_rostro'))}',
-      'Vestimenta oscura → ${_mark(_okSection(root, 'color_vestimenta'))}',
-    ];
+  final lines = <String>[
+    for (final item in data.items) '${item.label} → ${_mark(item.ok)}',
+  ];
 
-    final obs = root['observaciones'];
-    if (obs is String && obs.trim().isNotEmpty) {
-      lines.add('');
-      lines.add('Observaciones: ${obs.trim()}');
-    }
-
-    return lines.join('\n');
-  } catch (_) {
-    return trimmed;
+  if (data.observations.isNotEmpty) {
+    lines.add('');
+    lines.add('Observaciones: ${data.observations}');
   }
+
+  return lines.join('\n');
+}
+
+Widget _buildChecklistTable(String raw, BuildContext context) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return const SizedBox.shrink();
+
+  final scheme = Theme.of(context).colorScheme;
+  final baseStyle = Theme.of(context).textTheme.bodySmall?.copyWith(
+            fontFamily: 'monospace',
+            height: 1.35,
+            color: scheme.onSurface,
+          ) ??
+      TextStyle(
+        fontFamily: 'monospace',
+        fontSize: 12,
+        height: 1.35,
+        color: scheme.onSurface,
+      );
+
+  final data = _tryParseChecklistData(trimmed);
+  if (data == null) {
+    return DefaultTextStyle(
+      style: baseStyle,
+      child: Text(trimmed),
+    );
+  }
+
+  final headerStyle = baseStyle.copyWith(
+    fontWeight: FontWeight.w800,
+    color: scheme.onSurfaceVariant,
+  );
+
+  final borderColor = scheme.outlineVariant.withOpacity(0.35);
+
+  Widget statusIcon(bool ok) => Icon(
+        ok ? Icons.check_circle_rounded : Icons.cancel_rounded,
+        size: 18,
+        color: ok ? Colors.greenAccent.shade400 : scheme.error,
+      );
+
+  return DefaultTextStyle(
+    style: baseStyle,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Table(
+          columnWidths: const {
+            0: FlexColumnWidth(),
+            1: IntrinsicColumnWidth(),
+          },
+          defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+          border: TableBorder(
+            horizontalInside: BorderSide(color: borderColor),
+          ),
+          children: [
+            TableRow(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Text('Validación', style: headerStyle),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Text('Estado', style: headerStyle),
+                  ),
+                ),
+              ],
+            ),
+            for (final item in data.items)
+              TableRow(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Text(item.label),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: statusIcon(item.ok),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+        if (data.observations.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          Text('Observaciones', style: headerStyle),
+          const SizedBox(height: 6),
+          Text(data.observations),
+        ],
+      ],
+    ),
+  );
 }
 
 class _ProgressBadge extends StatelessWidget {
@@ -674,11 +811,17 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                           padding: const EdgeInsets.fromLTRB(
                                               16, 0, 16, 12),
                                           child: FormattedTextBox(
-                                            text:
-                                                _buildChecklistText(widget.resultText!),
+                                            text: widget.resultText!,
                                             title: 'Detalles',
                                             maxHeight:
                                                 constraints.maxHeight * 0.34,
+                                            child: _buildChecklistTable(
+                                              widget.resultText!,
+                                              context,
+                                            ),
+                                            copyText: _buildChecklistText(
+                                              widget.resultText!,
+                                            ),
                                           ),
                                         ),
                                       Center(
