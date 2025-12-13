@@ -614,24 +614,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                 child: SafeArea(
                                   child: Center(
                                     child: FilledButton.icon(
-                                      onPressed: _isDownloading
-                                          ? null
-                                          : _downloadCapturedWithProgress,
-                                      icon: AnimatedSwitcher(
-                                        duration:
-                                            const Duration(milliseconds: 200),
-                                        child: _isDownloading
-                                            ? _ProgressBadge(
-                                                value: _downloadProgress,
-                                              )
-                                            : const Icon(
-                                                Icons.download,
-                                                key: ValueKey('download'),
-                                              ),
-                                      ),
-                                      label: Text(_isDownloading
-                                          ? 'Descargando…'
-                                          : 'Descargar foto'),
+                                      onPressed: ctl.restartBackend,
+                                      icon: const Icon(Icons.refresh),
+                                      label: const Text('Reintentar'),
                                     ),
                                   ),
                                 ),

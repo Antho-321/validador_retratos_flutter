@@ -798,6 +798,23 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       _imagesDc!.state == RTCDataChannelState.RTCDataChannelOpen; // <-- ADDED
 
   // sync:true para evitar microtasks innecesarias
+  @override
+  Future<void> restartBackend() async {
+    final ctrl = _ctrl;
+    if (ctrl == null || ctrl.state != RTCDataChannelState.RTCDataChannelOpen) {
+      _warn('Cannot send RESTART: control channel not ready');
+      return;
+    }
+    
+    final payload = jsonEncode({'type': 'RESTART'});
+    _log('Sending RESTART command');
+    try {
+      await ctrl.send(RTCDataChannelMessage(payload));
+    } catch (e) {
+      _warn('Error sending RESTART: $e');
+    }
+  }
+}
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;
@@ -927,10 +944,41 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
   }
 
+  Iterable<_ResolutionTarget> _startupResolutionTargets() sync* {
+    if (preferBestResolution) {
+      yield* _preferredResolutionTargets();
+      return;
+    }
+
+    final wantLandscape = idealWidth >= idealHeight;
+    final seen = <String>{};
+    final seeds = <Size>[
+      if (_captureResolutionHints != null) ..._captureResolutionHints!,
+      Size(idealWidth.toDouble(), idealHeight.toDouble()),
+      const Size(1280, 720),
+      const Size(960, 540),
+      const Size(854, 480),
+      const Size(640, 480),
+      const Size(640, 360),
+    ];
+
+    for (final seed in seeds) {
+      if (seed.width <= 0 || seed.height <= 0) continue;
+      final bool isLandscape = seed.width >= seed.height;
+      final double resolvedW = wantLandscape == isLandscape ? seed.width : seed.height;
+      final double resolvedH = wantLandscape == isLandscape ? seed.height : seed.width;
+      final int width = resolvedW.round();
+      final int height = resolvedH.round();
+      if (width <= 0 || height <= 0) continue;
+      final key = '${width}x$height';
+      if (seen.add(key)) {
+        yield _ResolutionTarget(width, height);
+      }
+    }
+  }
+
   Future<MediaStream> _createPreferredLocalStream() async {
-    final Iterable<_ResolutionTarget> targets = preferBestResolution
-        ? _preferredResolutionTargets()
-        : <_ResolutionTarget>[ _ResolutionTarget(idealWidth, idealHeight) ];
+    final Iterable<_ResolutionTarget> targets = _startupResolutionTargets();
 
     Object? lastError;
     for (final target in targets) {

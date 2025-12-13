@@ -46,4 +46,7 @@ abstract class PoseCaptureService {
       String? basename,
       String? formatOverride,
   });
+
+  /// Sends a command to restart the backend process/state.
+  Future<void> restartBackend();
 }

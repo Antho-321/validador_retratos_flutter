@@ -604,6 +604,35 @@ class PoseCaptureController extends ChangeNotifier {
   Completer<ImagesRx>? _imagesWaitCompleter;
   bool _isDisposed = false;
 
+  /// Restarts the backend and resets local state appropriate for a "retry" action.
+  Future<void> restartBackend() async {
+    // 1. Send command to backend
+    await poseService.restartBackend();
+
+    // 2. Reset local state
+    isCapturing = false;
+    isProcessingCapture = false;
+    capturedPng = null;
+    _activeCaptureId = null;
+    _readySince = null;
+    
+    // Clear HUD countdown/progress
+    final cur = hud.value;
+    _setHud(
+      PortraitUiModel(
+        primaryMessage: cur.primaryMessage,
+        secondaryMessage: null,
+        countdownSeconds: null,
+        countdownProgress: null,
+        ovalProgress: cur.ovalProgress,
+      ),
+      force: true,
+    );
+
+    // Notify UI to update
+    notifyListeners();
+  }
+
   // Face recognition gating state
   bool _faceRecogMatch = false;
   double? _faceRecogScore;

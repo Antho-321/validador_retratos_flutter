@@ -1,20 +1,21 @@
 // lib/main.dart
 import 'dart:async';
 import 'dart:ui' show PlatformDispatcher; // ⬅️ para PlatformDispatcher.instance.onError
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart'; // ⬅️ para FlutterError, debugPrint, etc.
 import 'package:get_it/get_it.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'apps/asistente_retratos/dependencias_posture.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
-import 'apps/asistente_retratos/infrastructure/services/pose_webrtc_service_imp.dart';
+import 'apps/asistente_retratos/infrastructure/model/images_rx.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart';
 
 // Habilitar/Deshabilitar dibujo de landmarks (solo rendering, NO procesamiento)
 const drawLandmarks = true;
+const validationsEnabled = true;
 
 Future<void> main() async {
   // ── Ganchos globales de errores de Flutter y plataforma ────────────────────
@@ -33,43 +34,8 @@ Future<void> main() async {
   // ── Zona protegida: todo tu bootstrap corre aquí ───────────────────────────
   await runZonedGuarded<Future<void>>(() async {
     WidgetsFlutterBinding.ensureInitialized();
-    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-
-    await dotenv.load(fileName: ".env");
-
-    // Flags por entorno (puedes hardcodear si quieres)
-    const bool validationsEnabled = true;
-    // ip casa: 192.168.100.7
-    // ip DDTI: 172.16.14.238
-    // EDUROAM: 172.20.152.53
-    final offerUrl = dotenv.env['WEBRTC_OFFER_URL'];
-    if (offerUrl == null) {
-      throw Exception('WEBRTC_OFFER_URL not found in .env');
-    }
-
-    // 1) Registrar dependencias (pasa la config del servicio aquí)
-    registrarDependenciasPosture(
-      offerUri: Uri.parse(offerUrl),
-      logEverything: false,
-    );
-
-    // 2) Obtener el servicio por contrato e iniciarlo
-    final poseService = GetIt.I<PoseCaptureService>();
-    final poseImpl = GetIt.I<PoseWebrtcServiceImp>();
-    await poseService.init();
-    unawaited(poseService.connect());
-
-    final imagesProcessedSub = poseImpl.imagesProcessed.listen((metadata) {
-      debugPrint('Pose metadata: $metadata');
-      // TODO(any): add additional processing logic if needed.
-    });
-
-    // 3) Lanzar la app
-    runApp(PoseApp(
-      service: poseService,
-      validationsEnabled: validationsEnabled,
-      imagesProcessedSubscription: imagesProcessedSub,
-    ));
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky));
+    runApp(const PoseApp());
   }, (Object error, StackTrace stack) {
     // ignore: avoid_print
     print('🌍 Uncaught (zone): $error\n$stack');
@@ -77,40 +43,186 @@ Future<void> main() async {
 }
 
 class PoseApp extends StatefulWidget {
-  const PoseApp({
-    super.key,
-    required this.service,
-    required this.validationsEnabled,
-    required this.imagesProcessedSubscription,
-  });
-
-  final PoseCaptureService service;
-  final bool validationsEnabled;
-  final StreamSubscription<dynamic> imagesProcessedSubscription;
+  const PoseApp({super.key});
 
   @override
   State<PoseApp> createState() => _PoseAppState();
 }
 
 class _PoseAppState extends State<PoseApp> {
+  PoseCaptureService? _poseService;
+  StreamSubscription<ImagesRx>? _imagesProcessedSubscription;
+  Object? _bootstrapError;
+  bool _bootstrapping = true;
+  bool _bootstrapStarted = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_bootstrapStarted) return;
+      _bootstrapStarted = true;
+      unawaited(_bootstrap());
+    });
+  }
+
+  Future<void> _bootstrap() async {
+    try {
+      await dotenv.load(fileName: '.env');
+
+      final offerUrl = dotenv.env['WEBRTC_OFFER_URL'];
+      if (offerUrl == null || offerUrl.isEmpty) {
+        throw Exception('WEBRTC_OFFER_URL not found in .env');
+      }
+
+      if (!GetIt.I.isRegistered<PoseCaptureService>()) {
+        registrarDependenciasPosture(
+          offerUri: Uri.parse(offerUrl),
+          logEverything: false,
+        );
+      }
+
+      final poseService = GetIt.I<PoseCaptureService>();
+      await poseService.init();
+
+      if (!mounted) {
+        await poseService.dispose();
+        return;
+      }
+
+      final imagesProcessedSub = poseService.imagesProcessed.listen((metadata) {
+        if (!kDebugMode) return;
+        debugPrint('Pose metadata: $metadata');
+      });
+
+      setState(() {
+        _poseService = poseService;
+        _imagesProcessedSubscription = imagesProcessedSub;
+        _bootstrapError = null;
+        _bootstrapping = false;
+      });
+
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        unawaited(
+          poseService.connect().catchError((Object error, StackTrace stack) {
+            debugPrint('PoseService connect error: $error\n$stack');
+          }),
+        );
+      });
+    } catch (error, stack) {
+      debugPrint('App bootstrap error: $error\n$stack');
+      if (!mounted) return;
+      setState(() {
+        _bootstrapError = error;
+        _bootstrapping = false;
+      });
+    }
+  }
+
   @override
   void dispose() {
-    widget.imagesProcessedSubscription.cancel();
-    widget.service.dispose();
+    _imagesProcessedSubscription?.cancel();
+    _poseService?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final Widget home;
+    if (_bootstrapping) {
+      home = const _BootstrapLoadingPage();
+    } else if (_bootstrapError != null) {
+      home = _BootstrapErrorPage(
+        error: _bootstrapError!,
+        onRetry: () {
+          setState(() {
+            _bootstrapping = true;
+            _bootstrapError = null;
+          });
+          unawaited(_bootstrap());
+        },
+      );
+    } else {
+      home = PoseCapturePage(
+        poseService: _poseService!,
+        validationsEnabled: validationsEnabled,
+        drawLandmarks: drawLandmarks,
+      );
+    }
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: AsistenteTheme.light,
       darkTheme: AsistenteTheme.dark,
       themeMode: ThemeMode.dark,
-      home: PoseCapturePage(
-        poseService: widget.service,
-        validationsEnabled: widget.validationsEnabled,
-        drawLandmarks: drawLandmarks,
+      home: home,
+    );
+  }
+}
+
+class _BootstrapLoadingPage extends StatelessWidget {
+  const _BootstrapLoadingPage();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            Text(
+              'Inicializando…',
+              style: theme.textTheme.titleMedium,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _BootstrapErrorPage extends StatelessWidget {
+  const _BootstrapErrorPage({
+    required this.error,
+    required this.onRetry,
+  });
+
+  final Object error;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'No se pudo iniciar la app',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.headlineSmall,
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '$error',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: onRetry,
+                child: const Text('Reintentar'),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

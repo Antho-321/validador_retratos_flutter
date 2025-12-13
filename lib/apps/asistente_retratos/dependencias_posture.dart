@@ -22,6 +22,7 @@ void registrarDependenciasPosture({
     () => PoseWebrtcServiceImp(
       offerUri: offerUri,
       logEverything: logEverything,
+      preferBestResolution: false,
       requestedTasks: const ['pose', 'face', 'face_recog'],
       jsonTasks: const {'face_recog'},
       initialTaskParams: const {
