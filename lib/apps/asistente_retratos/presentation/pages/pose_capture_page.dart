@@ -3,7 +3,7 @@
 // ==========================
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
-import 'dart:ui' as ui show Image, ImageByteFormat;
+import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
 
 import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:flutter/material.dart';
@@ -82,6 +82,168 @@ class _ProgressBadge extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+enum _ValidationOverlayStep {
+  processingImage,
+  validatingRequirements,
+  uploadingToPortfolio,
+}
+
+class _PhotoValidationOverlay extends StatelessWidget {
+  const _PhotoValidationOverlay({
+    required this.activeStep,
+  });
+
+  final _ValidationOverlayStep activeStep;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final titleStyle = theme.textTheme.headlineMedium?.copyWith(
+          color: Colors.white,
+          fontWeight: FontWeight.w500,
+        ) ??
+        const TextStyle(
+          fontSize: 34,
+          fontWeight: FontWeight.w500,
+          color: Colors.white,
+        );
+
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: ClipRect(
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+              child: const SizedBox.expand(),
+            ),
+          ),
+        ),
+        Positioned.fill(
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Colors.black.withOpacity(0.35),
+                  Colors.black.withOpacity(0.70),
+                ],
+              ),
+            ),
+          ),
+        ),
+        SafeArea(
+          child: Column(
+            children: [
+              const Spacer(),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const SizedBox(
+                    width: 72,
+                    height: 72,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 6,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Validando foto...',
+                    textAlign: TextAlign.center,
+                    style: titleStyle,
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(28, 0, 28, 24),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _ValidationOverlayStepRow(
+                      label: 'Procesando imagen',
+                      state: _ValidationOverlayStep.processingImage == activeStep
+                          ? _ValidationOverlayStepState.active
+                          : _ValidationOverlayStepState.pending,
+                    ),
+                    const SizedBox(height: 18),
+                    _ValidationOverlayStepRow(
+                      label: 'Validando requisitos',
+                      state:
+                          _ValidationOverlayStep.validatingRequirements ==
+                                  activeStep
+                              ? _ValidationOverlayStepState.active
+                              : _ValidationOverlayStepState.pending,
+                    ),
+                    const SizedBox(height: 18),
+                    _ValidationOverlayStepRow(
+                      label: 'Subiendo al Portafolio',
+                      state: _ValidationOverlayStep.uploadingToPortfolio ==
+                              activeStep
+                          ? _ValidationOverlayStepState.active
+                          : _ValidationOverlayStepState.pending,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+enum _ValidationOverlayStepState { active, pending }
+
+class _ValidationOverlayStepRow extends StatelessWidget {
+  const _ValidationOverlayStepRow({
+    required this.label,
+    required this.state,
+  });
+
+  final String label;
+  final _ValidationOverlayStepState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isActive = state == _ValidationOverlayStepState.active;
+
+    final Color color = isActive
+        ? Colors.white
+        : Colors.white.withOpacity(0.62);
+
+    final textStyle = Theme.of(context).textTheme.headlineSmall?.copyWith(
+          color: color,
+          fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
+        ) ??
+        TextStyle(
+          fontSize: 28,
+          color: color,
+          fontWeight: isActive ? FontWeight.w600 : FontWeight.w500,
+        );
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          isActive ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+          color: color,
+          size: 22,
+        ),
+        const SizedBox(width: 14),
+        Flexible(
+          child: Text(
+            label,
+            style: textStyle,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -438,62 +600,42 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               Positioned.fill(
                                 child: IgnorePointer(
                                   ignoring: true,
-                                  child: Container(
-                                    color: Colors.black38,
-                                    child: const Center(
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          CircularProgressIndicator(
-                                            color: Colors.white,
-                                          ),
-                                          SizedBox(height: 12),
-                                          Text(
-                                            'Procesando…',
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontWeight: FontWeight.w600,
-                                            ),
-                                          ),
-                                        ],
+                                  child: const _PhotoValidationOverlay(
+                                    activeStep:
+                                        _ValidationOverlayStep.processingImage,
+                                  ),
+                                ),
+                              ),
+                            if (!ctl.isProcessingCapture)
+                              Positioned(
+                                bottom: 32,
+                                left: 0,
+                                right: 0,
+                                child: SafeArea(
+                                  child: Center(
+                                    child: FilledButton.icon(
+                                      onPressed: _isDownloading
+                                          ? null
+                                          : _downloadCapturedWithProgress,
+                                      icon: AnimatedSwitcher(
+                                        duration:
+                                            const Duration(milliseconds: 200),
+                                        child: _isDownloading
+                                            ? _ProgressBadge(
+                                                value: _downloadProgress,
+                                              )
+                                            : const Icon(
+                                                Icons.download,
+                                                key: ValueKey('download'),
+                                              ),
                                       ),
+                                      label: Text(_isDownloading
+                                          ? 'Descargando…'
+                                          : 'Descargar foto'),
                                     ),
                                   ),
                                 ),
                               ),
-                            Positioned(
-                              bottom: 32,
-                              left: 0,
-                              right: 0,
-                              child: SafeArea(
-                                child: Center(
-                                  child: FilledButton.icon(
-                                    onPressed: (_isDownloading ||
-                                            ctl.isProcessingCapture)
-                                        ? null
-                                        : _downloadCapturedWithProgress,
-                                    icon: AnimatedSwitcher(
-                                      duration:
-                                          const Duration(milliseconds: 200),
-                                      child: _isDownloading
-                                          ? _ProgressBadge(
-                                              value: _downloadProgress,
-                                            )
-                                          : const Icon(
-                                              Icons.download,
-                                              key: ValueKey('download'),
-                                            ),
-                                    ),
-                                    label: Text(
-                                        _isDownloading
-                                            ? 'Descargando…'
-                                            : (ctl.isProcessingCapture
-                                                ? 'Procesando…'
-                                                : 'Descargar foto')),
-                                  ),
-                                ),
-                              ),
-                            ),
                             Positioned(
                               top: 16,
                               right: 16,
