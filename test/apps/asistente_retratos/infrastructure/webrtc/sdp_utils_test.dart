@@ -1,4 +1,4 @@
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 import 'package:validador_retratos_flutter/apps/asistente_retratos/infrastructure/webrtc/sdp_utils.dart';
 

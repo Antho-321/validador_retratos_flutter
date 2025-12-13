@@ -814,7 +814,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       _warn('Error sending RESTART: $e');
     }
   }
-}
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);
   @override
   Stream<PoseFrame> get frames => _framesCtrl.stream;

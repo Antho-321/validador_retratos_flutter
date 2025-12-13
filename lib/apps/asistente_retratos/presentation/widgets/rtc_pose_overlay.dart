@@ -256,8 +256,8 @@ class _PoseOverlayFastState extends State<PoseOverlayFast> {
       _poseHoldFrame = f;
       _poseHoldTs = DateTime.now();
       if (kDebugMode) {
-        final packed = f.packedPositions?.length ?? 0;
-        final flats = f.posesPxFlat?.length ?? 0;
+        final packed = f?.packedPositions?.length ?? 0;
+        final flats = f?.posesPxFlat?.length ?? 0;
         debugPrint(
           '[PoseOverlayFast] new hold frame stored (packed=$packed, flats=$flats)',
         );
