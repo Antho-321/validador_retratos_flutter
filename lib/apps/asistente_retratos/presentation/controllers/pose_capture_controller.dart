@@ -370,6 +370,12 @@ class _RollMetrics {
   const _RollMetrics(this.errDeg, this.dps);
 }
 
+class _CaptureProcessingCancelled implements Exception {
+  const _CaptureProcessingCancelled();
+  @override
+  String toString() => 'Capture processing cancelled';
+}
+
 /// Controller
 class PoseCaptureController extends ChangeNotifier {
   PoseCaptureController({
@@ -424,15 +430,15 @@ class PoseCaptureController extends ChangeNotifier {
           // puedes mantener force:false aquí
         );
       },
-      
       // 2. <-- BLOQUE onFire ACTUALIZADO
       onFire: () async {
         // Disparo/captura
         isCapturing = true;
         isProcessingCapture = false;
-        notifyListeners();
+        if (!_isDisposed) notifyListeners();
 
         final bytes = await _Capture.tryAll(poseService, _fallbackSnapshot);
+        if (_isDisposed) return;
 
         // Verifica si la captura local falló
         if (bytes == null || bytes.isEmpty) {
@@ -442,13 +448,16 @@ class PoseCaptureController extends ChangeNotifier {
           isCapturing = false;
           isProcessingCapture = false;
           _readySince = null;
-          notifyListeners();
+          if (!_isDisposed) notifyListeners();
           return; // Aborta
         }
 
+        final String captureId = 'cap_${DateTime.now().millisecondsSinceEpoch}';
+        _activeCaptureId = captureId;
+
         // Muestra la captura local de inmediato
         capturedPng = bytes;
-        notifyListeners();
+        if (!_isDisposed) notifyListeners();
 
         // ⬇️ NEW: Enviar, esperar respuesta, y asignar.
         try {
@@ -460,41 +469,49 @@ class PoseCaptureController extends ChangeNotifier {
             return; // Sale del 'try', el 'finally' se ejecutará
           }
 
-          final String captureId =
-              'cap_${DateTime.now().millisecondsSinceEpoch}';
-          // Prepara la escucha de la respuesta
-          final responseFuture = poseService.imagesProcessed.firstWhere(
-            (imgRx) => imgRx.requestId == captureId,
-          );
+          // Prepara la escucha de la respuesta (sin timeout: esperar lo necesario)
+          final responseFuture = _waitForProcessedImage(captureId);
+          // Evita futuros con error sin handler si falla el envío antes del await.
+          unawaited(responseFuture.then<void>((_) {}, onError: (_, __) {}));
 
           // Activa loader mientras esperamos al servidor
           isProcessingCapture = true;
-          notifyListeners();
+          if (!_isDisposed) notifyListeners();
 
           // Intenta enviar la imagen
           await poseService.sendImageBytes(bytes, requestId: captureId);
 
-          // Espera la respuesta del servidor (con timeout)
-          final ImagesRx serverResponse = await responseFuture.timeout(
-            const Duration(seconds: 12), // Timeout acotado a ~11-12s
-          );
-          
+          // Espera la respuesta del servidor (sin timeout)
+          final ImagesRx serverResponse = await responseFuture;
+
           // Éxito: Asigna la imagen procesada del servidor
-          if (serverResponse.bytes.isNotEmpty) {
-             capturedPng = serverResponse.bytes;
-          } else {
-             // Respuesta vacía, usa local
-             if (kDebugMode) print('[pose] Server response empty; using local fallback');
-             // mantenemos la captura local ya visible
+          if (_isDisposed || _activeCaptureId != captureId) {
+            return;
           }
 
+          if (serverResponse.bytes.isNotEmpty) {
+            capturedPng = serverResponse.bytes;
+          } else {
+            // Respuesta vacía, usa local
+            if (kDebugMode) {
+              print('[pose] Server response empty; using local fallback');
+            }
+            // mantenemos la captura local ya visible
+          }
         } catch (e) {
+          if (e is _CaptureProcessingCancelled) {
+            return;
+          }
           // Fallback 2: Error en envío/espera (ej. TimeoutException)
           if (kDebugMode) {
             print('[pose] Failed to get server response, using local fallback: $e');
           }
         } finally {
-          // Pase lo que pase (éxito, error, canal no listo), 
+          _cancelImagesWait(captureId: captureId);
+          if (_isDisposed || _activeCaptureId != captureId) {
+            return;
+          }
+          // Pase lo que pase (éxito, error, canal no listo),
           // actualiza la UI para mostrar la imagen (sea cual sea)
           isCapturing = false;
           isProcessingCapture = false;
@@ -581,6 +598,11 @@ class PoseCaptureController extends ChangeNotifier {
   Uint8List? capturedPng; // captured bytes (from WebRTC track or boundary fallback)
   bool isCapturing = false; // Capture-mode flag to hide preview/HUD instantly at T=0
   bool isProcessingCapture = false; // waiting for server-processed image
+  String? _activeCaptureId; // requestId currently shown/processed
+  String? _imagesWaitCaptureId;
+  StreamSubscription<ImagesRx>? _imagesWaitSub;
+  Completer<ImagesRx>? _imagesWaitCompleter;
+  bool _isDisposed = false;
 
   // Face recognition gating state
   bool _faceRecogMatch = false;
@@ -752,6 +774,8 @@ class PoseCaptureController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _isDisposed = true;
+    _cancelImagesWait();
     if (_attached) {
       poseService.latestFrame.removeListener(_frameListener);
       poseService.faceRecogResult.removeListener(_faceRecogListener);
@@ -763,13 +787,77 @@ class PoseCaptureController extends ChangeNotifier {
     super.dispose();
   }
 
+  void _cleanupImagesWait() {
+    final sub = _imagesWaitSub;
+    _imagesWaitSub = null;
+    _imagesWaitCaptureId = null;
+    if (sub != null) {
+      unawaited(sub.cancel());
+    }
+  }
+
+  void _cancelImagesWait({String? captureId}) {
+    if (captureId != null &&
+        _imagesWaitCaptureId != null &&
+        _imagesWaitCaptureId != captureId) {
+      return;
+    }
+
+    final completer = _imagesWaitCompleter;
+    _imagesWaitCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.completeError(const _CaptureProcessingCancelled());
+    }
+    _cleanupImagesWait();
+  }
+
+  Future<ImagesRx> _waitForProcessedImage(String captureId) {
+    _cancelImagesWait();
+
+    final completer = Completer<ImagesRx>();
+    _imagesWaitCompleter = completer;
+    _imagesWaitCaptureId = captureId;
+    _imagesWaitSub = poseService.imagesProcessed.listen(
+      (imgRx) {
+        if (imgRx.requestId != captureId) return;
+        if (_imagesWaitCompleter != completer) return;
+
+        if (!completer.isCompleted) {
+          completer.complete(imgRx);
+        }
+        _imagesWaitCompleter = null;
+        _cleanupImagesWait();
+      },
+      onError: (Object error, StackTrace st) {
+        if (_imagesWaitCompleter != completer) return;
+        if (!completer.isCompleted) {
+          completer.completeError(error, st);
+        }
+        _imagesWaitCompleter = null;
+        _cleanupImagesWait();
+      },
+      onDone: () {
+        if (_imagesWaitCompleter != completer) return;
+        if (!completer.isCompleted) {
+          completer.completeError(StateError('imagesProcessed stream closed'));
+        }
+        _imagesWaitCompleter = null;
+        _cleanupImagesWait();
+      },
+    );
+    return completer.future;
+  }
+
   // ── Public actions ────────────────────────────────────────────────────
   void closeCaptured() {
+    final captureId = _activeCaptureId;
+    _activeCaptureId = null;
+    _cancelImagesWait(captureId: captureId);
     capturedPng = null;
     isCapturing = false;
     isProcessingCapture = false;
     _readySince = null;
-    notifyListeners();
+    if (!_isDisposed) notifyListeners();
   }
 
   // Keep the same name/signature used by addListener tear-off:
