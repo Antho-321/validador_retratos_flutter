@@ -73,7 +73,11 @@ Future<bool> saveCaptured(
       relativePath: FilePath.root,
     );
 
-    if (info != null && info.isSuccessful) {
+    // `SaveInfo.isSuccessful` is `false` when the file is saved as a duplicate
+    // (e.g. "file (1).jpg") because the original name couldn't be replaced.
+    // That is still a successful save for the user, so treat any non-null
+    // `SaveInfo` as success.
+    if (info != null) {
       onProgress?.call(1.0);
       return true;
     }

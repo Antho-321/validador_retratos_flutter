@@ -226,16 +226,35 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     setState(() => _downloadProgress = resizePhaseWeight);
 
     final filename = _resolveDownloadFilename();
-    final success = await saveCapturedPortrait(
-      resizedBytes,
-      filename: filename,
-      onProgress: (p) {
-        if (!mounted) return;
-        final scaled =
-            resizePhaseWeight + p.clamp(0, 1) * (1 - resizePhaseWeight);
-        setState(() => _downloadProgress = scaled);
-      },
-    );
+    late final bool success;
+    try {
+      success = await saveCapturedPortrait(
+        resizedBytes,
+        filename: filename,
+        onProgress: (p) {
+          if (!mounted) return;
+          final scaled =
+              resizePhaseWeight + p.clamp(0, 1) * (1 - resizePhaseWeight);
+          setState(() => _downloadProgress = scaled);
+        },
+      );
+    } catch (e) {
+      if (!mounted) return;
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[pose] Failed to save capture: $e');
+      }
+      setState(() {
+        _isDownloading = false;
+        _downloadProgress = 0.0;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No se pudo guardar la foto. Intenta de nuevo.'),
+        ),
+      );
+      return;
+    }
 
     if (!mounted) return;
 
