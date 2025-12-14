@@ -875,15 +875,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                           fit: BoxFit.cover,
                           showSafeBox: false,
                           messageGap: 0.045,
-                          ovalRectFor: (sz) {
-                            final r = faceOvalRectFor(sz);
-                            final newW = r.width * 0.88;
-                            final newH = r.height * 0.83;
-                            final dx = (r.width - newW) / 2;
-                            final dy = (r.height - newH) / 2;
-                            return Rect.fromLTWH(
-                                r.left + dx, r.top + dy, newW, newH);
-                          },
                         ),
                       ),
                     ),
