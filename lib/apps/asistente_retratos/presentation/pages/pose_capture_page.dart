@@ -450,6 +450,7 @@ Future<Uint8List> _resizeCapture(
   required String format,
   int width = 375,
   int height = 425,
+  int jpegQuality = 95,
   int pngLevel = 6,
 }) async {
   final payload = <String, Object?>{
@@ -457,6 +458,7 @@ Future<Uint8List> _resizeCapture(
     'format': format,
     'width': width,
     'height': height,
+    'jpegQuality': jpegQuality,
     'pngLevel': pngLevel,
   };
   try {
@@ -485,10 +487,10 @@ Future<Uint8List> _resizeCaptureForValidation(
 }) =>
     _resizeCapture(
       bytes,
-      format: 'png',
+      format: 'jpeg',
       width: width,
       height: height,
-      pngLevel: 6,
+      jpegQuality: 100, // Maximum quality for validation
     );
 
 Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
@@ -496,6 +498,7 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
   final format = (payload['format'] as String?)?.toLowerCase().trim() ?? 'png';
   final width = payload['width'] as int;
   final height = payload['height'] as int;
+  final jpegQuality = payload['jpegQuality'] as int? ?? 95;
   final pngLevel = payload['pngLevel'] as int? ?? 6;
 
   final decoded = img.decodeImage(bytes);
@@ -506,6 +509,10 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
   final resized = _resizeImage(decoded, width, height);
   if (format == 'png') {
     final encoded = img.encodePng(resized, level: pngLevel);
+    return Uint8List.fromList(encoded);
+  }
+  if (format == 'jpeg' || format == 'jpg') {
+    final encoded = img.encodeJpg(resized, quality: jpegQuality);
     return Uint8List.fromList(encoded);
   }
 
@@ -635,7 +642,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           endpoint.host == '10.0.2.2';
       final allowInsecure = allowInsecureFromEnv || (kDebugMode && isLocalHost);
 
-      final resizedPng = await _resizeCaptureForValidation(
+      final resizedJpeg = await _resizeCaptureForValidation(
         bytes,
         width: 375,
         height: 425,
@@ -647,9 +654,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       );
 
       final result = await api.validarImagen(
-        imageBytes: resizedPng,
-        filename: '$cedula.png',
-        contentType: 'image/png',
+        imageBytes: resizedJpeg,
+        filename: '$cedula.jpg',
+        contentType: 'image/jpeg',
         cedula: cedula,
         nacionalidad: nacionalidad,
         etnia: etnia,
