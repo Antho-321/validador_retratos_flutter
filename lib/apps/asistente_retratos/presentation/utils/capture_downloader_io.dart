@@ -16,7 +16,7 @@ import 'capture_download_types.dart';
 /// - iOS: shows Files “Save to…” sheet (no true auto-Downloads on iOS).
 Future<bool> saveCaptured(
   List<int> bytes, {
-  String filename = 'retrato.jpg',
+  String filename = 'retrato.png',
   SaveProgress? onProgress,
 }) async {
   final data = Uint8List.fromList(bytes);
@@ -24,7 +24,7 @@ Future<bool> saveCaptured(
   // Normalize name + extension
   final dot = filename.lastIndexOf('.');
   final String name = (dot > 0) ? filename.substring(0, dot) : filename;
-  final String ext  = (dot > 0 ? filename.substring(dot + 1) : 'jpg').toLowerCase();
+  final String ext  = (dot > 0 ? filename.substring(dot + 1) : 'png').toLowerCase();
 
   if (Platform.isAndroid) {
     // Initialize MediaStore
@@ -75,7 +75,7 @@ Future<bool> saveCaptured(
     );
 
     // `SaveInfo.isSuccessful` is `false` when the file is saved as a duplicate
-    // (e.g. "file (1).jpg") because the original name couldn't be replaced.
+    // (e.g. "file (1).png") because the original name couldn't be replaced.
     // That is still a successful save for the user, so treat any non-null
     // `SaveInfo` as success.
     if (info != null) {
@@ -108,8 +108,6 @@ Future<bool> saveCaptured(
 MimeType _mimeFromExt(String ext) {
   switch (ext.toLowerCase()) {
     case 'png':  return MimeType.png;
-    case 'jpg':
-    case 'jpeg': return MimeType.jpeg;
     case 'pdf':  return MimeType.pdf;
     default:     return MimeType.other;
   }

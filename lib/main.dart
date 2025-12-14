@@ -25,8 +25,8 @@ const exampleValidationJson = r'''
   "metadatos": {
     "valido": "True",
     "nombre": "1050298650",
-    "extension": ".jpg",
-    "formato": "JPEG",
+    "extension": ".png",
+    "formato": "PNG",
     "ancho": 375,
     "alto": 425,
     "peso": 56565

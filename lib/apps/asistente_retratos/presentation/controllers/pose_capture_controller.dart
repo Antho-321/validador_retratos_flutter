@@ -2,8 +2,10 @@
 // lib/apps/asistente_retratos/presentation/controllers/pose_capture_controller.dart
 // ==========================
 import 'dart:async';
-import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData;
+import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData; // Fixed duplicate
+
 import 'dart:math' as math;
+import 'package:image/image.dart' as img; // <-- ADDED
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary; // kept for types
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -469,6 +471,16 @@ class PoseCaptureController extends ChangeNotifier {
             return; // Sale del 'try', el 'finally' se ejecutará
           }
 
+          // Force PNG
+          Uint8List pngBytes = bytes;
+          if (!_isPngSignature(bytes)) {
+             if (kDebugMode) print('[pose] Converting capture to PNG...');
+             final rawImg = img.decodeImage(bytes);
+             if (rawImg != null) {
+               pngBytes = img.encodePng(rawImg);
+             }
+          }
+
           // Prepara la escucha de la respuesta (sin timeout: esperar lo necesario)
           final responseFuture = _waitForProcessedImage(captureId);
           // Evita futuros con error sin handler si falla el envío antes del await.
@@ -479,7 +491,7 @@ class PoseCaptureController extends ChangeNotifier {
           if (!_isDisposed) notifyListeners();
 
           // Intenta enviar la imagen
-          await poseService.sendImageBytes(bytes, requestId: captureId);
+          await poseService.sendImageBytes(pngBytes, requestId: captureId);
 
           // Espera la respuesta del servidor (sin timeout)
           final ImagesRx serverResponse = await responseFuture;
@@ -946,6 +958,18 @@ class PoseCaptureController extends ChangeNotifier {
 
   // Keep the same name/signature used by addListener tear-off:
   void _onFrame() => this._onFrameImpl(); // calls the extension method
+
+  static bool _isPngSignature(Uint8List bytes) {
+    if (bytes.length < 8) return false;
+    return bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47 &&
+        bytes[4] == 0x0D &&
+        bytes[5] == 0x0A &&
+        bytes[6] == 0x1A &&
+        bytes[7] == 0x0A;
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────

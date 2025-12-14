@@ -472,28 +472,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   String _detectImageFormat(Uint8List bytes) {
-    if (bytes.length >= 4 &&
+    if (bytes.length >= 8 &&
         bytes[0] == 0x89 &&
         bytes[1] == 0x50 &&
         bytes[2] == 0x4E &&
-        bytes[3] == 0x47) {
+        bytes[3] == 0x47 &&
+        bytes[4] == 0x0D &&
+        bytes[5] == 0x0A &&
+        bytes[6] == 0x1A &&
+        bytes[7] == 0x0A) {
       return 'png';
     }
-    if (bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
-      return 'jpeg';
-    }
-    if (bytes.length >= 4 &&
-        ((bytes[0] == 0x49 &&
-                bytes[1] == 0x49 &&
-                bytes[2] == 0x2A &&
-                bytes[3] == 0x00) ||
-            (bytes[0] == 0x4D &&
-                bytes[1] == 0x4D &&
-                bytes[2] == 0x00 &&
-                bytes[3] == 0x2A))) {
-      return 'dng';
-    }
-    return 'jpeg';
+    return 'unknown';
   }
 
   String _md5Hex(Uint8List bytes) => crypto.md5.convert(bytes).toString();
@@ -536,7 +526,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         return;
       }
 
-      final fmt = (json['format'] ?? 'jpeg').toString().toLowerCase();
+      final fmt = (json['format'] ?? 'png').toString().toLowerCase();
       // OLD:
       // final bytes = (json['bytes'] is int)
       //     ? json['bytes'] as int

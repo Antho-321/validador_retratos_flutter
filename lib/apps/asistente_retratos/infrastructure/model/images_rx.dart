@@ -3,7 +3,7 @@ import 'dart:typed_data';
 
 class ImagesRx {
   final String requestId;
-  final String format;     // 'jpeg' | 'png' | ...
+  final String format;     // 'png'
   final Uint8List bytes;
   final bool? okHash;      // verificación hash (opcional)
   final bool? okSize;      // verificación tamaño (opcional)

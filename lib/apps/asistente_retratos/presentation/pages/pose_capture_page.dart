@@ -450,7 +450,6 @@ Future<Uint8List> _resizeCapture(
   required String format,
   int width = 375,
   int height = 425,
-  int jpegQuality = 95,
   int pngLevel = 6,
 }) async {
   final payload = <String, Object?>{
@@ -458,7 +457,6 @@ Future<Uint8List> _resizeCapture(
     'format': format,
     'width': width,
     'height': height,
-    'jpegQuality': jpegQuality,
     'pngLevel': pngLevel,
   };
   try {
@@ -475,10 +473,9 @@ Future<Uint8List> _resizeCaptureForDownload(
 }) =>
     _resizeCapture(
       bytes,
-      format: 'jpeg',
+      format: 'png', // Changed to png
       width: width,
       height: height,
-      jpegQuality: 95,
     );
 
 Future<Uint8List> _resizeCaptureForValidation(
@@ -496,10 +493,9 @@ Future<Uint8List> _resizeCaptureForValidation(
 
 Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
   final bytes = payload['bytes'] as Uint8List;
-  final format = (payload['format'] as String?)?.toLowerCase().trim() ?? 'jpeg';
+  final format = (payload['format'] as String?)?.toLowerCase().trim() ?? 'png';
   final width = payload['width'] as int;
   final height = payload['height'] as int;
-  final jpegQuality = payload['jpegQuality'] as int? ?? 95;
   final pngLevel = payload['pngLevel'] as int? ?? 6;
 
   final decoded = img.decodeImage(bytes);
@@ -512,12 +508,8 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
     final encoded = img.encodePng(resized, level: pngLevel);
     return Uint8List.fromList(encoded);
   }
-  if (format == 'jpeg' || format == 'jpg') {
-    final encoded = img.encodeJpg(resized, quality: jpegQuality);
-    return Uint8List.fromList(encoded);
-  }
 
-  throw ArgumentError.value(format, 'format', 'Unsupported output format');
+  throw ArgumentError.value(format, 'format', 'Unsupported output format (only png)');
 }
 
 img.Image _resizeImage(img.Image source, int width, int height) {
@@ -565,7 +557,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         return ref.trim();
       }
     }
-    return 'retrato_${DateTime.now().millisecondsSinceEpoch}.jpg';
+    return 'retrato_${DateTime.now().millisecondsSinceEpoch}.png';
   }
 
   @override

@@ -6,9 +6,6 @@ import 'capture_download_types.dart';
 
 String _inferMimeType(String filename) {
   final lower = filename.toLowerCase();
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
-    return 'image/jpeg';
-  }
   if (lower.endsWith('.png')) {
     return 'image/png';
   }
