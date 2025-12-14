@@ -377,12 +377,14 @@ extension _OnFrameLogicExt on PoseCaptureController {
       } else {
         if (isCountingDown) _stopCountdown(); // no auto-countdown en modo OFF
         _setHud(
-          const PortraitUiModel(
+          PortraitUiModel(
             primaryMessage: 'Validaciones desactivadas',
             secondaryMessage: null,
             countdownSeconds: null,
             countdownProgress: null,
             ovalProgress: 1.0,
+            // Sin arco de progreso: pinta el óvalo completo en verde.
+            ovalSegmentsOk: List<bool>.filled(64, true, growable: false),
           ),
         );
       }
