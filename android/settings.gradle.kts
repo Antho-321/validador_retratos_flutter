@@ -23,4 +23,10 @@ plugins {
     id("org.jetbrains.kotlin.android") version "2.2.10" apply false
  }
 
+// Speed up `flutter run` by skipping Flutter's Gradle dependency/version checks.
+// Equivalent to passing `--android-skip-build-dependency-validation`.
+gradle.beforeProject {
+    extensions.extraProperties.set("skipDependencyChecks", true)
+}
+
 include(":app")

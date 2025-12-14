@@ -47,6 +47,7 @@ class PoseCapturePage extends StatefulWidget {
     this.countdownSpeed = 1.6,
     this.validationsEnabled = true,
     this.drawLandmarks = true, // ⬅️ nuevo
+    this.showDownloadButton = false,
   });
 
   final PoseCaptureService poseService;
@@ -56,6 +57,7 @@ class PoseCapturePage extends StatefulWidget {
   final double countdownSpeed;
   final bool validationsEnabled;
   final bool drawLandmarks; // ⬅️ nuevo
+  final bool showDownloadButton;
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
@@ -1011,26 +1013,26 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                           runSpacing: 12,
                                           alignment: WrapAlignment.center,
                                           children: [
-                                            FilledButton.icon(
-                                              onPressed: _isDownloading
-                                                  ? null
-                                                  : () => unawaited(
-                                                        _downloadCapturedWithProgress(),
+                                            if (widget.showDownloadButton)
+                                              FilledButton.icon(
+                                                onPressed: _isDownloading
+                                                    ? null
+                                                    : () => unawaited(
+                                                          _downloadCapturedWithProgress(),
+                                                        ),
+                                                icon: _isDownloading
+                                                    ? _ProgressBadge(
+                                                        value: _downloadProgress,
+                                                      )
+                                                    : const Icon(
+                                                        Icons.download_rounded,
                                                       ),
-                                              icon: _isDownloading
-                                                  ? _ProgressBadge(
-                                                      value: _downloadProgress,
-                                                    )
-                                                  : const Icon(
-                                                      Icons.download_rounded,
-                                                    ),
-                                              label: Text(
-                                                _isDownloading
-                                                    ? 'Descargando…'
-                                                    : 'Descargar',
+                                                label: Text(
+                                                  _isDownloading
+                                                      ? 'Descargando…'
+                                                      : 'Descargar',
+                                                ),
                                               ),
-                                            ),
-
                                             FilledButton.icon(
                                               onPressed: () {
                                                 _resetValidationState();

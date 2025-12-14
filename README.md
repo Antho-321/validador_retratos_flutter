@@ -1,5 +1,11 @@
 # 📁 Otros archivos modificados
 
+## ⚡ Fast `flutter run`
+
+- Script: `tool/flutter_run_fast.sh` (usa `android/local.properties` para ubicar tu Flutter SDK).
+- Por defecto usa `DEVICE_ID="SM A135M"` (puedes cambiarlo: `DEVICE_ID="<id>" tool/flutter_run_fast.sh`).
+- Flags para acelerar: `--no-pub`, `--no-track-widget-creation`, `--android-skip-build-dependency-validation`.
+
 ## 🤖 Android
 ```kotlin
 android/app/src/main/kotlin/com/yourpackage/yourapp/MainActivity.kt
