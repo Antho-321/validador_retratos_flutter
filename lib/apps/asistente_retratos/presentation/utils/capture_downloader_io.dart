@@ -36,11 +36,12 @@ Future<bool> saveCaptured(
 
     final sdk = (await DeviceInfoPlugin().androidInfo).version.sdkInt;
 
-    // Legacy permission (Android 10 and below) for shared storage
-    if (sdk <= 29) {
+    // Legacy permission (Android 9 and below) for shared storage
+    // (Android 10+ uses scoped storage; MediaStore writes don't need this)
+    if (sdk <= 28) {
       final st = await Permission.storage.request();
       if (!st.isGranted) {
-        throw StateError('PERMISSION_DENIED: storage (SDK <= 29)');
+        throw StateError('PERMISSION_DENIED: storage (SDK <= 28)');
       }
     }
 

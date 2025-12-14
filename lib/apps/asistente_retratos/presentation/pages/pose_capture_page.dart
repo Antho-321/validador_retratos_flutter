@@ -951,13 +951,39 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                           ),
                                         ),
                                       Center(
-                                        child: FilledButton.icon(
-                                          onPressed: () {
-                                            _resetValidationState();
-                                            unawaited(ctl.restartBackend());
-                                          },
-                                          icon: const Icon(Icons.refresh),
-                                          label: const Text('Reintentar'),
+                                        child: Wrap(
+                                          spacing: 12,
+                                          runSpacing: 12,
+                                          alignment: WrapAlignment.center,
+                                          children: [
+                                            FilledButton.icon(
+                                              onPressed: _isDownloading
+                                                  ? null
+                                                  : () => unawaited(
+                                                        _downloadCapturedWithProgress(),
+                                                      ),
+                                              icon: _isDownloading
+                                                  ? _ProgressBadge(
+                                                      value: _downloadProgress,
+                                                    )
+                                                  : const Icon(
+                                                      Icons.download_rounded,
+                                                    ),
+                                              label: Text(
+                                                _isDownloading
+                                                    ? 'Descargando…'
+                                                    : 'Descargar',
+                                              ),
+                                            ),
+                                            FilledButton.icon(
+                                              onPressed: () {
+                                                _resetValidationState();
+                                                unawaited(ctl.restartBackend());
+                                              },
+                                              icon: const Icon(Icons.refresh),
+                                              label: const Text('Reintentar'),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ],
