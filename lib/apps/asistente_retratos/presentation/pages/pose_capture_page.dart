@@ -12,7 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:file_picker/file_picker.dart';
+
 import 'package:image/image.dart' as img;
 
 import '../../domain/service/pose_capture_service.dart';
@@ -793,35 +793,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     );
   }
 
-  Future<void> _sendRawDngToBackend() async {
-    try {
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: const ['dng'],
-        withData: true,
-      );
-      if (result == null || result.files.isEmpty) return;
 
-      final picked = result.files.single;
-      final bytes = picked.bytes;
-      if (bytes == null || bytes.isEmpty) {
-        throw StateError('No se pudo leer el archivo RAW seleccionado.');
-      }
-
-      await ctl.processExternalImageBytes(
-        bytes,
-        basename: picked.name,
-        formatOverride: 'dng',
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('No se pudo enviar el RAW (DNG): $e'),
-        ),
-      );
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1058,19 +1030,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                                     : 'Descargar',
                                               ),
                                             ),
-                                            FilledButton.icon(
-                                              onPressed: (_isDownloading ||
-                                                      ctl.isProcessingCapture ||
-                                                      _isValidatingRemote)
-                                                  ? null
-                                                  : () => unawaited(
-                                                        _sendRawDngToBackend(),
-                                                      ),
-                                              icon: const Icon(
-                                                Icons.upload_file,
-                                              ),
-                                              label: const Text('Enviar RAW'),
-                                            ),
+
                                             FilledButton.icon(
                                               onPressed: () {
                                                 _resetValidationState();
