@@ -543,6 +543,7 @@ class PoseCaptureController extends ChangeNotifier {
             countdownSeconds: null,
             countdownProgress: null,
             ovalProgress: cur.ovalProgress,
+            ovalSegmentsOk: cur.ovalSegmentsOk,
           ),
           force: true,
         );
@@ -935,7 +936,8 @@ extension _HudHelpers on PoseCaptureController {
         cur.secondaryMessage == next.secondaryMessage &&
         cur.countdownSeconds == next.countdownSeconds &&
         cur.countdownProgress == next.countdownProgress &&
-        cur.ovalProgress == next.ovalProgress;
+      cur.ovalProgress == next.ovalProgress &&
+      listEquals(cur.ovalSegmentsOk, next.ovalSegmentsOk);
 
     if (!same) {
       hud.value = next;
@@ -962,6 +964,7 @@ extension _CountdownHelpers on PoseCaptureController {
         countdownSeconds: null, // cleared for real
         countdownProgress: null, // cleared for real
         ovalProgress: cur.ovalProgress,
+        ovalSegmentsOk: cur.ovalSegmentsOk,
       ),
       force: true,
     );

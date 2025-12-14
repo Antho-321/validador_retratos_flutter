@@ -13,6 +13,7 @@ class _EvalCtx {
     required this.now,
     required this.faceOk,
     required this.arcProgress,
+    required this.ovalSegmentsOk,
     required this.inputs,
     required this.metrics,
 
@@ -25,6 +26,9 @@ class _EvalCtx {
   final DateTime now;
   final bool faceOk;
   final double arcProgress;
+
+  /// Segmentos del óvalo: true=verde, false=rojo. Null => óvalo totalmente rojo.
+  final List<bool>? ovalSegmentsOk;
 
   /// Frame inputs + metric registry (pluggable)
   final FrameInputs inputs;
@@ -397,7 +401,12 @@ extension _OnFrameLogicExt on PoseCaptureController {
     // 1) Gather inputs + compute metrics and “inside now” flags
     final _EvalCtx? ctx = _evaluateCurrentFrame(frame);
     if (ctx == null) {
-      _pushHudAdjusting(faceOk: false, arcProgress: 0.0, finalHint: null);
+      _pushHudAdjusting(
+        faceOk: false,
+        arcProgress: 0.0,
+        finalHint: null,
+        ovalSegmentsOk: null,
+      );
       return;
     }
 
@@ -655,6 +664,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     final bool faceOk = report.faceInOval;
     final double arcProgress = report.ovalProgress;
+    final List<bool>? segmentsOk = report.faceOvalSegmentsOk;
 
     // EMA para yaw/pitch (solo para animaciones)
     final double dtMs = (_lastSampleAt == null)
@@ -704,6 +714,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       now: now,
       faceOk: faceOk,
       arcProgress: arcProgress,
+      ovalSegmentsOk: segmentsOk,
       inputs: inputs,
       metrics: _metricRegistry,
       yawDegForAnim: _emaYawDeg,
@@ -1006,12 +1017,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     if (!isCountingDown) {
       if (allChecksOk) {
-        _pushHudReady(arc: c.arcProgress);
+        _pushHudReady(arc: c.arcProgress, ovalSegmentsOk: c.ovalSegmentsOk);
       } else {
         _pushHudAdjusting(
           faceOk: c.faceOk,
           arcProgress: c.arcProgress,
           finalHint: ha.hint,
+          ovalSegmentsOk: c.ovalSegmentsOk,
         );
       }
     }
@@ -1025,7 +1037,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     }
   }
 
-  void _pushHudReady({required double arc}) {
+  void _pushHudReady({required double arc, required List<bool>? ovalSegmentsOk}) {
     _setHud(
       PortraitUiModel(
         primaryMessage: '¡Perfecto! ¡Permanece así!',
@@ -1033,6 +1045,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: arc,
+        ovalSegmentsOk: ovalSegmentsOk,
       ),
     );
   }
@@ -1041,6 +1054,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     required bool faceOk,
     required double arcProgress,
     required String? finalHint,
+    required List<bool>? ovalSegmentsOk,
   }) {
     String effectiveMsg;
     final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
@@ -1062,6 +1076,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: arcProgress,
+        ovalSegmentsOk: ovalSegmentsOk,
       ),
     );
   }

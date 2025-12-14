@@ -1,6 +1,7 @@
 // lib/apps/asistente_retratos/presentation/widgets/portrait_validator_hud.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
+import 'package:flutter/foundation.dart'
+  show ValueListenable, ValueNotifier, listEquals;
 import 'dart:math' as math;
 
 import '../../core/face_oval_geometry.dart'
@@ -20,6 +21,7 @@ class PortraitUiModel {
     this.countdownSeconds,
     this.countdownProgress,
     this.ovalProgress,
+    this.ovalSegmentsOk,
   });
 
   final String primaryMessage;
@@ -32,12 +34,17 @@ class PortraitUiModel {
   /// 0..1 de perímetro del óvalo en verde.
   final double? ovalProgress;
 
+  /// Si viene, el perímetro del óvalo se pinta por segmentos:
+  /// `true` = verde (zona OK), `false` = rojo (zona fuera).
+  final List<bool>? ovalSegmentsOk;
+
   PortraitUiModel copyWith({
     String? primaryMessage,
     String? secondaryMessage,
     int? countdownSeconds,
     double? countdownProgress,
     double? ovalProgress,
+    List<bool>? ovalSegmentsOk,
   }) {
     return PortraitUiModel(
       primaryMessage: primaryMessage ?? this.primaryMessage,
@@ -45,6 +52,7 @@ class PortraitUiModel {
       countdownSeconds: countdownSeconds ?? this.countdownSeconds,
       countdownProgress: countdownProgress ?? this.countdownProgress,
       ovalProgress: ovalProgress ?? this.ovalProgress,
+      ovalSegmentsOk: ovalSegmentsOk ?? this.ovalSegmentsOk,
     );
   }
 }
@@ -138,7 +146,7 @@ class PortraitValidatorHUD extends StatelessWidget {
                       painter: _GhostPainter(
                         ovalRect: ovalRect,           // NEW
                         // Trazo del óvalo/caja desde la paleta:
-                        color: capture?.faceOval ?? scheme.primary,
+                        badColor: scheme.primary,
                         opacity: 0.85,
                         strokeWidth: 2.0,
                         showGhost: showGhost,
@@ -148,8 +156,10 @@ class PortraitValidatorHUD extends StatelessWidget {
                         shadeOpacity: 0.30,
                         scrimColor: scheme.scrim,
                         // Progreso en color HUD OK de la paleta (o secondary)
+                        okColor: capture?.hudOk ?? scheme.secondary,
                         progressColor: capture?.hudOk ?? scheme.secondary,
                         progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
+                        ovalSegmentsOk: model.ovalSegmentsOk,
                       ),
                     ),
                   ),
@@ -201,7 +211,8 @@ class PortraitValidatorHUD extends StatelessWidget {
 class _GhostPainter extends CustomPainter {
   _GhostPainter({
     required this.ovalRect,        // NEW
-    required this.color,
+    required this.badColor,
+    required this.okColor,
     required this.opacity,
     required this.strokeWidth,
     required this.showGhost,
@@ -211,10 +222,12 @@ class _GhostPainter extends CustomPainter {
     this.progress = 0.0,
     this.scrimColor = const Color(0xFF000000), // ⬅️ por defecto negro
     this.progressColor = const Color(0xFF53B056), // ⬅️ fallback verde
+    this.ovalSegmentsOk,
   });
 
   final Rect ovalRect;            // NEW
-  final Color color;
+  final Color badColor;
+  final Color okColor;
   final double opacity;
   final double strokeWidth;
   final bool showGhost;
@@ -227,6 +240,9 @@ class _GhostPainter extends CustomPainter {
   // NUEVO: colores desde el tema (con fallback)
   final Color scrimColor;
   final Color progressColor;
+
+  /// Segmentos del óvalo: `true` = verde, `false` = rojo.
+  final List<bool>? ovalSegmentsOk;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -241,13 +257,57 @@ class _GhostPainter extends CustomPainter {
       canvas.drawPath(mask, maskPaint);
     }
 
-    final base = Paint()
-      ..color = color.withOpacity(opacity)
+    final badPaint = Paint()
+      ..color = badColor.withOpacity(opacity)
       ..style = PaintingStyle.stroke
       ..strokeWidth = strokeWidth
       ..isAntiAlias = true;
 
-    canvas.drawOval(ovalRect, base);
+    // Base: óvalo completo en ROJO.
+    canvas.drawOval(ovalRect, badPaint);
+
+    // Overlay: pinta en VERDE los segmentos "OK".
+    final segs = ovalSegmentsOk;
+    if (segs != null && segs.isNotEmpty) {
+      final okPaint = Paint()
+        ..color = okColor.withOpacity(opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth + 1
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      final n = segs.length;
+      final sweepPer = (2 * math.pi) / n;
+
+      final firstBad = segs.indexWhere((e) => e == false);
+      if (firstBad == -1) {
+        // Todo OK -> óvalo completo verde.
+        canvas.drawArc(ovalRect, -math.pi, 2 * math.pi, false, okPaint);
+      } else {
+        // Para manejar el wrap (fin+inicio) sin partir arcos, arrancamos justo
+        // después del primer segmento rojo.
+        final startBase = (firstBad + 1) % n;
+        int k = 0;
+        while (k < n) {
+          final idx = (startBase + k) % n;
+          if (!segs[idx]) {
+            k++;
+            continue;
+          }
+
+          final runStartK = k;
+          while (k < n && segs[(startBase + k) % n]) {
+            k++;
+          }
+          final runLen = k - runStartK;
+          final runStartIdx = (startBase + runStartK) % n;
+
+          final startAngle = -math.pi + runStartIdx * sweepPer;
+          final sweep = runLen * sweepPer;
+          canvas.drawArc(ovalRect, startAngle, sweep, false, okPaint);
+        }
+      }
+    }
 
     final p = progress.clamp(0.0, 1.0);
     if (p > 0) {
@@ -275,7 +335,7 @@ class _GhostPainter extends CustomPainter {
         safeRect,
         topLeft: r, topRight: r, bottomLeft: r, bottomRight: r,
       );
-      canvas.drawRRect(rr, base..strokeWidth = strokeWidth);
+      canvas.drawRRect(rr, badPaint..strokeWidth = strokeWidth);
     }
   }
 
@@ -284,14 +344,16 @@ class _GhostPainter extends CustomPainter {
       old.ovalRect != ovalRect || // NEW
       old.opacity != opacity ||
       old.strokeWidth != strokeWidth ||
-      old.color != color ||
+      old.badColor != badColor ||
+      old.okColor != okColor ||
       old.showGhost != showGhost ||
       old.showSafeBox != showSafeBox ||
       old.shadeOutsideOval != shadeOutsideOval ||
       old.shadeOpacity != shadeOpacity ||
       old.progress != progress ||
       old.scrimColor != scrimColor ||
-      old.progressColor != progressColor;
+      old.progressColor != progressColor ||
+      !listEquals(old.ovalSegmentsOk, ovalSegmentsOk);
 }
 
 /// Pastilla de guía (principal + opcional secundaria)

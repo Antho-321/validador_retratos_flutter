@@ -242,6 +242,31 @@ class PortraitValidationReport {
   bool get faceInOval => _result(PortraitRuleIds.face)?.ok ?? false;
   double get fractionInsideOval => _result(PortraitRuleIds.face)?.valueAsDouble ?? 0.0;
 
+  /// Segmentación del perímetro del óvalo (true=verde/OK, false=rojo/fuera)
+  /// calculada a partir de los landmarks faciales.
+  List<bool>? get faceOvalSegmentsOk {
+    final extra = _result(PortraitRuleIds.face)?.extra;
+    if (extra == null) return null;
+    final v = extra['segmentsOk'];
+    if (v is List<bool>) {
+      return List<bool>.unmodifiable(v);
+    }
+    if (v is List) {
+      final out = <bool>[];
+      for (final e in v) {
+        if (e is bool) {
+          out.add(e);
+        } else if (e is num) {
+          out.add(e != 0);
+        } else {
+          out.add(false);
+        }
+      }
+      return List<bool>.unmodifiable(out);
+    }
+    return null;
+  }
+
   bool get yawOk => _result(PortraitRuleIds.yaw)?.ok ?? false;
   double get yawDeg => _result(PortraitRuleIds.yaw)?.valueAsDouble ?? 0.0;
   double get yawProgress => _result(PortraitRuleIds.yaw)?.progress ?? 0.0;
@@ -360,22 +385,54 @@ class FaceInOvalRule extends PortraitRule {
     final rx2 = rx * rx;
     final ry2 = ry * ry;
 
+    // Para colorear el perímetro por partes, segmentamos el óvalo en N arcos.
+    // Cada landmark fuera del óvalo “tiñe” de rojo el/los segmentos cercanos
+    // a su dirección radial.
+    const int segments = 64;
+    const int spread = 1; // pinta también vecinos para evitar “píxeles” sueltos
+    final segmentsOk = List<bool>.filled(segments, true, growable: false);
+
     int inside = 0;
     for (final p in mapped) {
       final dx = p.dx - cx;
       final dy = p.dy - cy;
       final v = (dx * dx) / (rx2 + context.eps) + (dy * dy) / (ry2 + context.eps);
-      if (v <= 1.0 + context.eps) inside++;
+      final isInside = v <= 1.0 + context.eps;
+      if (isInside) {
+        inside++;
+      } else {
+        // Ángulo en espacio normalizado de la elipse.
+        final nx = dx / (rx + context.eps);
+        final ny = dy / (ry + context.eps);
+        final ang = math.atan2(ny, nx); // [-pi, pi]
+        var idx = (((ang + math.pi) / (2 * math.pi)) * segments).floor();
+        if (idx < 0) idx = 0;
+        if (idx >= segments) idx = segments - 1;
+        for (int s = -spread; s <= spread; s++) {
+          final j = (idx + s) % segments;
+          segmentsOk[j < 0 ? j + segments : j] = false;
+        }
+      }
     }
     final fracInside = inside / mapped.length;
-    final faceOk = fracInside >= context.minFractionInside.clamp(0.0, 1.0);
+
+    // Requisito UX: el óvalo sólo se considera OK (verde completo)
+    // cuando TODO el rostro (todos los landmarks) está dentro.
+    final allInside = inside == mapped.length;
+    final faceOk = allInside;
 
     return RuleResult(
       enabled: true,
       ok: faceOk,
       progress: fracInside,
       value: fracInside,
-      extra: {'fractionInside': fracInside},
+      extra: {
+        'fractionInside': fracInside,
+        'allInside': allInside,
+        'segments': segments,
+        'segmentsOk': segmentsOk,
+        'minFractionInside': context.minFractionInside,
+      },
     );
   }
 }
