@@ -126,18 +126,16 @@ class _FormattedTextBoxState extends State<FormattedTextBox> {
                   );
                 },
               ),
-              AnimatedCrossFade(
-                firstChild: const SizedBox.shrink(),
-                secondChild: ConstrainedBox(
-                  constraints: BoxConstraints(maxHeight: effectiveMaxHeight),
-                  child: content,
-                ),
-                crossFadeState: shouldShowContent
-                    ? CrossFadeState.showSecond
-                    : CrossFadeState.showFirst,
+              AnimatedSize(
                 duration: const Duration(milliseconds: 220),
-                reverseDuration: const Duration(milliseconds: 160),
-                sizeCurve: Curves.easeOutCubic,
+                curve: Curves.easeOutCubic,
+                alignment: Alignment.topCenter,
+                child: shouldShowContent
+                    ? ConstrainedBox(
+                        constraints: BoxConstraints(maxHeight: effectiveMaxHeight),
+                        child: content,
+                      )
+                    : const SizedBox(width: double.infinity, height: 0),
               ),
             ],
           ),
