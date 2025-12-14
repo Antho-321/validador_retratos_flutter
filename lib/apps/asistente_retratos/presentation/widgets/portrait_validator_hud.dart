@@ -157,6 +157,8 @@ class PortraitValidatorHUD extends StatelessWidget {
                         scrimColor: scheme.scrim,
                         // Progreso en color HUD OK de la paleta (o secondary)
                         okColor: capture?.hudOk ?? scheme.secondary,
+                        progressColor: capture?.hudOk ?? scheme.secondary,
+                        progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
                         ovalSegmentsOk: model.ovalSegmentsOk,
                       ),
                     ),
@@ -217,7 +219,9 @@ class _GhostPainter extends CustomPainter {
     this.showSafeBox = true,
     this.shadeOutsideOval = true,
     this.shadeOpacity = 0.30,
+    this.progress = 0.0,
     this.scrimColor = const Color(0xFF000000), // ⬅️ por defecto negro
+    this.progressColor = const Color(0xFF53B056), // ⬅️ fallback verde
     this.ovalSegmentsOk,
   });
 
@@ -231,9 +235,11 @@ class _GhostPainter extends CustomPainter {
   final bool showSafeBox;
   final bool shadeOutsideOval;
   final double shadeOpacity;
+  final double progress; // 0..1
 
   // NUEVO: colores desde el tema (con fallback)
   final Color scrimColor;
+  final Color progressColor;
 
   /// Segmentos del óvalo: `true` = verde, `false` = rojo.
   final List<bool>? ovalSegmentsOk;
@@ -303,6 +309,21 @@ class _GhostPainter extends CustomPainter {
       }
     }
 
+    // Progreso (otras validaciones): arco verde por ovalProgress.
+    final p = progress.clamp(0.0, 1.0);
+    if (p > 0) {
+      final arcPaint = Paint()
+        ..color = progressColor
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth + 3
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true;
+
+      const startAngle = -math.pi / 2;
+      final sweepAngle = p * 2 * math.pi;
+      canvas.drawArc(ovalRect, startAngle, sweepAngle, false, arcPaint);
+    }
+
     if (showSafeBox) {
       final safeRect = Rect.fromLTWH(
         size.width * 0.08,
@@ -330,7 +351,9 @@ class _GhostPainter extends CustomPainter {
       old.showSafeBox != showSafeBox ||
       old.shadeOutsideOval != shadeOutsideOval ||
       old.shadeOpacity != shadeOpacity ||
+      old.progress != progress ||
       old.scrimColor != scrimColor ||
+      old.progressColor != progressColor ||
       !listEquals(old.ovalSegmentsOk, ovalSegmentsOk);
 }
 

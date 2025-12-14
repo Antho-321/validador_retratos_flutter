@@ -11,7 +11,7 @@ const double kOvalCyFrac = 0.41;
 /// Escala uniforme del óvalo (ancho y alto) manteniendo la relación de aspecto.
 ///
 /// 1.0 = tamaño original; >1 agranda; <1 achica.
-const double kOvalScale = 0.9;
+const double kOvalScale = 0.88;
 
 /// 0..1: 0 = óvalo original; 1 = círculo (misma área aproximada que el óvalo original).
 ///

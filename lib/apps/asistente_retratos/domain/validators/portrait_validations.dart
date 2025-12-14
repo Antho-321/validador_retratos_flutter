@@ -324,7 +324,9 @@ class PortraitValidator {
     }
 
     final faceOk = faceResult?.ok ?? false;
-    final faceProgress = faceResult?.progress ?? 0.0;
+    // IMPORTANTE UX: el progreso visual del óvalo NO debe reflejar
+    // "qué tan adentro" está la cara. Solo debe avanzar para las otras
+    // validaciones una vez que el rostro está completamente dentro.
 
     double combinedProgress = 1.0;
     final parts = <double>[];
@@ -336,7 +338,7 @@ class PortraitValidator {
     if (parts.isNotEmpty) {
       combinedProgress = parts.reduce(math.min);
     }
-    final ringProgress = faceOk ? combinedProgress : faceProgress;
+    final ringProgress = faceOk ? combinedProgress : 0.0;
 
     final allOk = results.entries
         .where((e) => e.value.enabled)
