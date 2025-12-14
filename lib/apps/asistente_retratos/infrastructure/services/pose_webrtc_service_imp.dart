@@ -482,6 +482,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     if (bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8) {
       return 'jpeg';
     }
+    if (bytes.length >= 4 &&
+        ((bytes[0] == 0x49 &&
+                bytes[1] == 0x49 &&
+                bytes[2] == 0x2A &&
+                bytes[3] == 0x00) ||
+            (bytes[0] == 0x4D &&
+                bytes[1] == 0x4D &&
+                bytes[2] == 0x00 &&
+                bytes[3] == 0x2A))) {
+      return 'dng';
+    }
     return 'jpeg';
   }
 

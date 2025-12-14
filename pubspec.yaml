@@ -41,6 +41,7 @@ dependencies:
   hashlib: ^1.20.0
   crypto: ^3.0.6
   file_saver: ^0.2.12
+  file_picker: ^8.1.2
   flutter_dotenv: ^5.1.0
   device_info_plus: ^11.1.0
   media_store_plus: ^0.1.3

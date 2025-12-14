@@ -32,3 +32,8 @@ git for-each-ref --format='%(refname:short) %(upstream:trackshort)' refs/heads |
 awk '$2=="[gone]" || $2=="" {print $1}' | 
 
 xargs -r -n1 git branch -D 
+
+# Enviar RAW (DNG) al backend WebRTC
+
+- En `PoseCapturePage` aparece el botón `Enviar RAW` (selecciona un `.dng` y lo envía por el DataChannel `images`).
+- Luego de actualizar dependencias, ejecuta `flutter pub get`.

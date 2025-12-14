@@ -2,6 +2,7 @@ import 'dart:convert' show utf8;
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart' show MediaType;
 
 import 'portrait_validation_http_client.dart'
     show createPortraitValidationHttpClient;
@@ -18,10 +19,12 @@ class PortraitValidationApi {
   final http.Client? _client;
 
   Future<String> validarImagen({
-    required Uint8List jpegBytes,
+    required Uint8List imageBytes,
+    required String filename,
     required String cedula,
     required String nacionalidad,
     required String etnia,
+    String? contentType,
     Duration timeout = const Duration(seconds: 60),
   }) async {
     final client = _client ??
@@ -38,8 +41,12 @@ class PortraitValidationApi {
         ..files.add(
           http.MultipartFile.fromBytes(
             'imagen',
-            jpegBytes,
-            filename: '$cedula.jpg',
+            imageBytes,
+            filename: filename,
+            contentType:
+                (contentType == null || contentType.trim().isEmpty)
+                    ? null
+                    : MediaType.parse(contentType.trim()),
           ),
         );
 

@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image/image.dart' as img;
 
 import '../../domain/service/pose_capture_service.dart';
@@ -444,15 +445,21 @@ class _ValidationOverlayStepRow extends StatelessWidget {
   }
 }
 
-Future<Uint8List> _resizeCaptureForDownload(
+Future<Uint8List> _resizeCapture(
   Uint8List bytes, {
+  required String format,
   int width = 375,
   int height = 425,
+  int jpegQuality = 95,
+  int pngLevel = 6,
 }) async {
   final payload = <String, Object?>{
     'bytes': bytes,
+    'format': format,
     'width': width,
     'height': height,
+    'jpegQuality': jpegQuality,
+    'pngLevel': pngLevel,
   };
   try {
     return await compute(_resizeCaptureWorker, payload);
@@ -461,10 +468,39 @@ Future<Uint8List> _resizeCaptureForDownload(
   }
 }
 
+Future<Uint8List> _resizeCaptureForDownload(
+  Uint8List bytes, {
+  int width = 375,
+  int height = 425,
+}) =>
+    _resizeCapture(
+      bytes,
+      format: 'jpeg',
+      width: width,
+      height: height,
+      jpegQuality: 95,
+    );
+
+Future<Uint8List> _resizeCaptureForValidation(
+  Uint8List bytes, {
+  int width = 375,
+  int height = 425,
+}) =>
+    _resizeCapture(
+      bytes,
+      format: 'png',
+      width: width,
+      height: height,
+      pngLevel: 6,
+    );
+
 Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
   final bytes = payload['bytes'] as Uint8List;
+  final format = (payload['format'] as String?)?.toLowerCase().trim() ?? 'jpeg';
   final width = payload['width'] as int;
   final height = payload['height'] as int;
+  final jpegQuality = payload['jpegQuality'] as int? ?? 95;
+  final pngLevel = payload['pngLevel'] as int? ?? 6;
 
   final decoded = img.decodeImage(bytes);
   if (decoded == null) {
@@ -472,8 +508,16 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
   }
 
   final resized = _resizeImage(decoded, width, height);
-  final encoded = img.encodeJpg(resized, quality: 95);
-  return Uint8List.fromList(encoded);
+  if (format == 'png') {
+    final encoded = img.encodePng(resized, level: pngLevel);
+    return Uint8List.fromList(encoded);
+  }
+  if (format == 'jpeg' || format == 'jpg') {
+    final encoded = img.encodeJpg(resized, quality: jpegQuality);
+    return Uint8List.fromList(encoded);
+  }
+
+  throw ArgumentError.value(format, 'format', 'Unsupported output format');
 }
 
 img.Image _resizeImage(img.Image source, int width, int height) {
@@ -599,7 +643,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           endpoint.host == '10.0.2.2';
       final allowInsecure = allowInsecureFromEnv || (kDebugMode && isLocalHost);
 
-      final resizedJpeg = await _resizeCaptureForDownload(
+      final resizedPng = await _resizeCaptureForValidation(
         bytes,
         width: 375,
         height: 425,
@@ -611,7 +655,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       );
 
       final result = await api.validarImagen(
-        jpegBytes: resizedJpeg,
+        imageBytes: resizedPng,
+        filename: '$cedula.png',
+        contentType: 'image/png',
         cedula: cedula,
         nacionalidad: nacionalidad,
         etnia: etnia,
@@ -738,6 +784,36 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         ),
       ),
     );
+  }
+
+  Future<void> _sendRawDngToBackend() async {
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: const ['dng'],
+        withData: true,
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final picked = result.files.single;
+      final bytes = picked.bytes;
+      if (bytes == null || bytes.isEmpty) {
+        throw StateError('No se pudo leer el archivo RAW seleccionado.');
+      }
+
+      await ctl.processExternalImageBytes(
+        bytes,
+        basename: picked.name,
+        formatOverride: 'dng',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No se pudo enviar el RAW (DNG): $e'),
+        ),
+      );
+    }
   }
 
   @override
@@ -974,6 +1050,19 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                                     ? 'Descargando…'
                                                     : 'Descargar',
                                               ),
+                                            ),
+                                            FilledButton.icon(
+                                              onPressed: (_isDownloading ||
+                                                      ctl.isProcessingCapture ||
+                                                      _isValidatingRemote)
+                                                  ? null
+                                                  : () => unawaited(
+                                                        _sendRawDngToBackend(),
+                                                      ),
+                                              icon: const Icon(
+                                                Icons.upload_file,
+                                              ),
+                                              label: const Text('Enviar RAW'),
                                             ),
                                             FilledButton.icon(
                                               onPressed: () {

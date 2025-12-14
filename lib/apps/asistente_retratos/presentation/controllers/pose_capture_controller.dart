@@ -634,6 +634,60 @@ class PoseCaptureController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Sends arbitrary bytes to the backend `images` DataChannel and waits for the
+  /// processed image reply (IMGPROC) to display it as `capturedPng`.
+  ///
+  /// Useful for sending real RAW containers (e.g. `.dng`) when available.
+  Future<void> processExternalImageBytes(
+    Uint8List bytes, {
+    String? basename,
+    String? formatOverride,
+  }) async {
+    if (bytes.isEmpty) {
+      throw ArgumentError.value(bytes.length, 'bytes', 'Empty payload');
+    }
+    if (!poseService.imagesReady) {
+      throw StateError('images DC not ready');
+    }
+
+    final String captureId = 'raw_${DateTime.now().millisecondsSinceEpoch}';
+    _activeCaptureId = captureId;
+    _readySince = null;
+    capturedPng = null;
+    isCapturing = true;
+    isProcessingCapture = true;
+    if (!_isDisposed) notifyListeners();
+
+    try {
+      final responseFuture = _waitForProcessedImage(captureId);
+      unawaited(responseFuture.then<void>((_) {}, onError: (_, __) {}));
+
+      await poseService.sendImageBytes(
+        bytes,
+        requestId: captureId,
+        basename: basename,
+        formatOverride: formatOverride,
+      );
+
+      final ImagesRx serverResponse = await responseFuture;
+      if (_isDisposed || _activeCaptureId != captureId) {
+        return;
+      }
+      if (serverResponse.bytes.isNotEmpty) {
+        capturedPng = serverResponse.bytes;
+      }
+    } finally {
+      _cancelImagesWait(captureId: captureId);
+      if (_isDisposed || _activeCaptureId != captureId) {
+        return;
+      }
+      isCapturing = false;
+      isProcessingCapture = false;
+      _readySince = null;
+      notifyListeners();
+    }
+  }
+
   // Face recognition gating state
   bool _faceRecogMatch = false;
   double? _faceRecogScore;
