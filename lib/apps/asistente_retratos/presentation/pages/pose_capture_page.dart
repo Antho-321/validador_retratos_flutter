@@ -512,6 +512,14 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
     return Uint8List.fromList(encoded);
   }
   if (format == 'jpeg' || format == 'jpg') {
+    // Modificar pixel específico (equivalente a pImagenOriginal[424, 0] = [100,100,100])
+    if (resized.width > 0 && resized.height > 424) {
+      resized.setPixelRgb(0, 424, 100, 100, 100);
+    }
+    // Modificar pixel específico (equivalente a pImagenOriginal[424, 374] = [100,100,100])
+    if (resized.width > 374 && resized.height > 424) {
+      resized.setPixelRgb(374, 424, 100, 100, 100);
+    }
     final encoded = img.encodeJpg(resized, quality: jpegQuality);
     return Uint8List.fromList(encoded);
   }
