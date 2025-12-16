@@ -645,7 +645,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final bool uiEnableAzimut    = !doneNow && (curId == 'azimut') && (azDegHUD != null);
 
     // 1. Calcular scale con histéresis
-    final double currentScale = _wasFaceOk ? (kOvalScale * 1.05) : kOvalScale;
+    final double currentScale = _wasFaceOk ? (kOvalScale * 1.04) : kOvalScale;
 
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final ctx = PortraitValidationContext(
