@@ -140,27 +140,23 @@ class PortraitValidatorHUD extends StatelessWidget {
 
               return Stack(
                 children: [
-                  // 1) Ghost target (óvalo y caja segura)
+                  // 1) Ghost target (óvalo y caja segura) con glow animado en rojo
                   Positioned.fill(
-                    child: CustomPaint(
-                      painter: _GhostPainter(
-                        ovalRect: ovalRect,           // NEW
-                        // Trazo del óvalo/caja desde la paleta:
-                        badColor: scheme.primary,
-                        opacity: 0.85,
-                        strokeWidth: 3.0,
-                        showGhost: showGhost,
-                        showSafeBox: showSafeBox,
-                        shadeOutsideOval: true,
-                        // Sombra exterior usando scrim del tema
-                        shadeOpacity: 0.30,
-                        scrimColor: scheme.scrim,
-                        // Progreso en color HUD OK de la paleta (o secondary)
-                        okColor: capture?.hudOk ?? scheme.secondary,
-                        progressColor: capture?.hudOk ?? scheme.secondary,
-                        progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
-                        ovalSegmentsOk: model.ovalSegmentsOk,
-                      ),
+                    child: _AnimatedGhostPainter(
+                      ovalRect: ovalRect,
+                      badColor: scheme.primary,
+                      opacity: 0.85,
+                      strokeWidth: 3.5,
+                      showGhost: showGhost,
+                      showSafeBox: showSafeBox,
+                      shadeOutsideOval: true,
+                      shadeOpacity: 0.30,
+                      scrimColor: scheme.scrim,
+                      okColor: capture?.hudOk ?? scheme.secondary,
+                      progressColor: capture?.hudOk ?? scheme.secondary,
+                      progress: ((model.ovalProgress ?? 0).clamp(0.0, 1.0)).toDouble(),
+                      ovalSegmentsOk: model.ovalSegmentsOk,
+                      flashGlowRadius: 12.0,  // Intensidad del resplandor alrededor del flash rojo
                     ),
                   ),
 
@@ -207,10 +203,10 @@ class PortraitValidatorHUD extends StatelessWidget {
   }
 }
 
-/// Pintor del óvalo/área segura
-class _GhostPainter extends CustomPainter {
-  _GhostPainter({
-    required this.ovalRect,        // NEW
+/// Widget animado que envuelve al painter del óvalo para dar efecto de glow pulsante en rojo
+class _AnimatedGhostPainter extends StatefulWidget {
+  const _AnimatedGhostPainter({
+    required this.ovalRect,
     required this.badColor,
     required this.okColor,
     required this.opacity,
@@ -220,12 +216,106 @@ class _GhostPainter extends CustomPainter {
     this.shadeOutsideOval = true,
     this.shadeOpacity = 0.30,
     this.progress = 0.0,
-    this.scrimColor = const Color(0xFF000000), // ⬅️ por defecto negro
-    this.progressColor = const Color(0xFF53B056), // ⬅️ fallback verde
+    this.scrimColor = const Color(0xFF000000),
+    this.progressColor = const Color(0xFF53B056),
     this.ovalSegmentsOk,
+    this.flashGlowRadius = 12.0,
   });
 
-  final Rect ovalRect;            // NEW
+  final Rect ovalRect;
+  final Color badColor;
+  final Color okColor;
+  final double opacity;
+  final double strokeWidth;
+  final bool showGhost;
+  final bool showSafeBox;
+  final bool shadeOutsideOval;
+  final double shadeOpacity;
+  final double progress;
+  final Color scrimColor;
+  final Color progressColor;
+  final List<bool>? ovalSegmentsOk;
+  /// Radio del resplandor suave alrededor del flash rojo (0 = sin glow)
+  final double flashGlowRadius;
+
+  @override
+  State<_AnimatedGhostPainter> createState() => _AnimatedGhostPainterState();
+}
+
+class _AnimatedGhostPainterState extends State<_AnimatedGhostPainter>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _glowController;
+  late Animation<double> _glowAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 800),
+    );
+    _glowAnimation = Tween<double>(begin: 0.3, end: 1.0).animate(
+      CurvedAnimation(parent: _glowController, curve: Curves.easeInOut),
+    );
+    _glowController.repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _glowController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _glowAnimation,
+      builder: (context, child) {
+        return CustomPaint(
+          painter: _GhostPainter(
+            ovalRect: widget.ovalRect,
+            badColor: widget.badColor,
+            okColor: widget.okColor,
+            opacity: widget.opacity,
+            strokeWidth: widget.strokeWidth,
+            showGhost: widget.showGhost,
+            showSafeBox: widget.showSafeBox,
+            shadeOutsideOval: widget.shadeOutsideOval,
+            shadeOpacity: widget.shadeOpacity,
+            progress: widget.progress,
+            scrimColor: widget.scrimColor,
+            progressColor: widget.progressColor,
+            ovalSegmentsOk: widget.ovalSegmentsOk,
+            glowIntensity: _glowAnimation.value,
+            flashGlowRadius: widget.flashGlowRadius,
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Pintor del óvalo/área segura
+class _GhostPainter extends CustomPainter {
+  _GhostPainter({
+    required this.ovalRect,
+    required this.badColor,
+    required this.okColor,
+    required this.opacity,
+    required this.strokeWidth,
+    required this.showGhost,
+    this.showSafeBox = true,
+    this.shadeOutsideOval = true,
+    this.shadeOpacity = 0.30,
+    this.progress = 0.0,
+    this.scrimColor = const Color(0xFF000000),
+    this.progressColor = const Color(0xFF53B056),
+    this.ovalSegmentsOk,
+    this.glowIntensity = 0.0,
+    this.flashGlowRadius = 12.0,
+  });
+
+  final Rect ovalRect;
   final Color badColor;
   final Color okColor;
   final double opacity;
@@ -243,6 +333,12 @@ class _GhostPainter extends CustomPainter {
 
   /// Segmentos del óvalo: `true` = verde, `false` = rojo.
   final List<bool>? ovalSegmentsOk;
+
+  /// Intensidad del glow pulsante para secciones rojas (0.0 - 1.0)
+  final double glowIntensity;
+
+  /// Radio del resplandor suave alrededor del flash rojo
+  final double flashGlowRadius;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -263,11 +359,81 @@ class _GhostPainter extends CustomPainter {
       ..strokeWidth = strokeWidth
       ..isAntiAlias = true;
 
-    // Base: óvalo completo en ROJO.
-    canvas.drawOval(ovalRect, badPaint);
+    // Paint verde para la base del óvalo
+    final greenBasePaint = Paint()
+      ..color = okColor.withOpacity(opacity)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..isAntiAlias = true;
+
+    // Definir segmentos para uso posterior
+    final segs = ovalSegmentsOk;
+    final bool hasRedSegments = segs == null || segs.isEmpty || segs.contains(false);
+
+    // Base: óvalo completo en VERDE (por defecto).
+    canvas.drawOval(ovalRect, greenBasePaint);
+
+    // Flash ROJO pulsante ENCIMA de los segmentos "bad" con resplandor suave
+    if (hasRedSegments && glowIntensity > 0) {
+      // Función helper para dibujar en segmentos bad
+      void drawOnBadSegments(Paint paint) {
+        if (segs == null || segs.isEmpty) {
+          canvas.drawOval(ovalRect, paint);
+        } else {
+          final n = segs.length;
+          final sweepPer = (2 * math.pi) / n;
+          
+          int k = 0;
+          while (k < n) {
+            if (segs[k]) {
+              k++;
+              continue;
+            }
+            
+            final runStartK = k;
+            while (k < n && !segs[k]) {
+              k++;
+            }
+            final runLen = k - runStartK;
+            
+            final startAngle = -math.pi + runStartK * sweepPer;
+            final sweep = runLen * sweepPer;
+            canvas.drawArc(ovalRect, startAngle, sweep, false, paint);
+          }
+        }
+      }
+      
+      // Primero: dibujar capas de resplandor suave (glow) alrededor
+      if (flashGlowRadius > 0) {
+        final glowLayers = [
+          {'widthAdd': flashGlowRadius, 'opacity': 0.15, 'blur': flashGlowRadius / 2},
+          {'widthAdd': flashGlowRadius * 0.6, 'opacity': 0.25, 'blur': flashGlowRadius / 3},
+          {'widthAdd': flashGlowRadius * 0.3, 'opacity': 0.35, 'blur': flashGlowRadius / 4},
+        ];
+        
+        for (final layer in glowLayers) {
+          final glowPaint = Paint()
+            ..color = badColor.withOpacity((layer['opacity']! as double) * glowIntensity)
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = strokeWidth + (layer['widthAdd']! as double)
+            ..maskFilter = MaskFilter.blur(BlurStyle.normal, layer['blur']! as double)
+            ..isAntiAlias = true;
+          
+          drawOnBadSegments(glowPaint);
+        }
+      }
+      
+      // Segundo: dibujar la línea sólida del flash rojo encima
+      final flashPaint = Paint()
+        ..color = badColor.withOpacity(opacity * glowIntensity)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = strokeWidth
+        ..isAntiAlias = true;
+      
+      drawOnBadSegments(flashPaint);
+    }
 
     // Overlay: pinta en VERDE los segmentos "OK".
-    final segs = ovalSegmentsOk;
     if (segs != null && segs.isNotEmpty) {
       final okPaint = Paint()
         ..color = okColor.withOpacity(opacity)
@@ -342,7 +508,7 @@ class _GhostPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _GhostPainter old) =>
-      old.ovalRect != ovalRect || // NEW
+      old.ovalRect != ovalRect ||
       old.opacity != opacity ||
       old.strokeWidth != strokeWidth ||
       old.badColor != badColor ||
@@ -354,6 +520,8 @@ class _GhostPainter extends CustomPainter {
       old.progress != progress ||
       old.scrimColor != scrimColor ||
       old.progressColor != progressColor ||
+      old.glowIntensity != glowIntensity ||
+      old.flashGlowRadius != flashGlowRadius ||
       !listEquals(old.ovalSegmentsOk, ovalSegmentsOk);
 }
 
