@@ -148,7 +148,7 @@ class PortraitValidatorHUD extends StatelessWidget {
                         // Trazo del óvalo/caja desde la paleta:
                         badColor: scheme.primary,
                         opacity: 0.85,
-                        strokeWidth: 2.0,
+                        strokeWidth: 3.0,
                         showGhost: showGhost,
                         showSafeBox: showSafeBox,
                         shadeOutsideOval: true,
