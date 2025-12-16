@@ -3,7 +3,7 @@ import 'dart:math' as math;
 
 import '../metrics/pose_geometry.dart' as geom;
 import '../metrics/metrics.dart';
-import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
+import '../../core/face_oval_geometry.dart' show faceOvalRectFor, kOvalScale;
 
 /// Result type reused for yaw/pitch/roll checks.
 class AngleCheck {
@@ -96,10 +96,14 @@ class PortraitValidationContext {
     this.azimutBandHi = 0.0,
     this.azimutMaxOffDeg = 20.0,
     this.faceResult,
+    this.faceOvalScale, // NEW
   });
 
   final FrameInputs inputs;
   final MetricRegistry metrics;
+
+  /// Escala dinámica del óvalo (null = default `kOvalScale`)
+  final double? faceOvalScale;
 
   // Face-in-oval params
   final double minFractionInside;
@@ -154,6 +158,7 @@ class PortraitValidationContext {
       azimutBandHi: azimutBandHi,
       azimutMaxOffDeg: azimutMaxOffDeg,
       faceResult: result,
+      faceOvalScale: faceOvalScale,
     );
   }
 
@@ -379,7 +384,10 @@ class FaceInOvalRule extends PortraitRule {
       fit: context.inputs.fit,
     );
 
-    final oval = faceOvalRectFor(context.inputs.canvasSize);
+    final oval = faceOvalRectFor(
+      context.inputs.canvasSize,
+      scale: context.faceOvalScale ?? kOvalScale,
+    );
     final rx = oval.width / 2.0;
     final ry = oval.height / 2.0;
     final cx = oval.center.dx;

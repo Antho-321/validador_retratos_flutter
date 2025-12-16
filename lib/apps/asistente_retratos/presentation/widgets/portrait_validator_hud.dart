@@ -22,6 +22,7 @@ class PortraitUiModel {
     this.countdownProgress,
     this.ovalProgress,
     this.ovalSegmentsOk,
+    this.ovalScale, // NEW
   });
 
   final String primaryMessage;
@@ -36,7 +37,11 @@ class PortraitUiModel {
 
   /// Si viene, el perímetro del óvalo se pinta por segmentos:
   /// `true` = verde (zona OK), `false` = rojo (zona fuera).
+  /// `true` = verde (zona OK), `false` = rojo (zona fuera).
   final List<bool>? ovalSegmentsOk;
+
+  /// Factor de escala del óvalo (por defecto null => usa kOvalScale).
+  final double? ovalScale;
 
   PortraitUiModel copyWith({
     String? primaryMessage,
@@ -45,6 +50,7 @@ class PortraitUiModel {
     double? countdownProgress,
     double? ovalProgress,
     List<bool>? ovalSegmentsOk,
+    double? ovalScale,
   }) {
     return PortraitUiModel(
       primaryMessage: primaryMessage ?? this.primaryMessage,
@@ -53,6 +59,7 @@ class PortraitUiModel {
       countdownProgress: countdownProgress ?? this.countdownProgress,
       ovalProgress: ovalProgress ?? this.ovalProgress,
       ovalSegmentsOk: ovalSegmentsOk ?? this.ovalSegmentsOk,
+      ovalScale: ovalScale ?? this.ovalScale,
     );
   }
 }
@@ -112,7 +119,28 @@ class PortraitValidatorHUD extends StatelessWidget {
     return ValueListenableBuilder<PortraitUiModel>(
       valueListenable: modelListenable,
       builder: (context, model, _) {
-        final Rect ovalRect = ovalRectFor(screen); // NEW
+        // Usa el scale del modelo si existe, sino el default interno de la función
+        // (que suele ser kOvalScale). Pero faceOvalRectFor toma 'scale' opcional.
+        // Ojo: si ovalRectFor fue inyectado (custom), el scale podría no aplicar 
+        // a menos que esa custom fn lo use. Asumimos default:
+        
+        // Si ovalRectFor es la default (faceOvalRectFor), podemos pasarle params extra?
+        // No directo porque la firma es (Size). 
+        // SOLUCIÓN: Calcular el rect aquí directamente si queremos controlar el scale,
+        // o asumir que ovalRectFor es solo para overrides "fijos".
+        // Dado que 'ovalRectFor' es un callback simple `Rect Function(Size)`, 
+        // para pasarle el scale dinámico tendríamos que no usar ese callback 
+        // O reconstruirlo.
+        // Mejor: Si model.ovalScale != null, llamamos direct a faceOvalRectFor con ese scale.
+        // Si es null, usamos la inyectada (o default).
+        
+        Rect ovalRect;
+        if (model.ovalScale != null) {
+           ovalRect = faceOvalRectFor(screen, scale: model.ovalScale!);
+        } else {
+           ovalRect = ovalRectFor(screen);
+        }
+
         final double gapPx =
             screen.height * messageGap.clamp(0.0, 1.0).toDouble();
 

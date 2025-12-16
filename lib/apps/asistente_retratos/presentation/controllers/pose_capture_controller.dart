@@ -6,6 +6,7 @@ import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData; // Fixed duplicat
 
 import 'dart:math' as math;
 import 'package:image/image.dart' as img; // <-- ADDED
+import '../../core/face_oval_geometry.dart' show kOvalScale; // NEW
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary; // kept for types
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -599,6 +600,9 @@ class PoseCaptureController extends ChangeNotifier {
   // Countdown state
   bool get isCountingDown => _countdown.isRunning;
 
+  // Hysteresis state for face oval
+  bool _wasFaceOk = false;
+
   // Global stability (no extra hold; gates already enforce dwell)
   DateTime? _readySince;
   static const _readyHold = Duration(milliseconds: 0);
@@ -629,6 +633,7 @@ class PoseCaptureController extends ChangeNotifier {
     capturedPng = null;
     _activeCaptureId = null;
     _readySince = null;
+    _wasFaceOk = false; // reset hysteresis
     
     // Clear HUD countdown/progress
     final cur = hud.value;

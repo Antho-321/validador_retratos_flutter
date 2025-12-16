@@ -21,6 +21,8 @@ class _EvalCtx {
     this.yawDegForAnim,
     this.pitchDegForAnim,
     this.rollDegForAnim,
+    // La escala usada en este frame (para HUD)
+    required this.faceOvalScale,
   });
 
   final DateTime now;
@@ -38,6 +40,7 @@ class _EvalCtx {
   final double? yawDegForAnim;
   final double? pitchDegForAnim;
   final double? rollDegForAnim; // smoothed + unwrapped
+  final double faceOvalScale;
 }
 
 class _HintAnim {
@@ -408,6 +411,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         arcProgress: 0.0,
         finalHint: null,
         ovalSegmentsOk: null,
+        ovalScale: kOvalScale, // default
       );
       return;
     }
@@ -508,8 +512,10 @@ extension _OnFrameLogicExt on PoseCaptureController {
         countdownSeconds: null,
         countdownProgress: null,
         ovalProgress: 0.0,
+        ovalScale: kOvalScale, // reset
       ),
     );
+    _wasFaceOk = false; // reset hysteresis
 
     _readySince = null;
 
@@ -638,12 +644,17 @@ extension _OnFrameLogicExt on PoseCaptureController {
     final bool uiEnableShoulders = !doneNow && (curId == 'shoulders');
     final bool uiEnableAzimut    = !doneNow && (curId == 'azimut') && (azDegHUD != null);
 
+    // 1. Calcular scale con histéresis
+    final double currentScale = _wasFaceOk ? (kOvalScale * 1.05) : kOvalScale;
+
     // Ejecuta el validador SOLO para HUD/animaciones (no para gating)
     final ctx = PortraitValidationContext(
       inputs: inputs,
       metrics: _metricRegistry,
       minFractionInside: p.face.minFractionInside,
       eps: p.face.eps,
+      // Pass the dynamic scale
+      faceOvalScale: currentScale,
       enableYaw: uiEnableYaw,
       yawDeadbandDeg: yawDeadbandNow,
       yawMaxOffDeg: p.yaw.maxOffDeg,
@@ -711,6 +722,9 @@ extension _OnFrameLogicExt on PoseCaptureController {
       'pose2D=${pose?.length ?? 0}, pose3D=${lms3dRec?.length ?? 0}',
     );
 
+    // Actualiza histéresis para el SIGUIENTE frame
+    _wasFaceOk = faceOk;
+
     // Devuelve contexto mínimo: inputs + registry + flags de HUD
     return _EvalCtx(
       now: now,
@@ -722,6 +736,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
       yawDegForAnim: _emaYawDeg,
       pitchDegForAnim: _emaPitchDeg,
       rollDegForAnim: _emaRollDeg, // smoothed/unwrapped
+      faceOvalScale: currentScale,
     );
   }
 
@@ -1019,13 +1034,18 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     if (!isCountingDown) {
       if (allChecksOk) {
-        _pushHudReady(arc: c.arcProgress, ovalSegmentsOk: c.ovalSegmentsOk);
+        _pushHudReady(
+          arc: c.arcProgress, 
+          ovalSegmentsOk: c.ovalSegmentsOk,
+          ovalScale: c.faceOvalScale,
+        );
       } else {
         _pushHudAdjusting(
           faceOk: c.faceOk,
           arcProgress: c.arcProgress,
           finalHint: ha.hint,
           ovalSegmentsOk: c.ovalSegmentsOk,
+          ovalScale: c.faceOvalScale,
         );
       }
     }
@@ -1039,7 +1059,11 @@ extension _OnFrameLogicExt on PoseCaptureController {
     }
   }
 
-  void _pushHudReady({required double arc, required List<bool>? ovalSegmentsOk}) {
+  void _pushHudReady({
+    required double arc, 
+    required List<bool>? ovalSegmentsOk,
+    required double ovalScale,
+  }) {
     _setHud(
       PortraitUiModel(
         primaryMessage: '¡Perfecto! ¡Permanece así!',
@@ -1048,6 +1072,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         countdownProgress: null,
         ovalProgress: arc,
         ovalSegmentsOk: ovalSegmentsOk,
+        ovalScale: ovalScale,
       ),
     );
   }
@@ -1057,6 +1082,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
     required double arcProgress,
     required String? finalHint,
     required List<bool>? ovalSegmentsOk,
+    required double ovalScale,
   }) {
     String effectiveMsg;
     final bool maintainNow = !_isDone && _currentRule._showMaintainNow;
@@ -1079,6 +1105,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
         countdownProgress: null,
         ovalProgress: arcProgress,
         ovalSegmentsOk: ovalSegmentsOk,
+        ovalScale: ovalScale,
       ),
     );
   }

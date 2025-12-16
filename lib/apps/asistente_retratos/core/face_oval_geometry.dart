@@ -4,7 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' show Offset, Path, Rect, Size, lerpDouble;
 
 const double kOvalWFrac = 0.48;
-const double kOvalHFrac = 0.42;
+const double kOvalHFrac = 0.40;
 const double kOvalCxFrac = 0.50;
 const double kOvalCyFrac = 0.41;
 
