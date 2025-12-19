@@ -354,7 +354,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         _turnUrl = turnUrl,
         _turnUsername = turnUsername,
         _turnPassword = turnPassword,
-        sctpStreamMod = sctpStreamMod ?? 128,
+        sctpStreamMod = sctpStreamMod ?? 16,
         ctrlDcId = ctrlDcId ?? 1,
         dcImagesIdOverride = (dcImagesIdOverride != null && dcImagesIdOverride >= 0)
             ? dcImagesIdOverride
