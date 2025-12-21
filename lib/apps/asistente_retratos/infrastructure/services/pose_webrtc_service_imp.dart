@@ -731,6 +731,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Map<String, _PendingEmit> _pendingByTask = {};
   final Set<String> _emitScheduled = {};
   final Map<String, int> _lastEmitUsByTask = {};
+  final Set<int> _assignedDcIds = {}; // Track assigned DC IDs across all tasks
 
   // Was:
   // static const int _imagesId = 342;
@@ -1165,14 +1166,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   Future<RTCDataChannel> _createLossyDC(String task) async {
+    // Build reserved set including ctrl, images, and all previously assigned IDs
+    final reserved = <int>{ctrlDcId, _imagesIdResolved, ..._assignedDcIds};
+    final dcId = _dcIdFromTask(
+      'results:$task',
+      mod: sctpStreamMod,
+      reserved: reserved,
+      defaultTask: _primaryTask,
+    );
+    // Track the assigned ID so the next task won't use it
+    _assignedDcIds.add(dcId);
+    
     final lossy = RTCDataChannelInit()
       ..negotiated = true
-      ..id = _dcIdFromTask(
-        'results:$task',
-        mod: sctpStreamMod,
-        reserved: <int>{ctrlDcId, _imagesIdResolved},
-        defaultTask: _primaryTask,
-      )
+      ..id = dcId
       ..ordered = false
       ..maxRetransmits = 0;
     _log(
@@ -1254,6 +1261,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     _lastSeqPerTask.clear();
     _lastPosesPerTask.clear();
+    _assignedDcIds.clear(); // Clear assigned DC IDs on dispose
 
     final workers = List<_ParseWorker>.from(_parseWorkers.values);
     _parseWorkers.clear();
