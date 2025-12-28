@@ -1425,12 +1425,22 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final int? seq = msg['seq'] as int?;
     final bool kf = (msg['keyframe'] as bool?) ?? false;
     final String kindStr = (msg['kind'] as String? ?? 'PD').toString().toUpperCase();
+    final bool isKeyframe = kf || kindStr == 'PO';
     final String emitKind = (kindStr == 'PO') ? 'PO' : (kf ? 'PD(KF)' : 'PD');
 
     _lastW = w; _lastH = h;
     if (seq != null) {
       final last = _lastSeqPerTask[t];
-      if (last != null && !_isNewer16(seq, last)) return; // drop stale PDs
+      if (last != null) {
+        if (!_isNewer16(seq, last)) return; // drop stale PDs
+        final int expected = (last + 1) & 0xFFFF;
+        if (seq != expected && !isKeyframe) {
+          // Gap de seq: evitamos dibujar deltas sobre base vieja y pedimos KF.
+          _warn('Seq gap en "$t": last=$last seq=$seq (expected=$expected), request KF');
+          _maybeSendKF();
+          return;
+        }
+      }
       _lastSeqPerTask[t] = seq;
     }
 
