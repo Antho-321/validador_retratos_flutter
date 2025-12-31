@@ -802,18 +802,69 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   // sync:true para evitar microtasks innecesarias
   @override
   Future<void> restartBackend() async {
-    final ctrl = _ctrl;
-    if (ctrl == null || ctrl.state != RTCDataChannelState.RTCDataChannelOpen) {
-      _warn('Cannot send RESTART: control channel not ready');
-      return;
+    _log('Restarting WebRTC connection (close & reconnect)...');
+
+    // 1. Cancel timers
+    _dcGuardTimer?.cancel();
+    _rtpStatsTimer?.cancel();
+    _cancelImageAckTimer();
+
+    // 2. Close channels
+    await _dc.safeClose();
+    await _ctrl.safeClose();
+    await _imagesDc.safeClose();
+    for (final c in _resultsPerTask.values) {
+       await c.safeClose();
     }
+    _resultsPerTask.clear();
+
+    // 3. Close PC
+    await _silenceAsync(() async { await _pc?.close(); });
+
+    // 4. Reset references
+    _pc = null;
+    _dc = null;
+    _ctrl = null;
+    _imagesDc = null;
+    _videoTransceiver = null;
     
-    final payload = jsonEncode({'type': 'RESTART'});
-    _log('Sending RESTART command');
+    // 5. Reset internal state
+    _assignedDcIds.clear();
+    _lastSeqPerTask.clear();
+    _lastPosesPerTask.clear();
+    _lastW = null;
+    _lastH = null;
+    _lastFace2D = null;
+    _lastFaceFlat = null;
+    _latestFrame.value = null;
+    _poseLmk.value = LmkState.empty();
+    _faceLmk.value = LmkState.empty();
+    _faceRecogResult.value = null;
+    for (final parser in _parsers.values) {
+      parser.reset();
+    }
+    _parsers.clear();
+    final workers = List<_ParseWorker>.from(_parseWorkers.values);
+    _parseWorkers.clear();
+    _workerFutures.clear();
+    for (final worker in workers) {
+      await _silenceAsync(() => worker.dispose());
+    }
+    _rxPending = null;
+    _pendingImageSend = null;
+    _pendingBin.clear();
+    _pendingByTask.clear();
+    _emitScheduled.clear();
+    _lastTickUs = 0;
+    _bumpOverlay();
+    
+    // 6. Connect again
     try {
-      await ctrl.send(RTCDataChannelMessage(payload));
+      await connect();
+      _log('WebRTC connection restarted successfully.');
     } catch (e) {
-      _warn('Error sending RESTART: $e');
+      _warn('Failed to restart WebRTC connection: $e');
+      rethrow;
     }
   }
   final _framesCtrl = StreamController<PoseFrame>.broadcast(sync: true);

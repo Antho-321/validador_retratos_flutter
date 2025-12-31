@@ -545,6 +545,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final GlobalKey _previewKey = GlobalKey();
   late final PoseCaptureController ctl;
   bool _isDownloading = false;
+  bool _isRestarting = false; // ⇠ NEW: Loading spinner state for retry
   double _downloadProgress = 0.0;
   bool _isValidatingRemote = false;
   String? _validationResultText;
@@ -1025,12 +1026,30 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                                 ),
                                               ),
                                             FilledButton.icon(
-                                              onPressed: () {
-                                                _resetValidationState();
-                                                unawaited(ctl.restartBackend());
-                                              },
-                                              icon: const Icon(Icons.refresh),
-                                              label: const Text('Reintentar'),
+                                              onPressed: _isRestarting
+                                                  ? null
+                                                  : () async {
+                                                      setState(() => _isRestarting = true);
+                                                      _resetValidationState();
+                                                      try {
+                                                        await ctl.restartBackend();
+                                                      } finally {
+                                                        if (mounted) {
+                                                          setState(() => _isRestarting = false);
+                                                        }
+                                                      }
+                                                    },
+                                              icon: _isRestarting
+                                                  ? SizedBox(
+                                                      width: 16,
+                                                      height: 16,
+                                                      child: CircularProgressIndicator(
+                                                        strokeWidth: 2,
+                                                        color: Theme.of(context).colorScheme.onPrimary,
+                                                      ),
+                                                    )
+                                                  : const Icon(Icons.refresh),
+                                              label: Text(_isRestarting ? 'Conectando...' : 'Reintentar'),
                                             ),
                                           ],
                                         ),
