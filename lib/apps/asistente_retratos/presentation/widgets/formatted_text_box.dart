@@ -290,7 +290,7 @@ class _Header extends StatelessWidget {
                     ),
                     if (collapsible)
                       AnimatedRotation(
-                        turns: expanded ? 0.5 : 0.0,
+                        turns: expanded ? 0.0 : 0.5,
                         duration: const Duration(milliseconds: 180),
                         curve: Curves.easeOut,
                         child: Icon(
