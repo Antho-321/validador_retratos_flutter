@@ -1,7 +1,7 @@
 // ==========================
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
-import 'dart:async' show unawaited;
+import 'dart:async' show Completer, StreamSubscription, Timer, unawaited;
 import 'dart:convert' show jsonDecode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
@@ -22,6 +22,7 @@ import '../widgets/landmarks_painter.dart' show LandmarksPainter, FaceStyle;
 // (si tu painter usa directamente la impl del servicio)
 import '../../infrastructure/services/pose_webrtc_service_imp.dart'
     show PoseWebrtcServiceImp;
+import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -689,6 +690,44 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     }
   }
 
+  /// Waits until landmarks are being received from the API.
+  /// Returns after the first valid frame with landmarks, or after a timeout.
+  Future<void> _waitForLandmarks() async {
+    if (!mounted) return;
+    
+    final svc = widget.poseService;
+    final completer = Completer<void>();
+    StreamSubscription<PoseFrame>? subscription;
+    Timer? timeoutTimer;
+    
+    // Set a maximum timeout of 30 seconds
+    timeoutTimer = Timer(const Duration(seconds: 30), () {
+      if (!completer.isCompleted) {
+        subscription?.cancel();
+        completer.complete();
+      }
+    });
+    
+    // Listen for the first frame with valid landmarks
+    subscription = svc.frames.listen((frame) {
+      // Check if the frame contains valid landmark data
+      final hasPackedPositions = frame.packedPositions != null && 
+          frame.packedPositions!.isNotEmpty;
+      final hasPosesPx = frame.posesPx != null && frame.posesPx!.isNotEmpty;
+      final hasPosesFlat = frame.posesPxFlat != null && frame.posesPxFlat!.isNotEmpty;
+      
+      if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
+        timeoutTimer?.cancel();
+        subscription?.cancel();
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
+      }
+    });
+    
+    await completer.future;
+  }
+
   @override
   void dispose() {
     ctl.removeListener(_handleControllerChanged);
@@ -1033,6 +1072,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                                       _resetValidationState();
                                                       try {
                                                         await ctl.restartBackend();
+                                                        // Wait for landmarks to start arriving before ending loading state
+                                                        await _waitForLandmarks();
+                                                      } catch (_) {
+                                                        // On error, just reset the loading state
                                                       } finally {
                                                         if (mounted) {
                                                           setState(() => _isRestarting = false);
