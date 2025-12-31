@@ -331,6 +331,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.preCreateDataChannels = true,
     this.negotiatedFallbackAfterSeconds = 3,
     this.logEverything = true,
+    this.lowLatency = false,
     this.stripFecFromSdp = true,
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
@@ -410,6 +411,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final bool preCreateDataChannels;
   final int negotiatedFallbackAfterSeconds;
   final bool logEverything;
+  final bool lowLatency;
   final bool stripFecFromSdp;
   final bool stripRtxAndNackFromSdp;
   final bool keepTransportCcOnly;
@@ -752,10 +754,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   Stream<ImagesRx> get imagesProcessed => _imagesProcessedCtrl.stream;
 
-  int _minEmitIntervalMsFor(String task) => (1000 ~/ idealFps).clamp(8, 1000);
+  int _minEmitIntervalMsFor(String task) =>
+      lowLatency ? 1 : (1000 ~/ idealFps).clamp(8, 1000);
 
   // ===== Pre-parse drop helpers ===============================================
   bool _tooSoonForParse(String task) {
+    if (lowLatency) return false;
     final lastUs = _lastEmitUsByTask[task];
     if (lastUs == null) return false;
     final nowUs = _nowUs();
@@ -1854,6 +1858,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     required String task,
   }) {
     if (_disposed) return;
+
+    if (lowLatency) {
+      _lastEmitUsByTask[task] = _nowUs();
+      _doEmit(frame, kind: kind, seq: seq, task: task);
+      return;
+    }
 
     _pendingByTask[task] = _PendingEmit(frame, kind, seq);
     _scheduleEmitFlush(task);
