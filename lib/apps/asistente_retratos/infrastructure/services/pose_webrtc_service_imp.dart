@@ -474,6 +474,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   String _detectImageFormat(Uint8List bytes) {
+    // Check for PNG magic number: 89 50 4E 47 0D 0A 1A 0A
     if (bytes.length >= 8 &&
         bytes[0] == 0x89 &&
         bytes[1] == 0x50 &&
@@ -485,7 +486,63 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         bytes[7] == 0x0A) {
       return 'png';
     }
+    // Check for JPEG magic number: FF D8 FF
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xFF &&
+        bytes[1] == 0xD8 &&
+        bytes[2] == 0xFF) {
+      return 'jpeg';
+    }
     return 'unknown';
+  }
+
+  /// Attempts to fix corrupted image bytes by finding the actual end marker.
+  /// For PNG: finds IEND chunk (49 45 4E 44) + 4-byte CRC
+  /// For JPEG: finds EOI marker (FF D9)
+  Uint8List _fixImageBytes(Uint8List bytes) {
+    if (bytes.isEmpty) return bytes;
+    
+    // Check if PNG (magic: 89 50 4E 47 0D 0A 1A 0A)
+    if (bytes.length >= 8 && 
+        bytes[0] == 0x89 && bytes[1] == 0x50 && 
+        bytes[2] == 0x4E && bytes[3] == 0x47) {
+      // Search for IEND chunk: 49 45 4E 44 (IEND) followed by 4-byte CRC
+      // The complete IEND sequence is: [length=0] 49 45 4E 44 [crc=AE 42 60 82]
+      // So we look for 49 45 4E 44 and include 4 more bytes after it
+      for (int i = bytes.length - 8; i >= 12; i--) {
+        if (bytes[i] == 0x49 && bytes[i + 1] == 0x45 && 
+            bytes[i + 2] == 0x4E && bytes[i + 3] == 0x44) {
+          // Found IEND at position i, need to include 4 more CRC bytes
+          final endPos = i + 8; // IEND (4 bytes) + CRC (4 bytes)
+          if (endPos <= bytes.length) {
+            if (endPos < bytes.length) {
+              _warn('PNG IEND found at pos $i, trimming from ${bytes.length} to $endPos bytes');
+              return Uint8List.sublistView(bytes, 0, endPos);
+            }
+            return bytes; // Already correct size
+          }
+        }
+      }
+      _warn('PNG lacks valid IEND marker - image may be truncated');
+    }
+    // Check if JPEG (magic: FF D8 FF)
+    else if (bytes.length >= 3 && 
+             bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+      // Search for EOI marker: FF D9
+      for (int i = bytes.length - 2; i >= 2; i--) {
+        if (bytes[i] == 0xFF && bytes[i + 1] == 0xD9) {
+          final endPos = i + 2;
+          if (endPos < bytes.length) {
+            _warn('JPEG EOI found at pos $i, trimming from ${bytes.length} to $endPos bytes');
+            return Uint8List.sublistView(bytes, 0, endPos);
+          }
+          return bytes; // Already correct size
+        }
+      }
+      _warn('JPEG lacks valid EOI marker (FF D9) - image may be truncated');
+    }
+    
+    return bytes;
   }
 
   String _md5Hex(Uint8List bytes) => crypto.md5.convert(bytes).toString();
@@ -522,31 +579,41 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
       if (rid.isEmpty) return;
 
-      final pending = _pendingImageSend;
-      if (pending != null && rid == pending.requestId) {
-        _dcl('images server begin id=$rid expectedBytes=${json['bytes']}');
-        return;
-      }
-
       final fmt = (json['format'] ?? 'png').toString().toLowerCase();
-      // OLD:
-      // final bytes = (json['bytes'] is int)
-      //     ? json['bytes'] as int
-      //     : int.tryParse('${json['bytes']}') ?? 0;
 
-      // NEW:
       final dynamic bfield = json['bytes'] ??
           json['nbytes'] ??
           json['size'] ??
           json['length'] ??
           json['total'];
-      final bytes = _toInt(bfield);
+      final serverExpectedBytes = _toInt(bfield);
 
+      // Check if this IMGBEGIN is for our pending send (server acknowledgment) 
+      // vs the server starting to send us a response image
+      final pending = _pendingImageSend;
+      final isServerAck = pending != null && 
+          rid == pending.requestId && 
+          serverExpectedBytes == pending.nbytes;
+      
+      if (isServerAck) {
+        // This is just the server acknowledging our upload, not sending a response
+        _dcl('images server ack upload id=$rid bytes=${pending.nbytes}');
+        return;
+      }
+
+      // Server is sending us a (possibly processed) image - create/update rx state
+      // IMPORTANT: Use the server's expected bytes, not our original upload size
       if (_rxPending == null || _rxPending!.requestId != rid) {
-        _rxPending = _RxPending(rid, fmt, bytes);
+        _rxPending = _RxPending(rid, fmt, serverExpectedBytes);
+        _dcl('images RX begin id=$rid expected=$serverExpectedBytes fmt=$fmt via=$type (new)');
       } else {
-        _rxPending!.expectedBytes =
-            (bytes > 0) ? bytes : _rxPending!.expectedBytes;
+        // Same request ID - update expected bytes if server specifies different size
+        // This happens when server processes image and returns different size
+        if (serverExpectedBytes > 0 && serverExpectedBytes != _rxPending!.expectedBytes) {
+          _dcl('images RX updating expected from ${_rxPending!.expectedBytes} to $serverExpectedBytes');
+          _rxPending!.expectedBytes = serverExpectedBytes;
+        }
+        _dcl('images RX begin id=$rid expected=$serverExpectedBytes fmt=$fmt via=$type (update)');
       }
 
       if (type == 'IMGPROC') {
@@ -561,7 +628,6 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             (json['request_basename'] ?? json['requestBase'] ?? '').toString();
       }
 
-      _dcl('images RX begin id=$rid expected=$bytes fmt=$fmt via=$type');
       return;
     }
 
@@ -610,10 +676,70 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       return;
     }
 
-    final bytes = pending.sink.takeBytes();
+    var bytes = pending.sink.takeBytes();
 
-    _dcl('images RX done id=${pending.requestId} recv=$received expect=${pending.expectedBytes} '
+    // Trim to expected size if we received more bytes than expected
+    // This prevents "Could not decompress image" errors caused by padding/garbage
+    if (pending.expectedBytes > 0 && bytes.length > pending.expectedBytes) {
+      _warn('Trimming image from ${bytes.length} to ${pending.expectedBytes} bytes');
+      bytes = Uint8List.sublistView(bytes, 0, pending.expectedBytes);
+    }
+
+    // Validate and fix PNG/JPEG integrity FIRST
+    // usage of _fixImageBytes scans for IEND/EOI and trims to that point if found
+    bytes = _fixImageBytes(bytes);
+
+    // Verify if we have a valid end marker now
+    bool hasValidMarker = false;
+    String detectedFmt = 'unknown';
+    if (bytes.length >= 8 && bytes[0] == 0x89 && bytes[1] == 0x50 && 
+        bytes[2] == 0x4E && bytes[3] == 0x47) {
+      detectedFmt = 'PNG';
+      if (bytes.length >= 12) {
+        final last12 = bytes.sublist(bytes.length - 12);
+        if (last12[4] == 0x49 && last12[5] == 0x45 && 
+            last12[6] == 0x4E && last12[7] == 0x44) {
+          hasValidMarker = true;
+        }
+      }
+    } else if (bytes.length >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+      detectedFmt = 'JPEG';
+      if (bytes.length >= 2 && bytes[bytes.length - 2] == 0xFF && bytes[bytes.length - 1] == 0xD9) {
+        hasValidMarker = true;
+      }
+    }
+
+    // Logic change: If we found a valid marker, we TRUST the content length.
+    // We only trim to expectedBytes if:
+    // 1. We DON'T have a valid marker (maybe padding/garbage at end of a raw stream?)
+    // 2. AND bytes.length > expectedBytes
+    if (hasValidMarker) {
+      if (pending.expectedBytes > 0 && bytes.length != pending.expectedBytes) {
+        _warn('Image size mismatch (got ${bytes.length}, expected ${pending.expectedBytes}) but found valid $detectedFmt marker. Trusting content.');
+        // Auto-correct expectation to match reality
+        pending.expectedBytes = bytes.length;
+      }
+    } else {
+      // No marker found. If we have more than expected, we assume it's garbage/padding and trim.
+      if (pending.expectedBytes > 0 && bytes.length > pending.expectedBytes) {
+        _warn('Trimming image from ${bytes.length} to ${pending.expectedBytes} bytes (forced limit, no marker found)');
+        bytes = Uint8List.sublistView(bytes, 0, pending.expectedBytes);
+      }
+    }
+
+    _dcl('images RX done id=${pending.requestId} recv=$received final=${bytes.length} expect=${pending.expectedBytes} '
       'hdrHash=${pending.hdrHash ?? '-'} algo=${pending.hdrAlgo ?? '-'}');
+
+    // Detailed image diagnostics
+    if (bytes.isNotEmpty) {
+      final first20 = bytes.length >= 20 
+          ? bytes.sublist(0, 20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ')
+          : bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+      _dcl('  📊 Image bytes: ${bytes.length}, fmt: $detectedFmt, valid: $hasValidMarker');
+      if (!hasValidMarker) {
+         _dcl('     First 20: $first20');
+      }
+    }
 
     bool? okSize;
     if (pending.expectedBytes > 0) {
@@ -621,7 +747,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final atleast = received >= pending.expectedBytes;
       okSize = pending.okSize ?? (equal || atleast);
     } else {
-      okSize = pending.okSize ?? null;
+      okSize = pending.okSize;
     }
 
     bool? okHash = pending.okHash;

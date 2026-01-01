@@ -785,20 +785,33 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                },
              );
              
+             // El servidor ya devuelve la imagen redimensionada a 375x425
              // ignore: avoid_print
-             print('[PoseCapturePage] 📏 Redimensionando imagen procesada a 375x425 para validación...');
-             
-             // Redimensionar explícitamente a 375x425 como requiere el validador
-             final resizedProcessed = await _resizeCaptureForValidation(
-               processedBytes, // viene del servidor (post-proceso via WebRTC)
-               width: 375,
-               height: 425,
-             );
-             
-             // ignore: avoid_print
-             print('[PoseCapturePage] ✅ Imagen redimensionada lista: ${resizedProcessed.length} bytes (375x425)');
+             print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes (ya en 375x425)');
 
-             segmentedImageBytes = resizedProcessed;
+             // Validar que la imagen tenga un header válido (JPEG o PNG)
+             bool isValidImage = false;
+             if (processedBytes.length >= 3) {
+               // JPEG: FF D8 FF
+               if (processedBytes[0] == 0xFF && processedBytes[1] == 0xD8 && processedBytes[2] == 0xFF) {
+                 isValidImage = true;
+                 print('[PoseCapturePage] 📦 Formato detectado: JPEG');
+               }
+               // PNG: 89 50 4E 47
+               else if (processedBytes.length >= 4 && 
+                        processedBytes[0] == 0x89 && processedBytes[1] == 0x50 && 
+                        processedBytes[2] == 0x4E && processedBytes[3] == 0x47) {
+                 isValidImage = true;
+                 print('[PoseCapturePage] 📦 Formato detectado: PNG');
+               }
+             }
+             
+             if (!isValidImage) {
+               print('[PoseCapturePage] ❌ Imagen recibida tiene formato inválido o está corrupta');
+               throw StateError('Invalid image format received from server');
+             }
+
+             segmentedImageBytes = processedBytes;
 
              if (mounted && ctl.activeCaptureId == captureId) {
                setState(() {
@@ -856,6 +869,50 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       // STEP 2: Call validation endpoint (during "Validando requisitos" step)
       // If we have a processed segmented image, we use it for validation.
       if (segmentedImageBytes != null) {
+          // === DEBUG LOGS ===
+          // ignore: avoid_print
+          print('[PoseCapturePage] 📊 DEBUG: segmentedImageBytes.length = ${segmentedImageBytes!.length}');
+          if (segmentedImageBytes!.length >= 10) {
+            final header = segmentedImageBytes!.sublist(0, 10).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+            print('[PoseCapturePage] 📊 DEBUG: First 10 bytes = $header');
+          }
+          // Check image format
+          String detectedFormat = 'unknown';
+          if (segmentedImageBytes!.length >= 3 && 
+              segmentedImageBytes![0] == 0xFF && 
+              segmentedImageBytes![1] == 0xD8 && 
+              segmentedImageBytes![2] == 0xFF) {
+            detectedFormat = 'JPEG';
+          } else if (segmentedImageBytes!.length >= 4 && 
+                     segmentedImageBytes![0] == 0x89 && 
+                     segmentedImageBytes![1] == 0x50 && 
+                     segmentedImageBytes![2] == 0x4E && 
+                     segmentedImageBytes![3] == 0x47) {
+            detectedFormat = 'PNG';
+          }
+          print('[PoseCapturePage] 📊 DEBUG: Detected format = $detectedFormat');
+          // === END DEBUG LOGS ===
+
+          // Convert to JPEG if PNG
+          if (detectedFormat == 'PNG') {
+            print('[PoseCapturePage] 🔄 Convirtiendo PNG a JPEG localmente...');
+            try {
+              final image = img.decodeImage(segmentedImageBytes!);
+              if (image != null) {
+                // Encode to JPEG with quality 90
+                final jpegBytes = img.encodeJpg(image, quality: 90);
+                segmentedImageBytes = Uint8List.fromList(jpegBytes);
+                detectedFormat = 'JPEG';
+                print('[PoseCapturePage] ✅ Conversión a JPEG exitosa: ${segmentedImageBytes!.length} bytes');
+              } else {
+                print('[PoseCapturePage] ⚠️ No se pudo decodificar la imagen PNG para conversión');
+              }
+            } catch (e) {
+              print('[PoseCapturePage] ❌ Error convirtiendo a JPEG: $e');
+              // Continue with original bytes if conversion fails
+            }
+          }
+          
           // ignore: avoid_print
           print('[PoseCapturePage] 🚀 Enviando imagen PROCESADA (High Res / Server Output) a validación');
           result = await api.validarImagen(
@@ -897,13 +954,22 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
 
       if (!mounted || ctl.activeCaptureId != captureId) return;
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📊 DEBUG: Validation completed successfully');
+      print('[PoseCapturePage] 📊 DEBUG: _segmentedImageBytes before setState = ${_segmentedImageBytes?.length ?? 'null'} bytes');
+      print('[PoseCapturePage] 📊 DEBUG: segmentedImageBytes to set = ${segmentedImageBytes?.length ?? 'null'} bytes');
       setState(() {
         _isValidatingRemote = false;
         _validationResultText = result;
         _validationErrorText = null;
         _segmentedImageBytes = segmentedImageBytes ?? _segmentedImageBytes;
       });
-    } catch (e) {
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📊 DEBUG: setState completed, _segmentedImageBytes = ${_segmentedImageBytes?.length ?? 'null'} bytes');
+    } catch (e, stackTrace) {
+      // ignore: avoid_print
+      print('[PoseCapturePage] ❌ ERROR in _runRemoteValidation: $e');
+      print('[PoseCapturePage] ❌ Stack trace: $stackTrace');
       if (!mounted || ctl.activeCaptureId != captureId) return;
       setState(() {
         _isValidatingRemote = false;
@@ -1211,6 +1277,178 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                   child: Image.memory(
                                     _segmentedImageBytes ?? ctl.capturedPng!,
                                     fit: BoxFit.contain,
+                                    errorBuilder: (context, error, stackTrace) {
+                                      final bytes = _segmentedImageBytes ?? ctl.capturedPng;
+                                      // ignore: avoid_print
+                                      print('═══════════════════════════════════════════════════════════════════');
+                                      print('❌ IMAGE.MEMORY DECODE ERROR:');
+                                      print('  Error: $error');
+                                      print('  Error type: ${error.runtimeType}');
+                                      if (bytes != null) {
+                                        print('  Bytes length: ${bytes.length}');
+                                        
+                                        // Show first 40 bytes for better header analysis
+                                        if (bytes.length >= 40) {
+                                          final first40 = bytes.sublist(0, 40).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+                                          print('  First 40 bytes: $first40');
+                                        } else if (bytes.length >= 20) {
+                                          final first20 = bytes.sublist(0, 20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+                                          print('  First 20 bytes: $first20');
+                                        }
+                                        
+                                        // Show last 20 bytes for footer/IEND analysis
+                                        if (bytes.length >= 20) {
+                                          final last20 = bytes.sublist(bytes.length - 20).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+                                          print('  Last 20 bytes: $last20');
+                                        } else if (bytes.length >= 12) {
+                                          final last12 = bytes.sublist(bytes.length - 12).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+                                          print('  Last 12 bytes: $last12');
+                                        }
+                                        
+                                        // Detect format and validate structure
+                                        if (bytes.length >= 4) {
+                                          if (bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47) {
+                                            print('  Detected format: PNG');
+                                            
+                                            // PNG-specific diagnostics
+                                            // Check for IEND marker (00 00 00 00 49 45 4E 44 AE 42 60 82)
+                                            bool hasIEND = false;
+                                            if (bytes.length >= 12) {
+                                              final lastBytes = bytes.sublist(bytes.length - 12);
+                                              // IEND chunk: length(4) + "IEND"(4) + CRC(4)
+                                              // Standard IEND: 00 00 00 00 49 45 4E 44 AE 42 60 82
+                                              if (lastBytes[4] == 0x49 && lastBytes[5] == 0x45 && 
+                                                  lastBytes[6] == 0x4E && lastBytes[7] == 0x44) {
+                                                hasIEND = true;
+                                                print('  ✅ PNG IEND marker: FOUND at end');
+                                              } else {
+                                                // Search for IEND in last 100 bytes
+                                                final searchStart = bytes.length > 100 ? bytes.length - 100 : 0;
+                                                for (int i = searchStart; i < bytes.length - 4; i++) {
+                                                  if (bytes[i] == 0x49 && bytes[i+1] == 0x45 && 
+                                                      bytes[i+2] == 0x4E && bytes[i+3] == 0x44) {
+                                                    hasIEND = true;
+                                                    print('  ⚠️ PNG IEND marker: FOUND at offset ${i}, ${bytes.length - i - 8} bytes before end');
+                                                    break;
+                                                  }
+                                                }
+                                                if (!hasIEND) {
+                                                  print('  ❌ PNG IEND marker: NOT FOUND - image is TRUNCATED');
+                                                }
+                                              }
+                                            }
+                                            
+                                            // Analyze PNG chunks
+                                            print('  PNG Chunk analysis:');
+                                            int offset = 8; // Skip PNG signature
+                                            int chunkCount = 0;
+                                            String lastChunkType = '';
+                                            int lastChunkOffset = 0;
+                                            while (offset + 8 <= bytes.length && chunkCount < 20) {
+                                              final chunkLen = (bytes[offset] << 24) | (bytes[offset+1] << 16) | 
+                                                              (bytes[offset+2] << 8) | bytes[offset+3];
+                                              if (offset + 4 <= bytes.length - 4) {
+                                                final chunkType = String.fromCharCodes(bytes.sublist(offset + 4, offset + 8));
+                                                if (chunkCount < 5 || chunkType == 'IEND' || chunkType == 'IDAT') {
+                                                  print('    Chunk $chunkCount: $chunkType @ offset $offset, length $chunkLen');
+                                                }
+                                                lastChunkType = chunkType;
+                                                lastChunkOffset = offset;
+                                                
+                                                // Move to next chunk (length + type + data + CRC)
+                                                offset += 4 + 4 + chunkLen + 4;
+                                              } else {
+                                                print('    ❌ Truncated at chunk $chunkCount (offset $offset)');
+                                                break;
+                                              }
+                                              chunkCount++;
+                                            }
+                                            print('    Total chunks scanned: $chunkCount');
+                                            print('    Last chunk: $lastChunkType @ offset $lastChunkOffset');
+                                            
+                                            if (!hasIEND) {
+                                              // Calculate how many bytes might be missing
+                                              print('  📊 Corruption analysis:');
+                                              print('    Expected last chunk: IEND (12 bytes)');
+                                              print('    Actual last chunk: $lastChunkType');
+                                              if (lastChunkType == 'IDAT') {
+                                                print('    ⚠️ Image data (IDAT) appears truncated');
+                                              }
+                                            }
+                                            
+                                          } else if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+                                            print('  Detected format: JPEG');
+                                            
+                                            // JPEG-specific diagnostics
+                                            // Check for EOI marker (FF D9)
+                                            bool hasEOI = false;
+                                            if (bytes.length >= 2) {
+                                              if (bytes[bytes.length - 2] == 0xFF && bytes[bytes.length - 1] == 0xD9) {
+                                                hasEOI = true;
+                                                print('  ✅ JPEG EOI marker: FOUND at end');
+                                              } else {
+                                                // Search for EOI in last 100 bytes
+                                                final searchStart = bytes.length > 100 ? bytes.length - 100 : 0;
+                                                for (int i = bytes.length - 2; i >= searchStart; i--) {
+                                                  if (bytes[i] == 0xFF && bytes[i+1] == 0xD9) {
+                                                    hasEOI = true;
+                                                    print('  ⚠️ JPEG EOI marker: FOUND at offset ${i}, ${bytes.length - i - 2} extra bytes after');
+                                                    break;
+                                                  }
+                                                }
+                                                if (!hasEOI) {
+                                                  print('  ❌ JPEG EOI marker: NOT FOUND - image is TRUNCATED');
+                                                }
+                                              }
+                                            }
+                                          } else {
+                                            print('  Detected format: UNKNOWN');
+                                            final headerHex = bytes.sublist(0, bytes.length.clamp(0, 8)).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
+                                            print('  Unknown header: $headerHex');
+                                          }
+                                        }
+                                        
+                                        // Calculate MD5-like fingerprint (simple hash for log correlation)
+                                        int simpleHash = 0;
+                                        for (int i = 0; i < bytes.length; i += 1000) {
+                                          simpleHash = (simpleHash * 31 + bytes[i]) & 0xFFFFFFFF;
+                                        }
+                                        print('  Simple hash (for correlation): ${simpleHash.toRadixString(16).padLeft(8, '0')}');
+                                        
+                                        // Check for null bytes that might indicate padding
+                                        int trailingNulls = 0;
+                                        for (int i = bytes.length - 1; i >= 0 && bytes[i] == 0; i--) {
+                                          trailingNulls++;
+                                        }
+                                        if (trailingNulls > 0) {
+                                          print('  ⚠️ Trailing null bytes: $trailingNulls (possible buffer padding)');
+                                        }
+                                      }
+                                      if (stackTrace != null && stackTrace.toString().trim().isNotEmpty) {
+                                        print('  Stack trace: $stackTrace');
+                                      } else {
+                                        print('  Stack trace: (not available from Image.memory decoder)');
+                                      }
+                                      print('═══════════════════════════════════════════════════════════════════');
+                                      return Center(
+                                        child: Column(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(Icons.broken_image, size: 64, color: Colors.red),
+                                            const SizedBox(height: 8),
+                                            Text(
+                                              'Error al mostrar imagen',
+                                              style: TextStyle(color: Colors.red),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              '${bytes?.length ?? 0} bytes',
+                                              style: TextStyle(color: Colors.grey, fontSize: 12),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
                                   ),
                                 ),
                               ),

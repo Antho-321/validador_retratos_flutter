@@ -59,6 +59,28 @@ Future<void> main() async {
   // ── Ganchos globales de errores de Flutter y plataforma ────────────────────
   FlutterError.onError = (FlutterErrorDetails details) {
     FlutterError.dumpErrorToConsole(details);
+    
+    // Enhanced logging for image-related errors
+    final exceptionStr = details.exception.toString();
+    if (exceptionStr.contains('decompress') || 
+        exceptionStr.contains('image') ||
+        details.library == 'image resource service') {
+      // ignore: avoid_print
+      print('═══════════════════════════════════════════════════════════════════');
+      print('📷 IMAGE ERROR DETAILS:');
+      print('  Library: ${details.library ?? "unknown"}');
+      print('  Context: ${details.context?.toDescription() ?? "unknown"}');
+      print('  Exception type: ${details.exception.runtimeType}');
+      print('  Exception: ${details.exception}');
+      if (details.informationCollector != null) {
+        print('  Additional info:');
+        for (final info in details.informationCollector!()) {
+          print('    - ${info.toDescription()}');
+        }
+      }
+      print('═══════════════════════════════════════════════════════════════════');
+    }
+    
     final st = details.stack ?? StackTrace.current;
     Zone.current.handleUncaughtError(details.exception, st);
   };
