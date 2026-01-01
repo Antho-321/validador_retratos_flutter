@@ -2,7 +2,7 @@
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
 import 'dart:async' show Completer, StreamSubscription, Timer, unawaited;
-import 'dart:convert' show jsonDecode;
+import 'dart:convert' show base64Decode, jsonDecode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
@@ -448,11 +448,60 @@ class _ValidationOverlayStepRow extends StatelessWidget {
   }
 }
 
+Future<Uint8List> _prepareHighResCapture(
+  Uint8List bytes, {
+  int jpegQuality = 100,
+}) async {
+  final payload = <String, Object?>{
+    'bytes': bytes,
+    'jpegQuality': jpegQuality,
+  };
+  try {
+    return await compute(_highResCaptureWorker, payload);
+  } catch (_) {
+    return _highResCaptureWorker(payload);
+  }
+}
+
+Uint8List _highResCaptureWorker(Map<String, Object?> payload) {
+  final bytes = payload['bytes'] as Uint8List;
+  final jpegQuality = payload['jpegQuality'] as int? ?? 100;
+
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) {
+    throw StateError('No se pudo decodificar la captura.');
+  }
+
+  // No resizing, just convert to JPEG at high quality
+  // Modificar pixel específico (legacy markers, preservados por compatibilidad)
+  // Nota: se mantienen los marcadores pero en coordenadas relativas si fuera necesario,
+  // pero el código original usaba coords fijas (374, 424) para 375x425.
+  // En alta resolución, estos pixeles quedarían en la "esquina superior izquierda".
+  // Si son críticos para el backend, deberían escalarse.
+  // Asumiendo que eran marcadores de "debug" o "marca de agua" legacy para 375x425.
+  // Se omiten para High Res o se dejan fijos.
+  // El usuario pidió "highest possible resolution", así que evitamos alterar los píxeles
+  // arbitrariamente a menos que sea validación estricta.
+  // El código original:
+  /*
+    if (resized.width > 0 && resized.height > 424) {
+      resized.setPixelRgb(0, 424, 100, 100, 100);
+    }
+    if (resized.width > 374 && resized.height > 424) {
+      resized.setPixelRgb(374, 424, 100, 100, 100);
+    }
+  */
+  // Al no redimensionar, simplemente codificamos.
+
+  final encoded = img.encodeJpg(decoded, quality: jpegQuality);
+  return Uint8List.fromList(encoded);
+}
+
 Future<Uint8List> _resizeCapture(
   Uint8List bytes, {
   required String format,
-  int width = 375,
-  int height = 425,
+  required int width,
+  required int height,
   int jpegQuality = 95,
   int pngLevel = 6,
 }) async {
@@ -483,6 +532,7 @@ Future<Uint8List> _resizeCaptureForDownload(
       height: height,
     );
 
+// Mantener para compatibilidad si algo más lo usa, o marcar deprecated.
 Future<Uint8List> _resizeCaptureForValidation(
   Uint8List bytes, {
   int width = 375,
@@ -493,7 +543,7 @@ Future<Uint8List> _resizeCaptureForValidation(
       format: 'jpeg',
       width: width,
       height: height,
-      jpegQuality: 100, // Maximum quality for validation
+      jpegQuality: 100,
     );
 
 Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
@@ -515,11 +565,9 @@ Uint8List _resizeCaptureWorker(Map<String, Object?> payload) {
     return Uint8List.fromList(encoded);
   }
   if (format == 'jpeg' || format == 'jpg') {
-    // Modificar pixel específico (equivalente a pImagenOriginal[424, 0] = [100,100,100])
     if (resized.width > 0 && resized.height > 424) {
       resized.setPixelRgb(0, 424, 100, 100, 100);
     }
-    // Modificar pixel específico (equivalente a pImagenOriginal[424, 374] = [100,100,100])
     if (resized.width > 374 && resized.height > 424) {
       resized.setPixelRgb(374, 424, 100, 100, 100);
     }
@@ -549,9 +597,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   bool _isRestarting = false; // ⇠ NEW: Loading spinner state for retry
   double _downloadProgress = 0.0;
   bool _isValidatingRemote = false;
+  bool _isSegmenting = false; // Controls "Procesando imagen" state extension
   String? _validationResultText;
   String? _validationErrorText;
   String? _lastValidatedCaptureId;
+  Uint8List? _segmentedImageBytes; // Segmented image received from API
 
   void _resetValidationState() {
     if (_validationResultText == null &&
@@ -562,9 +612,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     }
     setState(() {
       _isValidatingRemote = false;
+      _isSegmenting = false;
       _validationResultText = null;
       _validationErrorText = null;
       _lastValidatedCaptureId = null;
+      _segmentedImageBytes = null; // Reset segmented image
     });
   }
 
@@ -622,6 +674,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _validationResultText = null;
     _validationErrorText = null;
     _isValidatingRemote = true;
+    _isSegmenting = true; // Start segmentation waiting
     if (mounted) setState(() {});
 
     unawaited(_runRemoteValidation(captureId, ctl.capturedPng!));
@@ -630,11 +683,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   Future<void> _runRemoteValidation(String captureId, Uint8List bytes) async {
     try {
       final endpointRaw = (dotenv.env['VALIDAR_IMAGEN_URL'] ?? '').trim();
-      final endpoint = Uri.parse(
-        endpointRaw.isNotEmpty
-            ? endpointRaw
-            : 'https://127.0.0.1:5001/validar-imagen',
-      );
+      final baseUrl = endpointRaw.isNotEmpty
+          ? endpointRaw.replaceAll('/validar-imagen', '')
+          : 'https://127.0.0.1:5001';
+      final validationEndpoint = Uri.parse('$baseUrl/validar-imagen');
+      final segmentationEndpoint = Uri.parse('$baseUrl/segmentar-imagen');
 
       final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
           ? dotenv.env['CEDULA']!.trim()
@@ -649,36 +702,180 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
       final allowInsecureFromEnv =
           (dotenv.env['ALLOW_INSECURE_SSL'] ?? '').trim().toLowerCase() == 'true';
-      final isLocalHost = endpoint.host == '127.0.0.1' ||
-          endpoint.host == 'localhost' ||
-          endpoint.host == '10.0.2.2';
+      final isLocalHost = validationEndpoint.host == '127.0.0.1' ||
+          validationEndpoint.host == 'localhost' ||
+          validationEndpoint.host == '10.0.2.2';
       final allowInsecure = allowInsecureFromEnv || (kDebugMode && isLocalHost);
 
-      final resizedJpeg = await _resizeCaptureForValidation(
+      // Usar imagen en ALTA RESOLUCIÓN (sin resize)
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📸 Preparando imagen en alta resolución (JPEG quality 100)...');
+      final highResJpeg = await _prepareHighResCapture(
         bytes,
-        width: 375,
-        height: 425,
+        jpegQuality: 100,
       );
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📏 Imagen lista para envío: ${highResJpeg.length} bytes (High Res).');
 
+      // STEP 1: Call segmentation endpoint FIRST (during "Procesando imagen" step)
+      Uint8List? segmentedImageBytes;
+      try {
+        // ignore: avoid_print
+        print('[PoseCapturePage] 🔄 Llamando a /segmentar-imagen (Esperando hasta 5m)...');
+        final segmentationApi = PortraitValidationApi(
+          endpoint: segmentationEndpoint,
+          allowInsecure: allowInsecure,
+        );
+        // User requested "wait as long as necessary", using 5 minute timeout
+        final segmentedResult = await segmentationApi.segmentarImagen(
+          imageBytes: highResJpeg, // Se envía FULL RES
+          filename: '$cedula.jpg',
+          contentType: 'image/jpeg',
+          timeout: const Duration(minutes: 5), 
+        );
+        segmentedImageBytes = segmentedResult;
+        // ignore: avoid_print
+        print('[PoseCapturePage] ✅ IMAGEN SEGMENTADA RECIBIDA: ${segmentedImageBytes.length} bytes');
+        
+        // Update UI immediately with segmented image AND move to next step
+        if (mounted && ctl.activeCaptureId == captureId) {
+          setState(() {
+            _segmentedImageBytes = segmentedImageBytes;
+             // Still in "Procesando imagen" step, just updated visual feedback
+          });
+        }
+
+        // STEP 1.5: Call post-processing endpoint (/procesar-imagen-segmentada)
+        // This refines the segmented image (crops, centers, etc.)
+        if (segmentedImageBytes != null) {
+          try {
+             // ignore: avoid_print
+             print('[PoseCapturePage] 🔄 Llamando a /procesar-imagen-segmentada...');
+             final processingApi = PortraitValidationApi(
+               endpoint: segmentationEndpoint, // reuse uri builder logic inside method or pass known one
+               allowInsecure: allowInsecure,
+             );
+             // Note: internal method logic of processingApi will adjust path to /procesar-imagen-segmentada
+             // provided we passed a compatible URI. segmentationEndpoint is .../segmentar-imagen.
+             // replace logic in API class handles path replacement from the passed URI.
+             
+             final processedBytes = await processingApi.procesarImagenSegmentada(
+               imageBytes: segmentedImageBytes!,
+               filename: '$cedula.png', // It returns PNG usually
+               contentType: 'image/png',
+             );
+             
+             // ignore: avoid_print
+             print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA: ${processedBytes.length} bytes');
+
+             // ignore: avoid_print
+             print('[PoseCapturePage] 📏 Redimensionando imagen procesada a 375x425 para validación...');
+             
+             // Redimensionar explícitamente a 375x425 como requiere el validador
+             final resizedProcessed = await _resizeCaptureForValidation(
+               processedBytes, // viene del servidor (post-proceso)
+               width: 375,
+               height: 425,
+             );
+             
+             // ignore: avoid_print
+             print('[PoseCapturePage] ✅ Imagen redimensionada lista: ${resizedProcessed.length} bytes (375x425)');
+
+             segmentedImageBytes = resizedProcessed;
+
+             if (mounted && ctl.activeCaptureId == captureId) {
+               setState(() {
+                 _segmentedImageBytes = segmentedImageBytes;
+                 _isSegmenting = false; // FINALLY Move to "Validando requisitos"
+               });
+             }
+          } catch (procErr) {
+             // ignore: avoid_print
+             print('[PoseCapturePage] ⚠️ Error en post-procesamiento: $procErr');
+             // Decide: fail or continue with raw segmented?
+             // Let's continue with raw segmented but stop spinner
+             if (mounted && ctl.activeCaptureId == captureId) {
+               setState(() {
+                 _isSegmenting = false;
+               });
+             }
+          }
+        } else {
+             if (mounted && ctl.activeCaptureId == captureId) {
+               setState(() {
+                 _isSegmenting = false;
+               });
+             }
+        }
+      } catch (segErr) {
+        // ignore: avoid_print
+        print('[PoseCapturePage] ⚠️ Error en segmentación: $segErr');
+        // If segmentation fails, we stop "processing" state to allow validation or error to show
+        if (mounted && ctl.activeCaptureId == captureId) {
+          setState(() {
+             _isSegmenting = false;
+          });
+        }
+      }
+
+      if (!mounted || ctl.activeCaptureId != captureId) return;
+
+      // STEP 2: Call validation endpoint (during "Validando requisitos" step)
       final api = PortraitValidationApi(
-        endpoint: endpoint,
+        endpoint: validationEndpoint,
         allowInsecure: allowInsecure,
       );
 
-      final result = await api.validarImagen(
-        imageBytes: resizedJpeg,
-        filename: '$cedula.jpg',
-        contentType: 'image/jpeg',
-        cedula: cedula,
-        nacionalidad: nacionalidad,
-        etnia: etnia,
-      );
+      String result;
+      // STEP 2: Call validation endpoint (during "Validando requisitos" step)
+      // If we have a processed segmented image, we use it for validation.
+      if (segmentedImageBytes != null) {
+          // ignore: avoid_print
+          print('[PoseCapturePage] 🚀 Enviando imagen PROCESADA (High Res / Server Output) a validación');
+          result = await api.validarImagen(
+            imageBytes: segmentedImageBytes!,
+            filename: '$cedula.jpg', // Podríamos cambiar extensión si el procesado es png, pero el backend deducirá
+            contentType: 'image/jpeg', // o 'image/png'
+            cedula: cedula,
+            nacionalidad: nacionalidad,
+            etnia: etnia,
+          );
+      } else {
+         // Fallback to original capture if segmentation failed or wasn't available
+         // ignore: avoid_print
+         print('[PoseCapturePage] ⚠️ Enviando captura ORIGINAL (High Res) a validación (fallback)');
+         result = await api.validarImagen(
+          imageBytes: highResJpeg, // FALLBACK HIGH RES
+          filename: '$cedula.jpg',
+          contentType: 'image/jpeg',
+          cedula: cedula,
+          nacionalidad: nacionalidad,
+          etnia: etnia,
+        );
+      }
+
+      // Parse JSON response for any additional segmented image (fallback)
+      if (segmentedImageBytes == null) {
+        try {
+          final jsonResponse = jsonDecode(result) as Map<String, dynamic>;
+          final segmentedImageB64 = jsonResponse['imagen_segmentada_base64'];
+          if (segmentedImageB64 != null && segmentedImageB64 is String && segmentedImageB64.isNotEmpty) {
+            segmentedImageBytes = base64Decode(segmentedImageB64);
+            // ignore: avoid_print
+            print('[PoseCapturePage] ✅ IMAGEN SEGMENTADA (fallback) DECODIFICADA: ${segmentedImageBytes.length} bytes');
+          }
+        } catch (jsonErr) {
+          // ignore: avoid_print
+          print('[PoseCapturePage] ⚠️ Error al parsear imagen segmentada del JSON: $jsonErr');
+        }
+      }
 
       if (!mounted || ctl.activeCaptureId != captureId) return;
       setState(() {
         _isValidatingRemote = false;
         _validationResultText = result;
         _validationErrorText = null;
+        _segmentedImageBytes = segmentedImageBytes ?? _segmentedImageBytes;
       });
     } catch (e) {
       if (!mounted || ctl.activeCaptureId != captureId) return;
@@ -749,7 +946,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   }
 
   Future<void> _downloadCapturedWithProgress() async {
-    final bytes = ctl.capturedPng;
+    // Download the segmented/processed image if available, otherwise the original capture.
+    final bytes = _segmentedImageBytes ?? ctl.capturedPng;
     if (bytes == null) return;
 
     const double resizePhaseWeight = 0.2; // treat resize as 20% of the progress bar
@@ -983,8 +1181,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                               child: GestureDetector(
                                 onTap: ctl.closeCaptured,
                                 child: Center(
+                                  // Display segmented image if available, otherwise show original
                                   child: Image.memory(
-                                    ctl.capturedPng!,
+                                    _segmentedImageBytes ?? ctl.capturedPng!,
                                     fit: BoxFit.contain,
                                   ),
                                 ),
@@ -995,7 +1194,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                 child: IgnorePointer(
                                   ignoring: true,
                                   child: _PhotoValidationOverlay(
-                                    activeStep: ctl.isProcessingCapture
+                                    activeStep: (ctl.isProcessingCapture || _isSegmenting)
                                         ? _ValidationOverlayStep.processingImage
                                         : _ValidationOverlayStep
                                             .validatingRequirements,

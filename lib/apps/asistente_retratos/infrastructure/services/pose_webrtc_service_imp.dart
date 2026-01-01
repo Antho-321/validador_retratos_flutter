@@ -331,7 +331,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.preCreateDataChannels = true,
     this.negotiatedFallbackAfterSeconds = 3,
     this.logEverything = true,
-    this.lowLatency = false,
+    this.lowLatency = true,
     this.stripFecFromSdp = true,
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
@@ -378,7 +378,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         } {
     final fps = idealFps <= 0 ? 1 : idealFps;
     final gapMs = (1000 ~/ fps).clamp(1, 1000);
-    _minOverlayGapUs = gapMs * 1000;
+    _minOverlayGapUs = lowLatency ? 0 : gapMs * 1000;
     _jsonParser = PoseJsonParser(
       warn: _warn,
       updateLmkStateFromFlat: _updateLmkStateFromFlat,
@@ -1092,7 +1092,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     final config = <String, dynamic>{
       'sdpSemantics': 'unified-plan',
       'bundlePolicy': 'max-bundle',
-      'iceCandidatePoolSize': 4,
+      'iceCandidatePoolSize': 8,
       'iceServers': [
         if (_stunUrl?.isNotEmpty ?? false) {'urls': _stunUrl},
         if (_turnUrl?.isNotEmpty ?? false)
@@ -1346,7 +1346,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
     };
 
-    Timer(const Duration(seconds: 2), () {
+    Timer(const Duration(seconds: 1), () {
       if (!c.isCompleted) {
         c.complete();
         pc.onIceGatheringState = prev;

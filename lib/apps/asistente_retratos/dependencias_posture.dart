@@ -47,9 +47,9 @@ void registrarDependenciasPosture({
   final turnUsername = envOrNull('TURN_USERNAME');
   final turnPassword = envOrNull('TURN_PASSWORD');
 
-  final lowLatency = envBool('POSE_LOW_LATENCY', defaultValue: false);
+  final lowLatency = envBool('POSE_LOW_LATENCY', defaultValue: true);
   final preferBestResolution =
-      envBool('POSE_PREFER_BEST_RESOLUTION', defaultValue: !lowLatency);
+      envBool('POSE_PREFER_BEST_RESOLUTION', defaultValue: true);
   final idealWidth =
       envInt('POSE_IDEAL_WIDTH', defaultValue: lowLatency ? 640 : 640);
   final idealHeight =
@@ -58,7 +58,7 @@ void registrarDependenciasPosture({
   final maxBitrateKbps =
       envInt('POSE_MAX_BITRATE_KBPS', defaultValue: lowLatency ? 600 : 800);
   final kfMinGapMs =
-      envInt('POSE_KF_MIN_GAP_MS', defaultValue: lowLatency ? 200 : 500);
+      envInt('POSE_KF_MIN_GAP_MS', defaultValue: lowLatency ? 100 : 500);
   final enableFaceRecog =
       envBool('POSE_ENABLE_FACE_RECOG', defaultValue: true);
 

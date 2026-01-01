@@ -220,7 +220,7 @@ class RtcVideoEncoder {
         ? '\r\n'
         : (sdp.contains('\n') ? '\n' : '\r\n');
 
-    String minKbps(int start) => ((start * 0.8).round()).toString();
+    String minKbps(int start) => ((start * 0.5).round()).toString();
     Map<String, String> injectFor(int startKbps, int? frames) => {
           'packetization-mode': '1',
           'profile-level-id': '42e01f',

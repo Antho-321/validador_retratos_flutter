@@ -119,7 +119,7 @@ class _PoseAppState extends State<PoseApp> {
         registrarDependenciasPosture(
           offerUri: Uri.parse(offerUrl),
           cedula: cedula,
-          logEverything: false,
+          logEverything: true,
         );
       }
 
