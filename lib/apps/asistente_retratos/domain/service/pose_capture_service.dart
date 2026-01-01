@@ -45,6 +45,7 @@ abstract class PoseCaptureService {
       String? requestId,
       String? basename,
       String? formatOverride,
+      bool alreadySegmented = false,
   });
 
   /// Sends a command to restart the backend process/state.

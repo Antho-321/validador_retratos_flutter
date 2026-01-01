@@ -1,7 +1,7 @@
 // ==========================
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
-import 'dart:async' show Completer, StreamSubscription, Timer, unawaited;
+import 'dart:async' show Completer, StreamSubscription, Timer, TimeoutException, unawaited;
 import 'dart:convert' show base64Decode, jsonDecode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
@@ -745,35 +745,52 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           });
         }
 
-        // STEP 1.5: Call post-processing endpoint (/procesar-imagen-segmentada)
-        // This refines the segmented image (crops, centers, etc.)
-        if (segmentedImageBytes != null) {
+        // STEP 1.5: Send segmented image via WebRTC for post-processing
+        // This uses the existing WebRTC data channel instead of a separate HTTP call
+        if (segmentedImageBytes != null && widget.poseService is PoseWebrtcServiceImp) {
           try {
              // ignore: avoid_print
-             print('[PoseCapturePage] 🔄 Llamando a /procesar-imagen-segmentada...');
-             final processingApi = PortraitValidationApi(
-               endpoint: segmentationEndpoint, // reuse uri builder logic inside method or pass known one
-               allowInsecure: allowInsecure,
-             );
-             // Note: internal method logic of processingApi will adjust path to /procesar-imagen-segmentada
-             // provided we passed a compatible URI. segmentationEndpoint is .../segmentar-imagen.
-             // replace logic in API class handles path replacement from the passed URI.
+             print('[PoseCapturePage] 🔄 Enviando imagen segmentada via WebRTC para post-procesamiento...');
+             final webrtcService = widget.poseService as PoseWebrtcServiceImp;
              
-             final processedBytes = await processingApi.procesarImagenSegmentada(
-               imageBytes: segmentedImageBytes!,
-               filename: '$cedula.png', // It returns PNG usually
-               contentType: 'image/png',
+             // Check if WebRTC images DC is ready
+             if (!webrtcService.imagesReady) {
+               throw StateError('WebRTC images data channel not ready');
+             }
+             
+             // Set up listener for processed image response
+             final processedCompleter = Completer<Uint8List>();
+             StreamSubscription? subscription;
+             subscription = webrtcService.imagesProcessed.listen((rx) {
+               if (!processedCompleter.isCompleted) {
+                 // ignore: avoid_print
+                 print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA (WebRTC): ${rx.bytes.length} bytes');
+                 processedCompleter.complete(rx.bytes);
+               }
+               subscription?.cancel();
+             });
+             
+             // Send the segmented image for processing via WebRTC
+             await webrtcService.sendImageBytes(
+               segmentedImageBytes!,
+               alreadySegmented: true,  // Use post-processing only pipeline
              );
              
-             // ignore: avoid_print
-             print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA: ${processedBytes.length} bytes');
-
+             // Wait for processed result (with timeout)
+             final processedBytes = await processedCompleter.future.timeout(
+               const Duration(minutes: 2),
+               onTimeout: () {
+                 subscription?.cancel();
+                 throw TimeoutException('Post-processing via WebRTC timed out');
+               },
+             );
+             
              // ignore: avoid_print
              print('[PoseCapturePage] 📏 Redimensionando imagen procesada a 375x425 para validación...');
              
              // Redimensionar explícitamente a 375x425 como requiere el validador
              final resizedProcessed = await _resizeCaptureForValidation(
-               processedBytes, // viene del servidor (post-proceso)
+               processedBytes, // viene del servidor (post-proceso via WebRTC)
                width: 375,
                height: 425,
              );
@@ -791,7 +808,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
              }
           } catch (procErr) {
              // ignore: avoid_print
-             print('[PoseCapturePage] ⚠️ Error en post-procesamiento: $procErr');
+             print('[PoseCapturePage] ⚠️ Error en post-procesamiento via WebRTC: $procErr');
              // Decide: fail or continue with raw segmented?
              // Let's continue with raw segmented but stop spinner
              if (mounted && ctl.activeCaptureId == captureId) {
@@ -800,6 +817,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                });
              }
           }
+        } else if (segmentedImageBytes != null) {
+             // Fallback: WebRTC not available, just continue with segmented image
+             // ignore: avoid_print
+             print('[PoseCapturePage] ⚠️ WebRTC no disponible, usando imagen segmentada sin post-procesamiento');
+             if (mounted && ctl.activeCaptureId == captureId) {
+               setState(() {
+                 _isSegmenting = false;
+               });
+             }
         } else {
              if (mounted && ctl.activeCaptureId == captureId) {
                setState(() {

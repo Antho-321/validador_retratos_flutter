@@ -2116,6 +2116,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     String? requestId,
     String? basename,
     String? formatOverride,
+    bool alreadySegmented = false,
   }) async {
     final ch = _imagesDc; // <-- ADDED
     if (ch == null || ch.state != RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
@@ -2140,6 +2141,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         'hash': hash,
         'hash_algo': 'md5',
         'request_basename': basename ?? '',
+        'already_segmented': alreadySegmented,
       });
       _dcl('images => header ${header.length}B "${_previewText(header)}"');
       await ch.send(RTCDataChannelMessage(header));
