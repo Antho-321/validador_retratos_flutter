@@ -448,6 +448,77 @@ class _ValidationOverlayStepRow extends StatelessWidget {
   }
 }
 
+/// Reusable error overlay for SOAP/cédula data retrieval failures.
+/// Shows an error message and a retry button with the same functionality
+/// as the existing retry button used after captures.
+class _CedulaDataErrorOverlay extends StatelessWidget {
+  const _CedulaDataErrorOverlay({
+    required this.onRetry,
+    required this.isRetrying,
+  });
+
+  final VoidCallback onRetry;
+  final bool isRetrying;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Container(
+      color: scheme.surface.withOpacity(0.92),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.error_outline,
+                size: 72,
+                color: scheme.error,
+              ),
+              const SizedBox(height: 20),
+              Text(
+                kCedulaDataFailureMessage,
+                textAlign: TextAlign.center,
+                style: textTheme.titleLarge?.copyWith(
+                  color: scheme.onSurface,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'No fue posible obtener la información de referencia. '
+                'Verifique la conexión y vuelva a intentar.',
+                textAlign: TextAlign.center,
+                style: textTheme.bodyMedium?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 28),
+              FilledButton.icon(
+                onPressed: isRetrying ? null : onRetry,
+                icon: isRetrying
+                    ? SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: scheme.onPrimary,
+                        ),
+                      )
+                    : const Icon(Icons.refresh),
+                label: Text(isRetrying ? 'Conectando...' : 'Reintentar'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Future<Uint8List> _prepareHighResCapture(
   Uint8List bytes, {
   int jpegQuality = 100,
@@ -1260,6 +1331,28 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                         ),
                       ),
                     ),
+
+                    // 3.5) Cédula Data Error Overlay (SOAP failure)
+                    if (ctl.hasCedulaDataFailure)
+                      Positioned.fill(
+                        child: _CedulaDataErrorOverlay(
+                          isRetrying: _isRestarting,
+                          onRetry: () async {
+                            setState(() => _isRestarting = true);
+                            _resetValidationState();
+                            try {
+                              await ctl.restartBackend();
+                              await _waitForLandmarks();
+                            } catch (_) {
+                              // On error, just reset the loading state
+                            } finally {
+                              if (mounted) {
+                                setState(() => _isRestarting = false);
+                              }
+                            }
+                          },
+                        ),
+                      ),
 
                     // 4) Secuencia de giro
                     if (ctl.showTurnRightSeq)

@@ -1124,6 +1124,9 @@ extension _FaceRecogHudHelpers on PoseCaptureController {
     if (normalized == 'MATCH') {
       return '¡Rostro verificado!';
     }
+    if (normalized == 'CEDULA_DATA_FAILURE') {
+      return kCedulaDataFailureMessage;
+    }
     
     return 'El rostro no coincide con la persona esperada';
     

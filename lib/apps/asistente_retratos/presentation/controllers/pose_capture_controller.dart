@@ -30,6 +30,10 @@ import '../../domain/metrics/metrics.dart';
 import '../../domain/metrics/head_pose.dart' show yawPitchRollFromFaceMesh;
 part 'pose_capture_controller.onframe.dart';
 
+/// Error message displayed when cédula data (SOAP) retrieval fails.
+/// Used in both HUD status message and error overlay.
+const kCedulaDataFailureMessage = 'Fallo al obtener datos con tu cédula';
+
 /// Treat empty/whitespace strings as null so the HUD won't render the secondary line.
 String? _nullIfBlank(String? s) => (s == null || s.trim().isEmpty) ? null : s;
 
@@ -659,6 +663,12 @@ class PoseCaptureController extends ChangeNotifier {
   double? _faceRecogScore;
   String? _faceRecogDecisionRaw;
 
+  /// Returns true if the server reported a cédula data retrieval failure (SOAP error).
+  bool get hasCedulaDataFailure {
+    final decision = _faceRecogDecisionRaw?.toUpperCase();
+    return decision == 'CEDULA_DATA_FAILURE';
+  }
+
   // Hint trigger & visibility for sequence
   bool _turnRightSeqLoaded = false;
   bool _turnLeftSeqLoaded = false;
@@ -812,6 +822,8 @@ class PoseCaptureController extends ChangeNotifier {
     _faceRecogScore = result?.cosSim;
     final String? normalized = _faceRecogDecisionRaw?.toUpperCase();
     _faceRecogMatch = normalized == 'MATCH';
+    // Notify listeners so UI rebuilds (e.g., to show _CedulaDataErrorOverlay)
+    if (!_isDisposed) notifyListeners();
   }
 
   void attach() {
