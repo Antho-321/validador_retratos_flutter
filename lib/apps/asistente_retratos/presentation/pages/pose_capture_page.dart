@@ -772,6 +772,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final shouldStart = !ctl.isCapturing &&
         !ctl.isProcessingCapture &&
         !_isValidatingRemote &&
+        !_isRestarting &&
         _lastValidatedCaptureId != captureId;
 
     if (!shouldStart) return;
