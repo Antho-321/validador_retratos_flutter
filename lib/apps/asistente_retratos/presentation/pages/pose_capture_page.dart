@@ -497,6 +497,36 @@ Uint8List _highResCaptureWorker(Map<String, Object?> payload) {
   return Uint8List.fromList(encoded);
 }
 
+/// Prepares a high-resolution PNG capture (lossless) for segmentation.
+Future<Uint8List> _prepareHighResPngCapture(
+  Uint8List bytes, {
+  int pngLevel = 6,
+}) async {
+  final payload = <String, Object?>{
+    'bytes': bytes,
+    'pngLevel': pngLevel,
+  };
+  try {
+    return await compute(_highResPngCaptureWorker, payload);
+  } catch (_) {
+    return _highResPngCaptureWorker(payload);
+  }
+}
+
+Uint8List _highResPngCaptureWorker(Map<String, Object?> payload) {
+  final bytes = payload['bytes'] as Uint8List;
+  final pngLevel = payload['pngLevel'] as int? ?? 6;
+
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) {
+    throw StateError('No se pudo decodificar la captura.');
+  }
+
+  // Encode as PNG (lossless) at the specified compression level
+  final encoded = img.encodePng(decoded, level: pngLevel);
+  return Uint8List.fromList(encoded);
+}
+
 Future<Uint8List> _resizeCapture(
   Uint8List bytes, {
   required String format,
@@ -711,15 +741,25 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           validationEndpoint.host == '10.0.2.2';
       final allowInsecure = allowInsecureFromEnv || (kDebugMode && isLocalHost);
 
-      // Usar imagen en ALTA RESOLUCIÓN (sin resize)
+      // Usar imagen en ALTA RESOLUCIÓN (sin resize) - PNG para segmentación
       // ignore: avoid_print
-      print('[PoseCapturePage] 📸 Preparando imagen en alta resolución (JPEG quality 100)...');
+      print('[PoseCapturePage] 📸 Preparando imagen en alta resolución (PNG lossless) para segmentación...');
+      final highResPng = await _prepareHighResPngCapture(
+        bytes,
+        pngLevel: 6,
+      );
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📏 Imagen PNG lista para segmentación: ${highResPng.length} bytes (High Res).');
+
+      // También preparamos JPEG para validación (se usará después si la segmentación falla)
+      // ignore: avoid_print
+      print('[PoseCapturePage] 📸 Preparando imagen en alta resolución (JPEG quality 100) para validación fallback...');
       final highResJpeg = await _prepareHighResCapture(
         bytes,
         jpegQuality: 100,
       );
       // ignore: avoid_print
-      print('[PoseCapturePage] 📏 Imagen lista para envío: ${highResJpeg.length} bytes (High Res).');
+      print('[PoseCapturePage] 📏 Imagen JPEG lista para validación: ${highResJpeg.length} bytes (High Res).');
 
       // STEP 1: Call segmentation endpoint FIRST (during "Procesando imagen" step)
       Uint8List? segmentedImageBytes;
@@ -732,9 +772,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         );
         // User requested "wait as long as necessary", using 5 minute timeout
         final segmentedResult = await segmentationApi.segmentarImagen(
-          imageBytes: highResJpeg, // Se envía FULL RES
-          filename: '$cedula.jpg',
-          contentType: 'image/jpeg',
+          imageBytes: highResPng, // Se envía FULL RES en PNG (lossless)
+          filename: '$cedula.png',
+          contentType: 'image/png',
           timeout: const Duration(minutes: 5), 
         );
         segmentedImageBytes = segmentedResult;

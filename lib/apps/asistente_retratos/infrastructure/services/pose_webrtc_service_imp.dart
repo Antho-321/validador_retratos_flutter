@@ -6,6 +6,7 @@ import 'dart:math' show Random, min;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
+import 'dart:io' show SocketException;
 
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/foundation.dart'
@@ -1345,11 +1346,43 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         body['task_params'] = normalizedTaskParams;
       }
     }
-    final res = await http.post(
-      offerUri,
-      headers: const {'content-type': 'application/json'},
-      body: jsonEncode(body),
-    );
+    http.Response res;
+    try {
+      _log('Attempting HTTP POST to $offerUri...');
+      res = await http.post(
+        offerUri,
+        headers: const {'content-type': 'application/json'},
+        body: jsonEncode(body),
+      );
+      _log('HTTP POST succeeded: statusCode=${res.statusCode}');
+    } on SocketException catch (e, stack) {
+      _warn('SocketException during signaling:');
+      _warn('  Message: ${e.message}');
+      _warn('  Address: ${e.address}');
+      _warn('  Port: ${e.port}');
+      _warn('  OSError: ${e.osError}');
+      _warn('  Stack: $stack');
+      rethrow;
+    } on http.ClientException catch (e, stack) {
+      _warn('ClientException during signaling:');
+      _warn('  Message: ${e.message}');
+      _warn('  URI: ${e.uri}');
+      _warn('  RuntimeType: ${e.runtimeType}');
+      _warn('  Stack: $stack');
+      rethrow;
+    } on TimeoutException catch (e, stack) {
+      _warn('TimeoutException during signaling:');
+      _warn('  Message: ${e.message}');
+      _warn('  Duration: ${e.duration}');
+      _warn('  Stack: $stack');
+      rethrow;
+    } catch (e, stack) {
+      _warn('Unknown error during signaling HTTP POST:');
+      _warn('  Type: ${e.runtimeType}');
+      _warn('  Error: $e');
+      _warn('  Stack: $stack');
+      rethrow;
+    }
 
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw Exception('Signaling failed: ${res.statusCode} ${res.body}');
