@@ -1294,53 +1294,57 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
               body: Stack(
                 children: [
                   if (!ctl.isCapturing && ctl.capturedPng == null) ...[
-                    // ÚNICO bloque preview + overlay unificado
+                    // ═══════════════════════════════════════════════════════════
+                    // OPTIMIZACIÓN DE LATENCIA: Preview y Landmarks desacoplados
+                    // ═══════════════════════════════════════════════════════════
+                    // El RTCVideoView ahora está en su propio RepaintBoundary,
+                    // aislado del CustomPaint de landmarks. Esto evita que las
+                    // actualizaciones de landmarks bloqueen el pipeline de video.
+                    
+                    // 1) Camera preview - AISLADO en su propio layer
                     Positioned.fill(
                       child: RepaintBoundary(
                         key: _previewKey,
                         child: IgnorePointer(
-                          child: Builder(
-                            builder: (_) {
-                              // si el servicio concreto es PoseWebrtcServiceImp, úsalo directo
-                              final impl = widget.poseService is PoseWebrtcServiceImp
-                                  ? widget.poseService as PoseWebrtcServiceImp
-                                  : null;
-
-                              final hasPainter = widget.drawLandmarks && impl != null;
-
-                              return hasPainter
-                                  ? CustomPaint(
-                                      isComplex: true,
-                                      willChange: true,
-                                      foregroundPainter: LandmarksPainter(
-                                        impl!,
-                                        cap: cap,                 // ✅ color desde CaptureTheme
-                                        mirror: ctl.mirror,
-                                        srcSize: impl.latestFrame.value?.imageSize, // mejor escalado
-                                        fit: BoxFit.cover,
-                                        showPoseBones: true,
-                                        showPosePoints: true,
-                                        showFacePoints: true,
-                                        faceStyle: FaceStyle.cross, // o FaceStyle.points
-                                      ),
-                                      child: RTCVideoView(
-                                        svc.localRenderer,
-                                        mirror: ctl.mirror,
-                                        objectFit: RTCVideoViewObjectFit
-                                            .RTCVideoViewObjectFitCover,
-                                      ),
-                                    )
-                                  : RTCVideoView(
-                                      svc.localRenderer,
-                                      mirror: ctl.mirror,
-                                      objectFit: RTCVideoViewObjectFit
-                                          .RTCVideoViewObjectFitCover,
-                                    );
-                            },
+                          child: RTCVideoView(
+                            svc.localRenderer,
+                            mirror: ctl.mirror,
+                            objectFit: RTCVideoViewObjectFit
+                                .RTCVideoViewObjectFitCover,
                           ),
                         ),
                       ),
                     ),
+
+                    // 2) Landmarks overlay - Layer SEPARADO con su propio RepaintBoundary
+                    if (widget.drawLandmarks &&
+                        widget.poseService is PoseWebrtcServiceImp)
+                      Positioned.fill(
+                        child: RepaintBoundary(
+                          child: IgnorePointer(
+                            child: Builder(
+                              builder: (_) {
+                                final impl = widget.poseService as PoseWebrtcServiceImp;
+                                return CustomPaint(
+                                  isComplex: true,
+                                  willChange: true,
+                                  painter: LandmarksPainter(
+                                    impl,
+                                    cap: cap,
+                                    mirror: ctl.mirror,
+                                    srcSize: impl.latestFrame.value?.imageSize,
+                                    fit: BoxFit.cover,
+                                    showPoseBones: true,
+                                    showPosePoints: true,
+                                    showFacePoints: true,
+                                    faceStyle: FaceStyle.cross,
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
+                        ),
+                      ),
 
                     // 3) HUD
                     Positioned.fill(

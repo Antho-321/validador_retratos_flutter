@@ -1121,10 +1121,22 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           'maxWidth': '$width',
           'minHeight': '$height',
           'maxHeight': '$height',
-          'minFrameRate': '$idealFps',
+          // ═══════════════════════════════════════════════════════════════════
+          // OPTIMIZACIÓN DE LATENCIA: Frame rate flexible
+          // ═══════════════════════════════════════════════════════════════════
+          // Usar solo idealFrameRate en lugar de min/max estrictos.
+          // Esto evita que WebRTC buffer frames para sincronizar exactamente.
+          'idealFrameRate': '$idealFps',
+          // Mantener maxFrameRate para evitar uso excesivo de batería
           'maxFrameRate': '$idealFps',
         },
-        'optional': [],
+        'optional': [
+          // Hints de baja latencia para plataformas que los soporten
+          {'latencyMode': 'realtime'},
+          {'googNoiseReduction': true},
+          // Priorizar latencia baja sobre calidad consistente
+          {'googPowerLineFrequency': 2},
+        ],
         'degradationPreference': 'maintain-framerate',
       },
     };
@@ -1229,14 +1241,26 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _localRenderer.onResize = _updateSize;
     _updateSize();
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // OPTIMIZACIÓN DE LATENCIA: Content hints para todas las plataformas
+    // ═══════════════════════════════════════════════════════════════════════
+    // El hint 'motion' indica a WebRTC que priorice fluidez sobre nitidez,
+    // reduciendo el delay de encoding/decoding.
     await _silenceAsync(() async {
-      if (kIsWeb) {
-        final track = _localStream!.getVideoTracks().first;
-        try {
-          await (track as dynamic).setVideoContentHint('motion');
-        } catch (_) {
-          // No soportado → ignorar
-        }
+      final tracks = _localStream?.getVideoTracks();
+      if (tracks == null || tracks.isEmpty) return;
+      final track = tracks.first;
+      
+      // Asegurar que el track está habilitado
+      track.enabled = true;
+      
+      // Aplicar content hint en todas las plataformas (no solo web)
+      try {
+        await (track as dynamic).setVideoContentHint('motion');
+        _log('Applied video content hint: motion');
+      } catch (e) {
+        // Silenciosamente ignorar si no está soportado
+        _log('setVideoContentHint not supported on this platform');
       }
     });
   }
