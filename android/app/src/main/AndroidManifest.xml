@@ -40,6 +40,11 @@
             </intent-filter>
         </activity>
 
+        <!-- Enable Impeller -->
+        <meta-data
+            android:name="io.flutter.embedding.android.EnableImpeller"
+            android:value="true" />
+
         <!-- Used by Flutter to generate GeneratedPluginRegistrant.java -->
         <meta-data
             android:name="flutterEmbedding"
