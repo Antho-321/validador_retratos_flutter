@@ -8,6 +8,7 @@ import 'domain/repository/posture_repository.dart';
 
 import 'infrastructure/services/pose_webrtc_service_imp.dart';
 import 'infrastructure/repository/posture_repository_imp.dart';
+import 'infrastructure/webrtc/rtc_video_encoder.dart';
 
 final sl = GetIt.instance;
 
@@ -42,6 +43,13 @@ void registrarDependenciasPosture({
     return parsed ?? defaultValue;
   }
 
+  double envDouble(String key, {required double defaultValue}) {
+    final raw = dotenv.env[key]?.trim();
+    if (raw == null || raw.isEmpty) return defaultValue;
+    final parsed = double.tryParse(raw);
+    return parsed ?? defaultValue;
+  }
+
   final stunUrl = envOrNull('STUN_URL');
   final turnUrl = envOrNull('TURN_URL');
   final turnUsername = envOrNull('TURN_USERNAME');
@@ -55,8 +63,10 @@ void registrarDependenciasPosture({
   final idealHeight =
       envInt('POSE_IDEAL_HEIGHT', defaultValue: lowLatency ? 360 : 360);
   final idealFps = envInt('POSE_IDEAL_FPS', defaultValue: lowLatency ? 30 : 30);
+  final sendFps = envInt('POSE_SEND_FPS', defaultValue: idealFps);
   final maxBitrateKbps =
       envInt('POSE_MAX_BITRATE_KBPS', defaultValue: lowLatency ? 600 : 800);
+  final sendScale = envDouble('POSE_SEND_SCALE', defaultValue: 1.0);
   final kfMinGapMs =
       envInt('POSE_KF_MIN_GAP_MS', defaultValue: lowLatency ? 100 : 500);
   final enableFaceRecog =
@@ -78,6 +88,12 @@ void registrarDependenciasPosture({
       idealHeight: idealHeight,
       idealFps: idealFps,
       maxBitrateKbps: maxBitrateKbps,
+      encoder: RtcVideoEncoder(
+        idealFps: idealFps,
+        maxBitrateKbps: maxBitrateKbps,
+        encoderFps: sendFps,
+        scaleDownBy: sendScale,
+      ),
       kfMinGapMs: kfMinGapMs,
       requestedTasks: enableFaceRecog
           ? const ['pose', 'face', 'face_recog']

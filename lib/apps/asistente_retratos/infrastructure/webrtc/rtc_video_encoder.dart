@@ -18,6 +18,8 @@ class RtcVideoEncoder {
     this.forceCodec,           // "VP8","H264","H265|HEVC","VP9","AV1"
     this.enableSimulcast = false,
     this.simulcastScales,      // p.ej. [2.0, 1.25, 1.0]  (downscale factors)
+    this.encoderFps,
+    this.scaleDownBy = 1.0,
   });
 
   final int idealFps;
@@ -26,6 +28,8 @@ class RtcVideoEncoder {
   final String? forceCodec;
   final bool enableSimulcast;
   final List<double>? simulcastScales;
+  final int? encoderFps;
+  final double scaleDownBy;
 
   /// Aplica preferencias de codec y límites del sender al transceiver.
   Future<void> applyTo(RTCRtpTransceiver transceiver) async {
@@ -37,9 +41,10 @@ class RtcVideoEncoder {
     await _applySenderLimits(
       transceiver.sender,
       maxKbps: maxBitrateKbps,
-      maxFps: idealFps,
+      maxFps: encoderFps ?? idealFps,
       enableSimulcast: enableSimulcast,
       simulcastScales: simulcastScales,
+      scaleDownBy: scaleDownBy,
     );
   }
 
@@ -150,8 +155,13 @@ class RtcVideoEncoder {
     required int maxFps,
     bool enableSimulcast = false,
     List<double>? simulcastScales,
+    double scaleDownBy = 1.0,
   }) async {
     try {
+      final safeFps = maxFps <= 0 ? 1 : maxFps;
+      final safeScale = (!scaleDownBy.isFinite || scaleDownBy <= 0)
+          ? 1.0
+          : (scaleDownBy < 1.0 ? 1.0 : scaleDownBy);
       final encs = <RTCRtpEncoding>[];
 
       if (enableSimulcast &&
@@ -162,7 +172,10 @@ class RtcVideoEncoder {
         final rids = ['q', 'h', 'f']; // low, mid, full
         final n = simulcastScales.length;
         for (var i = 0; i < n; i++) {
-          final scale = simulcastScales[i];
+          final rawScale = simulcastScales[i];
+          final scale = (!rawScale.isFinite || rawScale <= 0)
+              ? 1.0
+              : (rawScale < 1.0 ? 1.0 : rawScale);
           final share = (i == n - 1)
               ? 0.6
               : (0.4 / (n - 1).clamp(1, 3)); // reparte el 40% entre capas bajas
@@ -172,7 +185,7 @@ class RtcVideoEncoder {
               active: true,
               scaleResolutionDownBy: scale,
               maxBitrate: (maxKbps * 1000 * share).round(),
-              maxFramerate: maxFps,
+              maxFramerate: safeFps,
             ),
           );
         }
@@ -182,9 +195,9 @@ class RtcVideoEncoder {
           RTCRtpEncoding(
             rid: 'f',
             active: true,
-            scaleResolutionDownBy: 1.0,
+            scaleResolutionDownBy: safeScale,
             maxBitrate: maxKbps * 1000,
-            maxFramerate: maxFps,
+            maxFramerate: safeFps,
           ),
         );
       }
