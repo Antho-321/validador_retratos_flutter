@@ -671,6 +671,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   void _emitPendingImage({bool force = false}) {
     final pending = _rxPending;
     if (pending == null) return;
+    
+    // Block emission if image reception is blocked
+    if (_imageReceptionBlocked) {
+      _warn('Image reception blocked, discarding ${pending.sink.length} bytes');
+      _rxPending = null;
+      return;
+    }
+    
     final received = pending.sink.length;
     if (!force && pending.expectedBytes > 0 && received < pending.expectedBytes) {
       return;
@@ -875,10 +883,28 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   _PendingImageSend? _pendingImageSend;
   _RxPending? _rxPending;
   Timer? _imgAckTimer;
+  bool _imageReceptionBlocked = false;
   final _imagesProcessedCtrl =
       StreamController<ImagesRx>.broadcast(sync: true);
   @override
   Stream<ImagesRx> get imagesProcessed => _imagesProcessedCtrl.stream;
+
+  // Image reception control - block further images after processing completes
+  @override
+  void blockImageReception() {
+    _imageReceptionBlocked = true;
+    _rxPending = null; // Clear any pending reception
+    _log('Image reception BLOCKED');
+  }
+
+  @override
+  void unblockImageReception() {
+    _imageReceptionBlocked = false;
+    _log('Image reception UNBLOCKED');
+  }
+
+  @override
+  bool get isImageReceptionBlocked => _imageReceptionBlocked;
 
   int _minEmitIntervalMsFor(String task) =>
       lowLatency ? 1 : (1000 ~/ idealFps).clamp(8, 1000);
@@ -982,6 +1008,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
     _rxPending = null;
     _pendingImageSend = null;
+    _imageReceptionBlocked = false;
     _pendingBin.clear();
     _pendingByTask.clear();
     _emitScheduled.clear();
@@ -1751,6 +1778,11 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     };
     ch.onMessage = (RTCDataChannelMessage m) {
       if (m.isBinary) {
+        // Skip binary data if image reception is blocked
+        if (_imageReceptionBlocked) {
+          _dcl('images <= binary ${m.binary.length}B IGNORED (reception blocked)');
+          return;
+        }
         final pending = _rxPending;
         if (pending != null) {
           pending.sink.add(m.binary);

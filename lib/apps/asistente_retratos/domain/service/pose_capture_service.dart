@@ -48,6 +48,11 @@ abstract class PoseCaptureService {
       bool alreadySegmented = false,
   });
 
+  // Image reception control - block further images after processing completes
+  void blockImageReception();
+  void unblockImageReception();
+  bool get isImageReceptionBlocked;
+
   /// Sends a command to restart the backend process/state.
   Future<void> restartBackend();
 }

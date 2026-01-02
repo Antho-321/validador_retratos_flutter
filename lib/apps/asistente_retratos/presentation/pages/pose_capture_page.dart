@@ -604,6 +604,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   Uint8List? _segmentedImageBytes; // Segmented image received from API
 
   void _resetValidationState() {
+    // Unblock image reception for new captures
+    if (widget.poseService is PoseWebrtcServiceImp) {
+      (widget.poseService as PoseWebrtcServiceImp).unblockImageReception();
+    }
     if (_validationResultText == null &&
         _validationErrorText == null &&
         !_isValidatingRemote &&
@@ -766,6 +770,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                  // ignore: avoid_print
                  print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA (WebRTC): ${rx.bytes.length} bytes');
                  processedCompleter.complete(rx.bytes);
+                 // Block further image reception after successful delivery
+                 webrtcService.blockImageReception();
                }
                subscription?.cancel();
              });
@@ -785,9 +791,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                },
              );
              
-             // El servidor ya devuelve la imagen redimensionada a 375x425
+             // El servidor devuelve la imagen procesada SIN redimensionar
+             // El redimensionamiento a 375x425 se hace aquí en el cliente
              // ignore: avoid_print
-             print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes (ya en 375x425)');
+             print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes');
 
              // Validar que la imagen tenga un header válido (JPEG o PNG)
              bool isValidImage = false;
@@ -811,7 +818,12 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                throw StateError('Invalid image format received from server');
              }
 
-             segmentedImageBytes = processedBytes;
+             // Redimensionar a 375x425 en el cliente
+             print('[PoseCapturePage] 🔄 Redimensionando imagen a 375x425 en el cliente...');
+             final resizedBytes = await _resizeCaptureForValidation(processedBytes);
+             print('[PoseCapturePage] ✅ Imagen redimensionada: ${resizedBytes.length} bytes (375x425)');
+
+             segmentedImageBytes = resizedBytes;
 
              if (mounted && ctl.activeCaptureId == captureId) {
                setState(() {
