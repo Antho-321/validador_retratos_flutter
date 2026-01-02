@@ -7,8 +7,7 @@ import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
 
-import 'package:flutter/foundation.dart' show compute, kDebugMode, kIsWeb;
-import 'dart:io' show Platform;
+import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -1311,6 +1310,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                           child: RTCVideoView(
                             svc.localRenderer,
                             mirror: ctl.mirror,
+                            filterQuality: FilterQuality.none,
                             objectFit: RTCVideoViewObjectFit
                                 .RTCVideoViewObjectFitCover,
                           ),
