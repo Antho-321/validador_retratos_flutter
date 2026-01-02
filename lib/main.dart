@@ -12,6 +12,7 @@ import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
 import 'apps/asistente_retratos/infrastructure/model/images_rx.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
 import 'apps/asistente_retratos/presentation/styles/theme.dart';
+import 'apps/asistente_retratos/presentation/widgets/retry_button.dart';
 
 // Habilitar/Deshabilitar dibujo de landmarks (solo rendering, NO procesamiento)
 const drawLandmarks = true;
@@ -283,10 +284,7 @@ class _BootstrapErrorPage extends StatelessWidget {
                 style: theme.textTheme.bodyMedium,
               ),
               const SizedBox(height: 20),
-              FilledButton(
-                onPressed: onRetry,
-                child: const Text('Reintentar'),
-              ),
+              RetryButton(onPressed: onRetry),
             ],
           ),
         ),

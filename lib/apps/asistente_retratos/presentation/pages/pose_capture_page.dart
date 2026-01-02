@@ -38,6 +38,8 @@ import '../../infrastructure/services/portrait_validation_api.dart'
 import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
     show CaptureTheme;
 
+import '../widgets/retry_button.dart';
+
 class PoseCapturePage extends StatefulWidget {
   const PoseCapturePage({
     super.key,
@@ -454,11 +456,9 @@ class _ValidationOverlayStepRow extends StatelessWidget {
 class _CedulaDataErrorOverlay extends StatelessWidget {
   const _CedulaDataErrorOverlay({
     required this.onRetry,
-    required this.isRetrying,
   });
 
   final VoidCallback onRetry;
-  final bool isRetrying;
 
   @override
   Widget build(BuildContext context) {
@@ -497,20 +497,94 @@ class _CedulaDataErrorOverlay extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 28),
-              FilledButton.icon(
-                onPressed: isRetrying ? null : onRetry,
-                icon: isRetrying
-                    ? SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: scheme.onPrimary,
-                        ),
-                      )
-                    : const Icon(Icons.refresh),
-                label: Text(isRetrying ? 'Conectando...' : 'Reintentar'),
-              ),
+              RetryButton(onPressed: onRetry),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Overlay que se muestra mientras se establece la conexión inicial con el servidor.
+/// Cuando hay error de conexión (timeout), muestra el botón de Reintentar.
+class _ConnectionOverlay extends StatelessWidget {
+  const _ConnectionOverlay({
+    required this.isConnecting,
+    required this.hasError,
+    required this.onRetry,
+  });
+
+  final bool isConnecting;
+  final bool hasError;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+
+    return Container(
+      color: scheme.surface.withOpacity(0.92),
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (hasError) ...[
+                Icon(
+                  Icons.wifi_off_rounded,
+                  size: 72,
+                  color: scheme.error,
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  'Error de conexión',
+                  textAlign: TextAlign.center,
+                  style: textTheme.titleLarge?.copyWith(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'No fue posible establecer conexión con el servidor. '
+                  'Verifique su conexión a internet y vuelva a intentar.',
+                  textAlign: TextAlign.center,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 28),
+                RetryButton(onPressed: onRetry),
+              ] else ...[
+                SizedBox(
+                  width: 64,
+                  height: 64,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 5,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'Estableciendo conexión con el servidor',
+                  textAlign: TextAlign.center,
+                  style: textTheme.titleLarge?.copyWith(
+                    color: scheme.onSurface,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Por favor espere mientras se conecta...',
+                  textAlign: TextAlign.center,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: scheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -695,7 +769,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   final GlobalKey _previewKey = GlobalKey();
   late final PoseCaptureController ctl;
   bool _isDownloading = false;
-  bool _isRestarting = false; // ⇠ NEW: Loading spinner state for retry
   double _downloadProgress = 0.0;
   bool _isValidatingRemote = false;
   bool _isSegmenting = false; // Controls "Procesando imagen" state extension
@@ -703,6 +776,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   String? _validationErrorText;
   String? _lastValidatedCaptureId;
   Uint8List? _segmentedImageBytes; // Segmented image received from API
+  
+  // Estado de conexión inicial con el servidor
+  bool _isConnecting = true;
+  bool _connectionFailed = false;
+  StreamSubscription<PoseFrame>? _connectionSubscription;
 
   void _resetValidationState() {
     // Unblock image reception for new captures
@@ -754,6 +832,101 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
     ctl.attach();
     ctl.addListener(_handleControllerChanged);
+    
+    // Iniciar espera de conexión con el servidor
+    _startConnectionWait();
+    
+    // Escuchar cambios en latestFrame para detectar conexión establecida
+    _setupFrameListener();
+  }
+  
+  /// Listener para detectar cuando llegan frames válidos del servidor
+  void _setupFrameListener() {
+    widget.poseService.latestFrame.addListener(_onLatestFrameChanged);
+  }
+  
+  void _onLatestFrameChanged() {
+    // Si estamos en estado de error de conexión pero llegan frames, significa que la conexión se restableció
+    if (_connectionFailed && mounted) {
+      final frame = widget.poseService.latestFrame.value;
+      if (frame != null) {
+        final hasPackedPositions = (frame.packedPositions?.length ?? 0) > 0;
+        final hasPosesPx = (frame.posesPx?.length ?? 0) > 0;
+        final hasPosesFlat = (frame.posesPxFlat?.length ?? 0) > 0;
+        
+        if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
+          setState(() {
+            _isConnecting = false;
+            _connectionFailed = false;
+          });
+        }
+      }
+    }
+  }
+  
+  /// Espera la primera conexión con el servidor (landmarks)
+  void _startConnectionWait() {
+    // Cancelar suscripción anterior si existe
+    _connectionSubscription?.cancel();
+    
+    // Actualizar estado y refrescar UI para mostrar "Estableciendo conexión"
+    if (mounted) {
+      setState(() {
+        _isConnecting = true;
+        _connectionFailed = false;
+      });
+    } else {
+      _isConnecting = true;
+      _connectionFailed = false;
+    }
+    
+    // Primero verificar si ya hay un frame válido disponible
+    final currentFrame = widget.poseService.latestFrame.value;
+    if (currentFrame != null) {
+      final hasPackedPositions = (currentFrame.packedPositions?.length ?? 0) > 0;
+      final hasPosesPx = (currentFrame.posesPx?.length ?? 0) > 0;
+      final hasPosesFlat = (currentFrame.posesPxFlat?.length ?? 0) > 0;
+      
+      if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
+        if (mounted) {
+          setState(() {
+            _isConnecting = false;
+            _connectionFailed = false;
+          });
+        }
+        return;
+      }
+    }
+    
+    // Timeout de conexión de 30 segundos
+    final timeoutTimer = Timer(const Duration(seconds: 30), () {
+      if (_isConnecting && mounted) {
+        _connectionSubscription?.cancel();
+        setState(() {
+          _isConnecting = false;
+          _connectionFailed = true;
+        });
+      }
+    });
+    
+    // Escuchar el primer frame con landmarks válidos
+    _connectionSubscription = widget.poseService.frames.listen((frame) {
+      // Verificar si el frame tiene datos de landmarks válidos
+      final hasPackedPositions = (frame.packedPositions?.length ?? 0) > 0;
+      final hasPosesPx = (frame.posesPx?.length ?? 0) > 0;
+      final hasPosesFlat = (frame.posesPxFlat?.length ?? 0) > 0;
+      
+      if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
+        timeoutTimer.cancel();
+        _connectionSubscription?.cancel();
+        if (mounted) {
+          setState(() {
+            _isConnecting = false;
+            _connectionFailed = false;
+          });
+        }
+      }
+    });
   }
 
   void _handleControllerChanged() {
@@ -771,7 +944,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final shouldStart = !ctl.isCapturing &&
         !ctl.isProcessingCapture &&
         !_isValidatingRemote &&
-        !_isRestarting &&
+        !_isConnecting &&
         _lastValidatedCaptureId != captureId;
 
     if (!shouldStart) return;
@@ -1166,6 +1339,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
   @override
   void dispose() {
+    _connectionSubscription?.cancel();
+    widget.poseService.latestFrame.removeListener(_onLatestFrameChanged);
     ctl.removeListener(_handleControllerChanged);
     ctl.dispose();
     super.dispose();
@@ -1365,18 +1540,22 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                     if (ctl.hasCedulaDataFailure)
                       Positioned.fill(
                         child: _CedulaDataErrorOverlay(
-                          isRetrying: _isRestarting,
                           onRetry: () async {
-                            setState(() => _isRestarting = true);
+                            // Mostrar inmediatamente "Estableciendo conexión con el servidor"
+                            setState(() {
+                              _isConnecting = true;
+                              _connectionFailed = false;
+                            });
                             _resetValidationState();
                             try {
                               await ctl.restartBackend();
-                              await _waitForLandmarks();
+                              _startConnectionWait();
                             } catch (_) {
-                              // On error, just reset the loading state
-                            } finally {
                               if (mounted) {
-                                setState(() => _isRestarting = false);
+                                setState(() {
+                                  _isConnecting = false;
+                                  _connectionFailed = true;
+                                });
                               }
                             }
                           },
@@ -1435,8 +1614,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                       ),
                     ),
 
-                  // FOTO CAPTURADA
-                  if (ctl.capturedPng != null)
+                  // FOTO CAPTURADA (no mostrar si se está reconectando)
+                  if (ctl.capturedPng != null && !_isConnecting && !_connectionFailed)
                     Positioned.fill(
                       child: Container(
                         color: scheme.background,
@@ -1701,35 +1880,26 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                                       : 'Descargar',
                                                 ),
                                               ),
-                                            FilledButton.icon(
-                                              onPressed: _isRestarting
-                                                  ? null
-                                                  : () async {
-                                                      setState(() => _isRestarting = true);
-                                                      _resetValidationState();
-                                                      try {
-                                                        await ctl.restartBackend();
-                                                        // Wait for landmarks to start arriving before ending loading state
-                                                        await _waitForLandmarks();
-                                                      } catch (_) {
-                                                        // On error, just reset the loading state
-                                                      } finally {
-                                                        if (mounted) {
-                                                          setState(() => _isRestarting = false);
-                                                        }
-                                                      }
-                                                    },
-                                              icon: _isRestarting
-                                                  ? SizedBox(
-                                                      width: 16,
-                                                      height: 16,
-                                                      child: CircularProgressIndicator(
-                                                        strokeWidth: 2,
-                                                        color: Theme.of(context).colorScheme.onPrimary,
-                                                      ),
-                                                    )
-                                                  : const Icon(Icons.refresh),
-                                              label: Text(_isRestarting ? 'Conectando...' : 'Reintentar'),
+                                            RetryButton(
+                                              onPressed: () async {
+                                                // Mostrar inmediatamente "Estableciendo conexión con el servidor"
+                                                setState(() {
+                                                  _isConnecting = true;
+                                                  _connectionFailed = false;
+                                                });
+                                                _resetValidationState();
+                                                try {
+                                                  await ctl.restartBackend();
+                                                  _startConnectionWait();
+                                                } catch (_) {
+                                                  if (mounted) {
+                                                    setState(() {
+                                                      _isConnecting = false;
+                                                      _connectionFailed = true;
+                                                    });
+                                                  }
+                                                }
+                                              },
                                             ),
                                           ],
                                         ),
@@ -1756,6 +1926,33 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                             ),
                           ],
                         ),
+                      ),
+                    ),
+                    
+                  // OVERLAY DE CONEXIÓN GLOBAL (se muestra encima de todo)
+                  if (_isConnecting || _connectionFailed)
+                    Positioned.fill(
+                      child: _ConnectionOverlay(
+                        isConnecting: _isConnecting,
+                        hasError: _connectionFailed,
+                        onRetry: () async {
+                          setState(() {
+                            _isConnecting = true;
+                            _connectionFailed = false;
+                          });
+                          _resetValidationState();
+                          try {
+                            await ctl.restartBackend();
+                            _startConnectionWait();
+                          } catch (_) {
+                            if (mounted) {
+                              setState(() {
+                                _isConnecting = false;
+                                _connectionFailed = true;
+                              });
+                            }
+                          }
+                        },
                       ),
                     ),
                 ],

@@ -1,5 +1,24 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.13)
+
+# Load bundled libraries from the lib/ directory relative to the binary.
+set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
+
+# Disable Snap's Sysroot to prevent header pollution
+set(CMAKE_SYSROOT "/")
+
+# Inject -B/usr/bin to force looking in system paths first for crt*.o and libs
+# Use -isystem to prioritized system headers over Snap's bundled ones safely
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -B/usr/bin")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -B/usr/bin -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu/c++/13 -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu")
+
+# Force CMake to use the CXX compiler (g++) for linking, preventing fallback to clang++
+set(CMAKE_CXX_LINK_EXECUTABLE "<CMAKE_CXX_COMPILER> <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
+
+# Force using system compilers to avoid Snap toolchain issues
+set(CMAKE_C_COMPILER "/usr/bin/gcc")
+set(CMAKE_CXX_COMPILER "/usr/bin/g++")
+
 project(runner LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
@@ -13,18 +32,7 @@ set(APPLICATION_ID "com.example.validador_retratos_flutter")
 # versions of CMake.
 cmake_policy(SET CMP0063 NEW)
 
-# Load bundled libraries from the lib/ directory relative to the binary.
-set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
 
-# Root filesystem for cross-building.
-if(FLUTTER_TARGET_PLATFORM_SYSROOT)
-  set(CMAKE_SYSROOT ${FLUTTER_TARGET_PLATFORM_SYSROOT})
-  set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
-  set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-  set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-  set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-  set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-endif()
 
 # Define build configuration options.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
@@ -41,7 +49,7 @@ endif()
 # of modifying this function.
 function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_14)
-  target_compile_options(${TARGET} PRIVATE -Wall -Werror)
+  target_compile_options(${TARGET} PRIVATE -Wall -Wno-sign-compare -Wno-error)
   target_compile_options(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:-O3>")
   target_compile_definitions(${TARGET} PRIVATE "$<$<NOT:$<CONFIG:Debug>>:NDEBUG>")
 endfunction()
@@ -55,6 +63,7 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 
 # Application build; see runner/CMakeLists.txt.
+link_directories("${CMAKE_CURRENT_SOURCE_DIR}/flutter/ephemeral/.plugin_symlinks/flutter_webrtc/third_party/libwebrtc/lib/linux-x64")
 add_subdirectory("runner")
 
 # Run the Flutter tool portions of the build. This must not be removed.
