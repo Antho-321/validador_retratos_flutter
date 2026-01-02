@@ -1111,10 +1111,17 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     final completer = Completer<void>();
     StreamSubscription<PoseFrame>? subscription;
     Timer? timeoutTimer;
+    int frameCount = 0;
+    bool receivedValidLandmarks = false;
+    
+    // ignore: avoid_print
+    print('[_waitForLandmarks] 🎯 Starting to wait for landmarks...');
     
     // Set a maximum timeout of 30 seconds
     timeoutTimer = Timer(const Duration(seconds: 30), () {
       if (!completer.isCompleted) {
+        // ignore: avoid_print
+        print('[_waitForLandmarks] ⏰ Timeout after 30s. Received $frameCount frames, validLandmarks=$receivedValidLandmarks');
         subscription?.cancel();
         completer.complete();
       }
@@ -1122,13 +1129,27 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     
     // Listen for the first frame with valid landmarks
     subscription = svc.frames.listen((frame) {
+      frameCount++;
+      
       // Check if the frame contains valid landmark data
-      final hasPackedPositions = frame.packedPositions != null && 
-          frame.packedPositions!.isNotEmpty;
-      final hasPosesPx = frame.posesPx != null && frame.posesPx!.isNotEmpty;
-      final hasPosesFlat = frame.posesPxFlat != null && frame.posesPxFlat!.isNotEmpty;
+      final packedLen = frame.packedPositions?.length ?? 0;
+      final posesPxLen = frame.posesPx?.length ?? 0;
+      final posesFlatLen = frame.posesPxFlat?.length ?? 0;
+      
+      final hasPackedPositions = packedLen > 0;
+      final hasPosesPx = posesPxLen > 0;
+      final hasPosesFlat = posesFlatLen > 0;
+      
+      // Log only first few frames to avoid spam
+      if (frameCount <= 3) {
+        // ignore: avoid_print
+        print('[_waitForLandmarks] 📥 Frame #$frameCount: packed=$packedLen, posesPx=$posesPxLen, flat=$posesFlatLen');
+      }
       
       if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
+        receivedValidLandmarks = true;
+        // ignore: avoid_print
+        print('[_waitForLandmarks] ✅ Valid landmarks detected in frame #$frameCount! packed=$packedLen, flat=$posesFlatLen');
         timeoutTimer?.cancel();
         subscription?.cancel();
         if (!completer.isCompleted) {
@@ -1138,6 +1159,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     });
     
     await completer.future;
+    // ignore: avoid_print
+    print('[_waitForLandmarks] 🏁 Finished waiting. Total frames=$frameCount, success=$receivedValidLandmarks');
   }
 
   @override
