@@ -1044,16 +1044,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     if (_connectionFailed && mounted) {
       final frame = widget.poseService.latestFrame.value;
       if (frame != null) {
-        final hasPackedPositions = (frame.packedPositions?.length ?? 0) > 0;
-        final hasPosesPx = (frame.posesPx?.length ?? 0) > 0;
-        final hasPosesFlat = (frame.posesPxFlat?.length ?? 0) > 0;
-        
-        if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
-          setState(() {
-            _isConnecting = false;
-            _connectionFailed = false;
-          });
-        }
+        // Un frame (aunque esté vacío) indica que la conexión WebRTC está viva.
+        setState(() {
+          _isConnecting = false;
+          _connectionFailed = false;
+        });
       }
     }
   }
@@ -1077,19 +1072,14 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     // Primero verificar si ya hay un frame válido disponible
     final currentFrame = widget.poseService.latestFrame.value;
     if (currentFrame != null) {
-      final hasPackedPositions = (currentFrame.packedPositions?.length ?? 0) > 0;
-      final hasPosesPx = (currentFrame.posesPx?.length ?? 0) > 0;
-      final hasPosesFlat = (currentFrame.posesPxFlat?.length ?? 0) > 0;
-      
-      if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
-        if (mounted) {
-          setState(() {
-            _isConnecting = false;
-            _connectionFailed = false;
-          });
-        }
-        return;
+      // Un frame (aunque no tenga landmarks) ya confirma conexión con el servidor.
+      if (mounted) {
+        setState(() {
+          _isConnecting = false;
+          _connectionFailed = false;
+        });
       }
+      return;
     }
     
     // Timeout de conexión de 30 segundos
@@ -1103,22 +1093,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
     });
     
-    // Escuchar el primer frame con landmarks válidos
+    // Escuchar el primer frame (aunque esté vacío)
     _connectionSubscription = widget.poseService.frames.listen((frame) {
-      // Verificar si el frame tiene datos de landmarks válidos
-      final hasPackedPositions = (frame.packedPositions?.length ?? 0) > 0;
-      final hasPosesPx = (frame.posesPx?.length ?? 0) > 0;
-      final hasPosesFlat = (frame.posesPxFlat?.length ?? 0) > 0;
-      
-      if (hasPackedPositions || hasPosesPx || hasPosesFlat) {
-        timeoutTimer.cancel();
-        _connectionSubscription?.cancel();
-        if (mounted) {
-          setState(() {
-            _isConnecting = false;
-            _connectionFailed = false;
-          });
-        }
+      timeoutTimer.cancel();
+      _connectionSubscription?.cancel();
+      if (mounted) {
+        setState(() {
+          _isConnecting = false;
+          _connectionFailed = false;
+        });
       }
     });
   }

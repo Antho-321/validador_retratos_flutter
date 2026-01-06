@@ -6,13 +6,14 @@ import 'dart:math' show Random, min;
 import 'dart:typed_data';
 import 'dart:ui' show Offset, Size;
 import 'dart:isolate';
-import 'dart:io' show SocketException;
+import 'dart:io' show HttpClient, SocketException;
 
 import 'package:flutter/scheduler.dart' show SchedulerBinding;
 import 'package:flutter/foundation.dart'
     show ValueListenable, ValueNotifier, debugPrint, kIsWeb;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:http/io_client.dart' show IOClient;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:hashlib/hashlib.dart';
 
@@ -24,6 +25,7 @@ import '../webrtc/rtc_video_encoder.dart';
 import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
 import '../model/images_rx.dart';
+import '../model/images_upload_ack.dart';
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_json_parser.dart';
@@ -572,6 +574,33 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     return 0;
   }
 
+  bool? _toBool(dynamic v) {
+    if (v is bool) return v;
+    if (v is String) {
+      final s = v.trim().toLowerCase();
+      if (s == 'true' || s == '1' || s == 'yes') return true;
+      if (s == 'false' || s == '0' || s == 'no') return false;
+    }
+    return null;
+  }
+
+  void _emitUploadAck({
+    required String requestId,
+    bool? uploadOk,
+    String? status,
+    String? photoId,
+    String? error,
+  }) {
+    if (requestId.isEmpty || _imagesUploadCtrl.isClosed) return;
+    _imagesUploadCtrl.add(ImagesUploadAck(
+      requestId: requestId,
+      uploadOk: uploadOk,
+      status: status,
+      photoId: photoId,
+      error: error,
+    ));
+  }
+
   void _handleImageCtrlPacket(Map<String, dynamic> json) {
     final type = (json['type'] as String?)?.toUpperCase();
     if (type == null) return;
@@ -651,19 +680,54 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       return;
     }
 
+    if (type == 'IMGERR') {
+      final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      if (requestId.isEmpty) return;
+      final error = (json['error'] ?? json['err'])?.toString();
+      final status = (json['status'] ?? json['state'])?.toString() ?? 'FAILED';
+      _emitUploadAck(
+        requestId: requestId,
+        uploadOk: false,
+        status: status,
+        error: error,
+      );
+      return;
+    }
+
     if (type == 'IMGACK' || type == 'IMGOK') {
       final requestId = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      if (requestId.isEmpty) return;
+
       final pending = _pendingImageSend;
-      if (pending == null || requestId.isEmpty || requestId != pending.requestId) {
-        return;
+      if (pending != null && requestId == pending.requestId) {
+        if (type == 'IMGOK') {
+          _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+          _pendingImageSend = null;
+          _cancelImageAckTimer();
+        } else {
+          _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+        }
       }
 
       if (type == 'IMGOK') {
-        _dcl('images delivery confirmed ✓ id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
-        _pendingImageSend = null;
-        _cancelImageAckTimer();
-      } else {
-        _dcl('images server ack id=$requestId bytes=${pending.nbytes} hash=${pending.hash}');
+        final uploadOk = _toBool(json['upload_ok'] ?? json['uploadOk']);
+        final status = (json['status'] ?? json['state'])?.toString();
+        final photoId = (json['photo_id'] ?? json['photoId'])?.toString();
+        final error = (json['error'] ?? json['err'])?.toString();
+        final shouldEmit = requestId.startsWith('upload-') ||
+            uploadOk != null ||
+            status != null ||
+            photoId != null ||
+            error != null;
+        if (shouldEmit) {
+          _emitUploadAck(
+            requestId: requestId,
+            uploadOk: uploadOk,
+            status: status,
+            photoId: photoId,
+            error: error,
+          );
+        }
       }
       return;
     }
@@ -889,6 +953,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       StreamController<ImagesRx>.broadcast(sync: true);
   @override
   Stream<ImagesRx> get imagesProcessed => _imagesProcessedCtrl.stream;
+  final _imagesUploadCtrl =
+      StreamController<ImagesUploadAck>.broadcast(sync: true);
+  @override
+  Stream<ImagesUploadAck> get imageUploads => _imagesUploadCtrl.stream;
 
   // Image reception control - block further images after processing completes
   @override
@@ -1265,6 +1333,47 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     });
   }
 
+  Future<http.Response> _postJsonWithRetry(Uri uri, String payload) async {
+    Object? lastError;
+    StackTrace? lastStack;
+    const maxAttempts = 3;
+    const timeout = Duration(seconds: 20);
+
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      final client = IOClient(HttpClient()
+        ..idleTimeout = Duration.zero
+        ..connectionTimeout = const Duration(seconds: 15)
+        ..maxConnectionsPerHost = 1);
+
+      try {
+        return await client
+            .post(
+              uri,
+              headers: const {
+                'content-type': 'application/json',
+                'connection': 'close',
+              },
+              body: payload,
+            )
+            .timeout(timeout);
+      } catch (e, stack) {
+        lastError = e;
+        lastStack = stack;
+        if (attempt < maxAttempts) {
+          _warn('HTTP POST attempt $attempt failed: $e');
+          await Future.delayed(Duration(milliseconds: 250 * attempt));
+        }
+      } finally {
+        client.close();
+      }
+    }
+
+    if (lastError != null) {
+      Error.throwWithStackTrace(lastError!, lastStack ?? StackTrace.current);
+    }
+    throw Exception('HTTP POST failed');
+  }
+
   @override
   Future<void> connect() async {
     final config = <String, dynamic>{
@@ -1373,11 +1482,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     http.Response res;
     try {
       _log('Attempting HTTP POST to $offerUri...');
-      res = await http.post(
-        offerUri,
-        headers: const {'content-type': 'application/json'},
-        body: jsonEncode(body),
-      );
+      res = await _postJsonWithRetry(offerUri, jsonEncode(body));
       _log('HTTP POST succeeded: statusCode=${res.statusCode}');
     } on SocketException catch (e, stack) {
       _warn('SocketException during signaling:');
@@ -1520,6 +1625,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _dcGuardTimer?.cancel();
     _cancelImageAckTimer();
     await _imagesProcessedCtrl.close();
+    await _imagesUploadCtrl.close();
     _rxPending = null;
     await _framesCtrl.close();
     await _jsonEventsCtrl.close();
@@ -1939,6 +2045,10 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         final data = m.binary;
         final preview = data.isEmpty ? '' : ' [${_previewBinary(data)}]';
         _dcl('ctrl <= binary ${data.length}B$preview');
+        if (data.length >= 4 && data[0] == 0x50 && data[1] == 0x47) {
+          final seq = data[2] | (data[3] << 8);
+          _sendCtrlAck(seq);
+        }
         return;
       }
       final text = m.text;
