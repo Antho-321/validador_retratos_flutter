@@ -1,6 +1,7 @@
 // lib/apps/asistente_retratos/infrastructure/repository/posture_repository_imp.dart
 import 'dart:async';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show debugPrint;
 import '../../domain/repository/posture_repository.dart';
 import '../../domain/service/pose_capture_service.dart';
 
@@ -14,7 +15,11 @@ class PostureRepositoryImp implements PostureRepository {
   @override
   Future<void> start() async {
     await _webrtc.init();
-    unawaited(_webrtc.connect());
+    unawaited(
+      _webrtc.connect().catchError((Object error, StackTrace stack) {
+        debugPrint('PoseService connect error: $error\n$stack');
+      }),
+    );
     _sub ??= _webrtc.frames.listen((_) {
       _aliveCtrl.add(true);
     });

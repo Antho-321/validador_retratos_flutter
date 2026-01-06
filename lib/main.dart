@@ -8,6 +8,7 @@ import 'package:get_it/get_it.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'apps/asistente_retratos/dependencias_posture.dart';
+import 'apps/asistente_retratos/domain/repository/posture_repository.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
 import 'apps/asistente_retratos/infrastructure/model/images_rx.dart';
 import 'apps/asistente_retratos/presentation/pages/pose_capture_page.dart';
@@ -109,6 +110,7 @@ class PoseApp extends StatefulWidget {
 
 class _PoseAppState extends State<PoseApp> {
   PoseCaptureService? _poseService;
+  PostureRepository? _postureRepository;
   StreamSubscription<ImagesRx>? _imagesProcessedSubscription;
   Object? _bootstrapError;
   bool _bootstrapping = true;
@@ -135,7 +137,7 @@ class _PoseAppState extends State<PoseApp> {
 
       final cedula = dotenv.env['CEDULA']?.trim();
 
-      if (!GetIt.I.isRegistered<PoseCaptureService>()) {
+      if (!GetIt.I.isRegistered<PostureRepository>()) {
         registrarDependenciasPosture(
           offerUri: Uri.parse(offerUrl),
           cedula: cedula,
@@ -143,11 +145,12 @@ class _PoseAppState extends State<PoseApp> {
         );
       }
 
+      final postureRepository = GetIt.I<PostureRepository>();
       final poseService = GetIt.I<PoseCaptureService>();
-      await poseService.init();
+      await postureRepository.start();
 
       if (!mounted) {
-        await poseService.dispose();
+        await postureRepository.stop();
         return;
       }
 
@@ -157,19 +160,11 @@ class _PoseAppState extends State<PoseApp> {
       });
 
       setState(() {
+        _postureRepository = postureRepository;
         _poseService = poseService;
         _imagesProcessedSubscription = imagesProcessedSub;
         _bootstrapError = null;
         _bootstrapping = false;
-      });
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        unawaited(
-          poseService.connect().catchError((Object error, StackTrace stack) {
-            debugPrint('PoseService connect error: $error\n$stack');
-          }),
-        );
       });
     } catch (error, stack) {
       debugPrint('App bootstrap error: $error\n$stack');
@@ -184,7 +179,7 @@ class _PoseAppState extends State<PoseApp> {
   @override
   void dispose() {
     _imagesProcessedSubscription?.cancel();
-    _poseService?.dispose();
+    _postureRepository?.stop();
     super.dispose();
   }
 
