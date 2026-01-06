@@ -102,14 +102,11 @@ List<_ChecklistItem> _buildChecklistItems(Map<String, dynamic> root) => [
           label: 'Rostro',
           ok: _okSection(root, 'rostro'),
         ),
-      (
-        label: 'Postura del cuerpo',
-        ok: _okSection(root, 'postura_cuerpo'),
-      ),
-      (
-        label: 'Postura del rostro',
-        ok: _okSection(root, 'postura_rostro'),
-      ),
+      if (root['postura'] is Map)
+        (
+          label: 'Postura (cuerpo y rostro)',
+          ok: _okSection(root, 'postura'),
+        ),
       (
         label: 'Vestimenta oscura',
         ok: _okSection(root, 'color_vestimenta'),

@@ -42,10 +42,7 @@ const exampleValidationJson = r'''
   "rostro": {
     "valido": "True"
   },
-  "postura_cuerpo": {
-    "valido": "True"
-  },
-  "postura_rostro": {
+  "postura": {
     "valido": "True"
   },
   "color_vestimenta": {
