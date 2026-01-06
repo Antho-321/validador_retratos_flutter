@@ -2332,6 +2332,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     String? basename,
     String? formatOverride,
     bool alreadySegmented = false,
+    Map<String, dynamic>? headerExtras,
   }) async {
     final ch = _imagesDc; // <-- ADDED
     if (ch == null || ch.state != RTCDataChannelState.RTCDataChannelOpen) { // <-- ADDED
@@ -2347,7 +2348,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       final rid = requestId ?? _nextImageRequestId();
       final fmt = (formatOverride ?? _detectImageFormat(bytes)).toLowerCase();
       final hash = _md5Hex(bytes);
-      final header = jsonEncode({
+      final headerMap = <String, dynamic>{
         'type': 'image',
         'request_id': rid,
         'mode': 'single',
@@ -2357,7 +2358,14 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
         'hash_algo': 'md5',
         'request_basename': basename ?? '',
         'already_segmented': alreadySegmented,
-      });
+      };
+      if (headerExtras != null && headerExtras.isNotEmpty) {
+        headerExtras.forEach((key, value) {
+          if (value == null || headerMap.containsKey(key)) return;
+          headerMap[key] = value;
+        });
+      }
+      final header = jsonEncode(headerMap);
       _dcl('images => header ${header.length}B "${_previewText(header)}"');
       await ch.send(RTCDataChannelMessage(header));
 

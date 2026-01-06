@@ -392,6 +392,7 @@ class PoseCaptureController extends ChangeNotifier {
     required this.countdownSpeed,
     this.mirror = true,
     this.validationsEnabled = true, // ⇠ NEW
+    this.enableCapturePostProcessing = true,
     this.logEverything = false,
     ValidationProfile? validationProfile, // ⇠ NEW: inject data-driven thresholds
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
@@ -468,6 +469,12 @@ class PoseCaptureController extends ChangeNotifier {
 
         // ⬇️ NEW: Enviar, esperar respuesta, y asignar.
         try {
+          if (!enableCapturePostProcessing) {
+            if (kDebugMode) {
+              print('[pose] Skipping capture post-processing; using local image');
+            }
+            return;
+          }
           // Si el canal no está listo, deja la captura local y sal.
           if (!poseService.imagesReady) {
             if (kDebugMode) {
@@ -569,6 +576,8 @@ class PoseCaptureController extends ChangeNotifier {
 
   /// NEW: switch global de validaciones
   final bool validationsEnabled;
+
+  final bool enableCapturePostProcessing;
 
   final bool logEverything;
 

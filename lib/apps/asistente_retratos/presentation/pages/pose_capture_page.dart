@@ -2,7 +2,7 @@
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
 import 'dart:async' show Completer, StreamSubscription, Timer, TimeoutException, unawaited;
-import 'dart:convert' show base64Decode, jsonDecode;
+import 'dart:convert' show JsonEncoder, base64Decode, jsonDecode, jsonEncode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
@@ -23,6 +23,8 @@ import '../widgets/landmarks_painter.dart' show LandmarksPainter, FaceStyle;
 import '../../infrastructure/services/pose_webrtc_service_imp.dart'
     show PoseWebrtcServiceImp;
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
+import '../../infrastructure/model/images_upload_ack.dart'
+    show ImagesUploadAck;
 
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -86,6 +88,13 @@ bool _okSection(Map<String, dynamic> root, String key) {
 
 typedef _ChecklistItem = ({String label, bool ok});
 typedef _ChecklistData = ({List<_ChecklistItem> items, String observations});
+typedef _UploadDisplay = ({
+  bool inProgress,
+  bool? ok,
+  String? status,
+  String? error,
+  String? photoId,
+});
 
 List<_ChecklistItem> _buildChecklistItems(Map<String, dynamic> root) => [
       (
@@ -154,7 +163,22 @@ String _buildChecklistText(String raw) {
   return lines.join('\n');
 }
 
-Widget _buildChecklistTable(String raw, BuildContext context) {
+String _buildDetailsCopyText(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+  try {
+    final obj = jsonDecode(trimmed);
+    return const JsonEncoder.withIndent('  ').convert(obj);
+  } catch (_) {
+    return _buildChecklistText(raw);
+  }
+}
+
+Widget _buildChecklistTable(
+  String raw,
+  BuildContext context, {
+  _UploadDisplay? uploadDisplay,
+}) {
   final trimmed = raw.trim();
   if (trimmed.isEmpty) return const SizedBox.shrink();
 
@@ -246,6 +270,68 @@ Widget _buildChecklistTable(String raw, BuildContext context) {
           const SizedBox(height: 6),
           Text(data.observations),
         ],
+        if (uploadDisplay != null) ...[
+          const SizedBox(height: 12),
+          Text('Carga en base de datos', style: headerStyle),
+          const SizedBox(height: 6),
+          if (uploadDisplay.inProgress)
+            Row(
+              children: [
+                const SizedBox(
+                  height: 16,
+                  width: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 8),
+                const Text('Subiendo...'),
+              ],
+            )
+          else if (uploadDisplay.ok == true)
+            Row(
+              children: [
+                statusIcon(true),
+                const SizedBox(width: 8),
+                Text(
+                  uploadDisplay.status?.isNotEmpty == true
+                      ? 'Subida exitosa (${uploadDisplay.status})'
+                      : 'Subida exitosa',
+                ),
+              ],
+            )
+          else if (uploadDisplay.ok == false)
+            Row(
+              children: [
+                statusIcon(false),
+                const SizedBox(width: 8),
+                Text(
+                  uploadDisplay.status?.isNotEmpty == true
+                      ? 'Fallo en subida (${uploadDisplay.status})'
+                      : 'Fallo en subida',
+                ),
+              ],
+            )
+          else
+            Row(
+              children: [
+                const Icon(Icons.hourglass_empty, size: 18),
+                const SizedBox(width: 8),
+                const Text('Pendiente'),
+              ],
+            ),
+          if (uploadDisplay.photoId != null &&
+              uploadDisplay.photoId!.trim().isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text('ID: ${uploadDisplay.photoId}'),
+          ],
+          if (uploadDisplay.error != null &&
+              uploadDisplay.error!.trim().isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Text(
+              'Error: ${uploadDisplay.error}',
+              style: baseStyle.copyWith(color: scheme.error),
+            ),
+          ],
+        ],
       ],
     ),
   );
@@ -301,6 +387,18 @@ class _PhotoValidationOverlay extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    String titleText;
+    switch (activeStep) {
+      case _ValidationOverlayStep.processingImage:
+        titleText = 'Procesando imagen...';
+        break;
+      case _ValidationOverlayStep.validatingRequirements:
+        titleText = 'Validando requisitos...';
+        break;
+      case _ValidationOverlayStep.uploadingToPortfolio:
+        titleText = 'Subiendo al Portafolio...';
+        break;
+    }
     final titleStyle = theme.textTheme.headlineMedium?.copyWith(
           color: Colors.white,
           fontWeight: FontWeight.w500,
@@ -352,7 +450,7 @@ class _PhotoValidationOverlay extends StatelessWidget {
                   ),
                   const SizedBox(height: 16),
                   Text(
-                    'Validando foto...',
+                    titleText,
                     textAlign: TextAlign.center,
                     style: titleStyle,
                   ),
@@ -773,6 +871,13 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   String? _validationErrorText;
   String? _lastValidatedCaptureId;
   Uint8List? _segmentedImageBytes; // Segmented image received from API
+  bool _isUploading = false;
+  bool? _uploadOk;
+  String? _uploadStatus;
+  String? _uploadError;
+  String? _uploadPhotoId;
+  String? _uploadCaptureId;
+  StreamSubscription<ImagesUploadAck>? _uploadSubscription;
   
   // Estado de conexión inicial con el servidor
   bool _isConnecting = true;
@@ -797,7 +902,96 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       _validationErrorText = null;
       _lastValidatedCaptureId = null;
       _segmentedImageBytes = null; // Reset segmented image
+      _clearUploadState();
     });
+  }
+
+  void _clearUploadState() {
+    _isUploading = false;
+    _uploadOk = null;
+    _uploadStatus = null;
+    _uploadError = null;
+    _uploadPhotoId = null;
+    _uploadCaptureId = null;
+  }
+
+  String? _captureIdFromUploadRequestId(String requestId) {
+    const prefix = 'upload-';
+    if (!requestId.startsWith(prefix)) return null;
+    return requestId.substring(prefix.length);
+  }
+
+  void _handleUploadAck(ImagesUploadAck ack) {
+    final captureId = _captureIdFromUploadRequestId(ack.requestId);
+    if (captureId == null || captureId.isEmpty) return;
+    if (_uploadCaptureId != captureId) return;
+
+    bool? ok = ack.uploadOk;
+    final statusUpper = ack.status?.toUpperCase();
+    if (ok == null && statusUpper != null) {
+      if (statusUpper == 'UPLOADED' || statusUpper == 'APPROVED') ok = true;
+      if (statusUpper == 'FAILED') ok = false;
+    }
+    if (ack.error != null && ack.error!.trim().isNotEmpty) {
+      ok = false;
+    }
+
+    if (mounted) {
+      setState(() {
+        _isUploading = false;
+        _uploadOk = ok;
+        _uploadStatus = ack.status;
+        _uploadError = ack.error;
+        _uploadPhotoId = ack.photoId;
+        _validationResultText =
+            _mergeUploadIntoDetails(_validationResultText, ack);
+        _validationErrorText =
+            _mergeUploadIntoDetails(_validationErrorText, ack);
+      });
+    } else {
+      _isUploading = false;
+      _uploadOk = ok;
+      _uploadStatus = ack.status;
+      _uploadError = ack.error;
+      _uploadPhotoId = ack.photoId;
+      _validationResultText = _mergeUploadIntoDetails(_validationResultText, ack);
+      _validationErrorText = _mergeUploadIntoDetails(_validationErrorText, ack);
+    }
+  }
+
+  String? _mergeUploadIntoDetails(String? raw, ImagesUploadAck ack) {
+    if (raw == null || raw.trim().isEmpty) return raw;
+    try {
+      final parsed = jsonDecode(raw);
+      if (parsed is! Map<String, dynamic>) return raw;
+      final upload = <String, dynamic>{
+        'ok': ack.uploadOk,
+        'status': ack.status,
+        'photo_id': ack.photoId,
+        'error': ack.error,
+        'request_id': ack.requestId,
+      }..removeWhere((key, value) {
+          if (value == null) return true;
+          if (value is String && value.trim().isEmpty) return true;
+          return false;
+        });
+      final merged = Map<String, dynamic>.from(parsed);
+      merged['upload'] = upload;
+      return jsonEncode(merged);
+    } catch (_) {
+      return raw;
+    }
+  }
+
+  _UploadDisplay? _currentUploadDisplay() {
+    if (_uploadCaptureId == null) return null;
+    return (
+      inProgress: _isUploading,
+      ok: _uploadOk,
+      status: _uploadStatus,
+      error: _uploadError,
+      photoId: _uploadPhotoId,
+    );
   }
 
   String _resolveDownloadFilename() {
@@ -824,6 +1018,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       countdownSpeed: widget.countdownSpeed,
       mirror: true,
       validationsEnabled: widget.validationsEnabled,
+      enableCapturePostProcessing: false, // Avoid double segmentation; post-process after /segmentar-imagen.
       logEverything: logAll,
     );
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
@@ -835,6 +1030,8 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     
     // Escuchar cambios en latestFrame para detectar conexión establecida
     _setupFrameListener();
+    _uploadSubscription =
+        widget.poseService.imageUploads.listen(_handleUploadAck);
   }
   
   /// Listener para detectar cuando llegan frames válidos del servidor
@@ -951,7 +1148,11 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _validationErrorText = null;
     _isValidatingRemote = true;
     _isSegmenting = true; // Start segmentation waiting
-    if (mounted) setState(() {});
+    if (mounted) {
+      setState(() {
+        _clearUploadState();
+      });
+    }
 
     unawaited(_runRemoteValidation(captureId, ctl.capturedPng!));
   }
@@ -1248,6 +1449,23 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       }
 
       if (!mounted || ctl.activeCaptureId != captureId) return;
+      bool? validationOk;
+      String? validationError;
+      String validationPayload = result;
+      try {
+        final parsed = jsonDecode(result);
+        if (parsed is Map<String, dynamic>) {
+          validationOk = _isTrue(parsed['valido']);
+          final err = parsed['error'];
+          if (err != null) validationError = err.toString();
+          final sanitized = Map<String, dynamic>.from(parsed);
+          sanitized.remove('imagen_segmentada_base64');
+          validationPayload = jsonEncode(sanitized);
+        }
+      } catch (jsonErr) {
+        validationError = jsonErr.toString();
+      }
+      final uploadBytes = segmentedImageBytes ?? highResJpeg;
       // ignore: avoid_print
       print('[PoseCapturePage] 📊 DEBUG: Validation completed successfully');
       print('[PoseCapturePage] 📊 DEBUG: _segmentedImageBytes before setState = ${_segmentedImageBytes?.length ?? 'null'} bytes');
@@ -1260,6 +1478,16 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       });
       // ignore: avoid_print
       print('[PoseCapturePage] 📊 DEBUG: setState completed, _segmentedImageBytes = ${_segmentedImageBytes?.length ?? 'null'} bytes');
+      if (uploadBytes.isNotEmpty) {
+        unawaited(_sendValidatedPhotoToOracle(
+          captureId: captureId,
+          photoBytes: uploadBytes,
+          userId: cedula,
+          validationOk: validationOk,
+          validationError: validationError,
+          validationPayload: validationPayload,
+        ));
+      }
     } catch (e, stackTrace) {
       // ignore: avoid_print
       print('[PoseCapturePage] ❌ ERROR in _runRemoteValidation: $e');
@@ -1270,6 +1498,132 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
         _validationErrorText = e.toString();
         _validationResultText = null;
       });
+    }
+  }
+
+  String _detectImageFormat(Uint8List bytes) {
+    if (bytes.length >= 8 &&
+        bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47 &&
+        bytes[4] == 0x0D &&
+        bytes[5] == 0x0A &&
+        bytes[6] == 0x1A &&
+        bytes[7] == 0x0A) {
+      return 'png';
+    }
+    if (bytes.length >= 3 &&
+        bytes[0] == 0xFF &&
+        bytes[1] == 0xD8 &&
+        bytes[2] == 0xFF) {
+      return 'jpeg';
+    }
+    return 'unknown';
+  }
+
+  String? _captureIdToIsoUtc(String captureId) {
+    final idx = captureId.lastIndexOf('_');
+    if (idx < 0 || idx + 1 >= captureId.length) return null;
+    final ms = int.tryParse(captureId.substring(idx + 1));
+    if (ms == null) return null;
+    return DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true)
+        .toIso8601String();
+  }
+
+  Future<void> _sendValidatedPhotoToOracle({
+    required String captureId,
+    required Uint8List photoBytes,
+    required String userId,
+    bool? validationOk,
+    String? validationError,
+    required String validationPayload,
+  }) async {
+    final svc = widget.poseService;
+    if (!svc.imagesReady) {
+      if (mounted) {
+        setState(() {
+          _uploadCaptureId = captureId;
+          _isUploading = false;
+          _uploadOk = false;
+          _uploadStatus = 'FAILED';
+          _uploadError = 'WebRTC no disponible';
+          _uploadPhotoId = null;
+        });
+      }
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[PoseCapturePage] ⚠️ WebRTC images DC not ready, skipping upload');
+      }
+      return;
+    }
+
+    if (mounted) {
+      setState(() {
+        _uploadCaptureId = captureId;
+        _isUploading = true;
+        _uploadOk = null;
+        _uploadStatus = null;
+        _uploadError = null;
+        _uploadPhotoId = null;
+      });
+    } else {
+      _uploadCaptureId = captureId;
+      _isUploading = true;
+      _uploadOk = null;
+      _uploadStatus = null;
+      _uploadError = null;
+      _uploadPhotoId = null;
+    }
+
+    final headerExtras = <String, dynamic>{
+      'purpose': 'upload',
+      'user_id': userId,
+      'capture_id': captureId,
+      'validation_payload': validationPayload,
+    };
+    if (validationOk != null) {
+      headerExtras['validation_ok'] = validationOk;
+    }
+    if (validationError != null && validationError.trim().isNotEmpty) {
+      headerExtras['validation_error'] = validationError.trim();
+    }
+    final capturedAtIso = _captureIdToIsoUtc(captureId);
+    if (capturedAtIso != null) {
+      headerExtras['captured_at'] = capturedAtIso;
+    }
+
+    final fmt = _detectImageFormat(photoBytes);
+    try {
+      await svc.sendImageBytes(
+        photoBytes,
+        requestId: 'upload-$captureId',
+        basename: userId,
+        formatOverride: fmt == 'unknown' ? null : fmt,
+        headerExtras: headerExtras,
+      );
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[PoseCapturePage] ✅ Foto enviada para upload Oracle (id=$captureId)');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+          _uploadOk = false;
+          _uploadStatus = 'FAILED';
+          _uploadError = e.toString();
+        });
+      } else {
+        _isUploading = false;
+        _uploadOk = false;
+        _uploadStatus = 'FAILED';
+        _uploadError = e.toString();
+      }
+      if (kDebugMode) {
+        // ignore: avoid_print
+        print('[PoseCapturePage] ⚠️ Error enviando foto para Oracle: $e');
+      }
     }
   }
 
@@ -1337,6 +1691,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   @override
   void dispose() {
     _connectionSubscription?.cancel();
+    _uploadSubscription?.cancel();
     widget.poseService.latestFrame.removeListener(_onLatestFrameChanged);
     ctl.removeListener(_handleControllerChanged);
     ctl.dispose();
@@ -1803,19 +2158,26 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                 ),
                               ),
                             ),
-                            if (ctl.isProcessingCapture || _isValidatingRemote)
+                            if (ctl.isProcessingCapture ||
+                                _isValidatingRemote ||
+                                _isUploading)
                               Positioned.fill(
                                 child: IgnorePointer(
                                   ignoring: true,
                                   child: _PhotoValidationOverlay(
-                                    activeStep: (ctl.isProcessingCapture || _isSegmenting)
-                                        ? _ValidationOverlayStep.processingImage
-                                        : _ValidationOverlayStep
-                                            .validatingRequirements,
+                                    activeStep: _isUploading
+                                        ? _ValidationOverlayStep
+                                            .uploadingToPortfolio
+                                        : (ctl.isProcessingCapture || _isSegmenting)
+                                            ? _ValidationOverlayStep.processingImage
+                                            : _ValidationOverlayStep
+                                                .validatingRequirements,
                                   ),
                                 ),
                               ),
-                            if (!ctl.isProcessingCapture && !_isValidatingRemote)
+                            if (!ctl.isProcessingCapture &&
+                                !_isValidatingRemote &&
+                                !_isUploading)
                               Positioned(
                                 left: 0,
                                 right: 0,
@@ -1844,8 +2206,9 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                                               (_validationResultText ??
                                                   _validationErrorText)!,
                                               context,
+                                              uploadDisplay: _currentUploadDisplay(),
                                             ),
-                                            copyText: _buildChecklistText(
+                                            copyText: _buildDetailsCopyText(
                                               (_validationResultText ??
                                                   _validationErrorText)!,
                                             ),

@@ -11,6 +11,7 @@ import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/pose_point.dart' show PosePoint;
 // ⬇️ NUEVO: el tipo del stream
 import '../../infrastructure/model/images_rx.dart' show ImagesRx;
+import '../../infrastructure/model/images_upload_ack.dart' show ImagesUploadAck;
 
 abstract class PoseCaptureService {
   Future<void> init();
@@ -39,6 +40,7 @@ abstract class PoseCaptureService {
 
   // ⬇️ NUEVO: Images DataChannel
   Stream<ImagesRx> get imagesProcessed;                 // <<--- AÑADIR
+  Stream<ImagesUploadAck> get imageUploads;             // <<--- AÑADIR
   bool get imagesReady; // DC open?
   Future<void> sendImageBytes(
     Uint8List bytes, {
@@ -46,6 +48,7 @@ abstract class PoseCaptureService {
       String? basename,
       String? formatOverride,
       bool alreadySegmented = false,
+      Map<String, dynamic>? headerExtras,
   });
 
   // Image reception control - block further images after processing completes
