@@ -1159,6 +1159,17 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final Uint8List _ackBuf = Uint8List(5)..setAll(0, [0x41, 0x43, 0x4B, 0, 0]);
 
   String _forceTurnUdp(String url) => url.contains('?') ? url : '$url?transport=udp';
+  String _forceTurnTcp(String url) => url.contains('?') ? url.replaceFirst(RegExp(r'\?transport=\w+'), '?transport=tcp') : '$url?transport=tcp';
+  String _forceTurns(String url) {
+    // Convert turn: to turns: for TLS transport
+    var turnsUrl = url;
+    if (turnsUrl.startsWith('turn:')) {
+      turnsUrl = 'turns:${turnsUrl.substring(5)}';
+    }
+    // Remove any existing transport param for TURNS (TLS is implied)
+    turnsUrl = turnsUrl.replaceFirst(RegExp(r'\?transport=\w+'), '');
+    return turnsUrl;
+  }
 
   // ====== Overlay repaint coalescing =========================================
   final ValueNotifier<int> overlayTick = ValueNotifier<int>(0);
@@ -1382,12 +1393,27 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       'iceCandidatePoolSize': 8,
       'iceServers': [
         if (_stunUrl?.isNotEmpty ?? false) {'urls': _stunUrl},
-        if (_turnUrl?.isNotEmpty ?? false)
+        // TURN with multiple transports for better NAT traversal on mobile networks
+        if (_turnUrl?.isNotEmpty ?? false) ...[
+          // UDP transport (fastest, but may be blocked by some carriers)
           {
             'urls': _forceTurnUdp(_turnUrl!),
             if ((_turnUsername ?? '').isNotEmpty) 'username': _turnUsername,
             if ((_turnPassword ?? '').isNotEmpty) 'credential': _turnPassword,
           },
+          // TCP transport fallback (works through most firewalls)
+          {
+            'urls': _forceTurnTcp(_turnUrl!),
+            if ((_turnUsername ?? '').isNotEmpty) 'username': _turnUsername,
+            if ((_turnPassword ?? '').isNotEmpty) 'credential': _turnPassword,
+          },
+          // TURNS (TLS) transport fallback (most restrictive networks, uses port 443)
+          {
+            'urls': _forceTurns(_turnUrl!),
+            if ((_turnUsername ?? '').isNotEmpty) 'username': _turnUsername,
+            if ((_turnPassword ?? '').isNotEmpty) 'credential': _turnPassword,
+          },
+        ],
       ],
     };
 
@@ -2088,22 +2114,36 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
   Future<void> _recreateNegotiatedChannels() async {
     final pc = _pc;
+    // CRITICAL FIX: Do not attempt to create channels if PC is dead or closing
     if (pc == null) return;
+    try {
+      final s = pc.connectionState;
+      if (s == RTCPeerConnectionState.RTCPeerConnectionStateClosed ||
+          s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _warn('Skipping channel recreation: PC state is $s');
+        return;
+      }
+    } catch (_) {}
+
     if (_dc.isOpen || _ctrl.isOpen) return;
 
     await _dc.safeClose();
     await _ctrl.safeClose();
-    await _imagesDc.safeClose(); // <-- ADDED
+    await _imagesDc.safeClose();
     _dc = null;
     _ctrl = null;
-    _imagesDc = null; // <-- ADDED
+    _imagesDc = null;
     _rxPending = null;
 
-    await _ensureCtrlDC();
-    await _ensureImagesDcCreatedByUs(); // <-- ADDED
-    final tasks = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
-    for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
-      await _createLossyDC(t);
+    try {
+      await _ensureCtrlDC();
+      await _ensureImagesDcCreatedByUs();
+      final tasks = requestedTasks.isEmpty ? const ['pose'] : requestedTasks;
+      for (final t in tasks.map((e) => e.toLowerCase().trim()).where((e) => e.isNotEmpty)) {
+        await _createLossyDC(t);
+      }
+    } catch (e) {
+      _warn('Error recreating channels (likely PC died): $e');
     }
   }
 
@@ -2419,8 +2459,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _dcGuardTimer = Timer(
       Duration(seconds: negotiatedFallbackAfterSeconds),
       () async {
-        if (_disposed) return;
+        // Relaxed check: we might be "disposed" but still need to clean up or retry if not fully dead
+        // if (_disposed) return; 
         if (_latestFrame.value != null) return;
+
+        // If ICE is still actively checking, don't nuke the channels yet.
+        // It's normal for slow connections to take > 3s.
+        final ice = _pc?.iceConnectionState;
+        if (ice == RTCIceConnectionState.RTCIceConnectionStateNew ||
+            ice == RTCIceConnectionState.RTCIceConnectionStateChecking) {
+          _warn('Guard: ICE still in $ice, deferring channel recreation');
+          _startNoResultsGuard(); // Reschedule check
+          return;
+        }
 
         final dcOpen = _dc.isOpen;
         final ctrlOpen = _ctrl.isOpen;

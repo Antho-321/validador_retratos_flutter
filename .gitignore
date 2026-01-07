@@ -46,3 +46,4 @@ app.*.map.json
 patch.diff
 commit_messages.txt
 build_log*.txt
+**/check*.dart
