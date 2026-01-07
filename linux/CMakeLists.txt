@@ -1,25 +1,27 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.13)
 
-# Load bundled libraries from the lib/ directory relative to the binary.
-set(CMAKE_INSTALL_RPATH "$ORIGIN/lib")
+# CRITICAL: Force system compilers BEFORE project() to prevent Snap toolchain
+# CMake caches the compiler after project(), so this must be set before.
+set(CMAKE_C_COMPILER "/usr/bin/gcc" CACHE FILEPATH "C compiler" FORCE)
+set(CMAKE_CXX_COMPILER "/usr/bin/g++" CACHE FILEPATH "C++ compiler" FORCE)
 
-# Disable Snap's Sysroot to prevent header pollution
-set(CMAKE_SYSROOT "/")
+# Disable Snap's Sysroot to prevent header pollution from snap
+set(CMAKE_SYSROOT "")
 
-# Inject -B/usr/bin to force looking in system paths first for crt*.o and libs
-# Use -isystem to prioritized system headers over Snap's bundled ones safely
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -B/usr/bin")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -B/usr/bin -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu/c++/13 -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu")
+# System headers and libraries configuration
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -B/usr/lib/x86_64-linux-gnu -B/usr/bin")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -B/usr/lib/x86_64-linux-gnu -B/usr/bin -isystem /usr/include/c++/13 -isystem /usr/include/x86_64-linux-gnu/c++/13 -isystem /usr/include -isystem /usr/include/x86_64-linux-gnu")
 
-# Force CMake to use the CXX compiler (g++) for linking, preventing fallback to clang++
-set(CMAKE_CXX_LINK_EXECUTABLE "<CMAKE_CXX_COMPILER> <FLAGS> <CMAKE_CXX_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
-
-# Force using system compilers to avoid Snap toolchain issues
-set(CMAKE_C_COMPILER "/usr/bin/gcc")
-set(CMAKE_CXX_COMPILER "/usr/bin/g++")
+# Force system library paths BEFORE Snap paths for linking
+# Include fakelibs for symlinks missing in system (e.g., librt.so -> librt.so.1)
+set(CMAKE_EXE_LINKER_FLAGS "-Wl,--disable-new-dtags -L/teamspace/studios/this_studio/fakelibs -L/usr/lib/gcc/x86_64-linux-gnu/13 -L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/snap/flutter/current/usr/lib/x86_64-linux-gnu ${CMAKE_EXE_LINKER_FLAGS}")
+set(CMAKE_SHARED_LINKER_FLAGS "-Wl,--disable-new-dtags -L/teamspace/studios/this_studio/fakelibs -L/usr/lib/gcc/x86_64-linux-gnu/13 -L/usr/lib/x86_64-linux-gnu -L/lib/x86_64-linux-gnu -Wl,-rpath-link,/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu:/snap/flutter/current/usr/lib/x86_64-linux-gnu ${CMAKE_SHARED_LINKER_FLAGS}")
 
 project(runner LANGUAGES CXX)
+
+# Load bundled libraries from the lib/ directory relative to the binary.
+set(CMAKE_INSTALL_RPATH "$ORIGIN/lib:/usr/lib/x86_64-linux-gnu:/snap/flutter/current/usr/lib/x86_64-linux-gnu")
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
@@ -67,7 +69,16 @@ link_directories("${CMAKE_CURRENT_SOURCE_DIR}/flutter/ephemeral/.plugin_symlinks
 add_subdirectory("runner")
 
 # Run the Flutter tool portions of the build. This must not be removed.
+# Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# FORCE implicit dependencies to use Snap versions (via our symlinks)
+# This overrides System paths for these specific mismatched libraries
+target_link_libraries(${BINARY_NAME} PRIVATE 
+  "/teamspace/studios/this_studio/fakelibs/libpangoft2-1.0.so.0"
+  "/teamspace/studios/this_studio/fakelibs/libatk-bridge-2.0.so.0"
+  "/teamspace/studios/this_studio/fakelibs/libatspi.so.0"
+)
 
 # Only the install-generated bundle's copy of the executable will launch
 # correctly, since the resources must in the right relative locations. To avoid
@@ -135,3 +146,23 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# Copy missing Snap libraries to the bundle to fix RUNPATH propagation issues in libflutter_linux_gtk.so
+install(FILES
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libepoxy.so.0"
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libepoxy.so.0.0.0"
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libgtk-3.so.0"
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libgtk-3.so.0.2404.16"
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libgdk-3.so.0"
+  "/snap/flutter/current/usr/lib/x86_64-linux-gnu/libgdk-3.so.0.2404.16"
+  "/usr/lib/x86_64-linux-gnu/librt.so.1"
+  "/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0"
+  "/usr/lib/x86_64-linux-gnu/libgio-2.0.so.0.8000.0"
+  "/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0"
+  "/usr/lib/x86_64-linux-gnu/libglib-2.0.so.0.8000.0"
+  "/usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0"
+  "/usr/lib/x86_64-linux-gnu/libgmodule-2.0.so.0.8000.0"
+  "/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0"
+  "/usr/lib/x86_64-linux-gnu/libgobject-2.0.so.0.8000.0"
+  DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)

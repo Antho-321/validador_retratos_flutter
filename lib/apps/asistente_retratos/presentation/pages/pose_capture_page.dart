@@ -2,7 +2,7 @@
 // lib/apps/asistente_retratos/presentation/pages/pose_capture_page.dart
 // ==========================
 import 'dart:async' show Completer, StreamSubscription, Timer, TimeoutException, unawaited;
-import 'dart:convert' show JsonEncoder, base64Decode, jsonDecode, jsonEncode;
+import 'dart:convert' show JsonEncoder, base64Decode, base64Encode, jsonDecode, jsonEncode;
 import 'dart:typed_data' show Uint8List;
 import 'dart:ui' show Size;
 import 'dart:ui' as ui show Image, ImageByteFormat, ImageFilter;
@@ -1187,40 +1187,42 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       // ignore: avoid_print
       print('[PoseCapturePage] 📏 Imagen JPEG lista para validación: ${highResJpeg.length} bytes (High Res).');
 
-      // STEP 1: Call segmentation endpoint FIRST (during "Procesando imagen" step)
-      Uint8List? segmentedImageBytes;
+      // STEP 1: Call segmentation endpoint to get MASK ONLY (during "Procesando imagen" step)
+      Uint8List? maskBytes;
+      Uint8List? segmentedImageBytes; // Keep for UI preview compatibility
       try {
         // ignore: avoid_print
-        print('[PoseCapturePage] 🔄 Llamando a /segmentar-imagen (Esperando hasta 5m)...');
+        print('[PoseCapturePage] 🔄 Llamando a /segmentar-imagen?solo_mascara=true (Esperando hasta 5m)...');
         final segmentationApi = PortraitValidationApi(
           endpoint: segmentationEndpoint,
           allowInsecure: allowInsecure,
         );
-        // User requested "wait as long as necessary", using 5 minute timeout
-        final segmentedResult = await segmentationApi.segmentarImagen(
+        // Get only the mask from segmentation API
+        final maskResult = await segmentationApi.obtenerMascara(
           imageBytes: highResPng, // Se envía FULL RES en PNG (lossless)
           filename: '$cedula.png',
           contentType: 'image/png',
           timeout: const Duration(minutes: 5), 
         );
-        segmentedImageBytes = segmentedResult;
+        maskBytes = maskResult;
         // ignore: avoid_print
-        print('[PoseCapturePage] ✅ IMAGEN SEGMENTADA RECIBIDA: ${segmentedImageBytes.length} bytes');
+        print('[PoseCapturePage] ✅ MÁSCARA RECIBIDA: ${maskBytes.length} bytes');
         
-        // Update UI immediately with segmented image AND move to next step
+        // Update UI - we don't have segmented image yet, but mask is ready
+        // The server will apply the mask and return the processed image
         if (mounted && ctl.activeCaptureId == captureId) {
           setState(() {
-            _segmentedImageBytes = segmentedImageBytes;
-             // Still in "Procesando imagen" step, just updated visual feedback
+            // Keep segmentedImageBytes null for now - server will process
+            // Still in "Procesando imagen" step
           });
         }
 
-        // STEP 1.5: Send segmented image via WebRTC for post-processing
-        // This uses the existing WebRTC data channel instead of a separate HTTP call
-        if (segmentedImageBytes != null && widget.poseService is PoseWebrtcServiceImp) {
+        // STEP 1.5: Send ORIGINAL image + MASK via WebRTC for processing
+        // Server will apply mask and do post-processing
+        if (maskBytes != null && widget.poseService is PoseWebrtcServiceImp) {
           try {
              // ignore: avoid_print
-             print('[PoseCapturePage] 🔄 Enviando imagen segmentada via WebRTC para post-procesamiento...');
+             print('[PoseCapturePage] 🔄 Enviando imagen original + máscara via WebRTC para procesamiento...');
              final webrtcService = widget.poseService as PoseWebrtcServiceImp;
              
              // Check if WebRTC images DC is ready
@@ -1242,10 +1244,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
                subscription?.cancel();
              });
              
-             // Send the segmented image for processing via WebRTC
+             // Send the ORIGINAL image with mask in headerExtras
+             // Server will apply mask + do full post-processing
              await webrtcService.sendImageBytes(
-               segmentedImageBytes!,
-               alreadySegmented: true,  // Use post-processing only pipeline
+               highResPng,  // Send ORIGINAL image, not segmented
+               alreadySegmented: false,  // Server needs to apply mask
+               headerExtras: {
+                 'mask_bytes': maskBytes.length,
+                 'mask_base64': base64Encode(maskBytes),  // Send mask as base64 in header
+               },
              );
              
              // Wait for processed result (with timeout)
