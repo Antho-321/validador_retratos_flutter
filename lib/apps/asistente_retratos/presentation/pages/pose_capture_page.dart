@@ -1255,12 +1255,10 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
             throw StateError('Invalid image format received from server');
           }
 
-          // Redimensionar a 375x425 en el cliente
-          print('[PoseCapturePage] 🔄 Redimensionando imagen a 375x425 en el cliente...');
-          final resizedBytes = await _resizeCaptureForValidation(processedBytes);
-          print('[PoseCapturePage] ✅ Imagen redimensionada: ${resizedBytes.length} bytes (375x425)');
-
-          segmentedImageBytes = resizedBytes;
+          // Usar la imagen procesada directamente (ya viene redimensionada a 375x425 del servidor)
+          // ignore: avoid_print
+          print('[PoseCapturePage] ✅ Usando imagen procesada del servidor directamente (${processedBytes.length} bytes)');
+          segmentedImageBytes = processedBytes;
 
           if (mounted && ctl.activeCaptureId == captureId) {
             setState(() {
