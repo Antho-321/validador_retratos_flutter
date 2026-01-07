@@ -1147,7 +1147,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           ? endpointRaw.replaceAll('/validar-imagen', '')
           : 'https://127.0.0.1:5001';
       final validationEndpoint = Uri.parse('$baseUrl/validar-imagen');
-      final segmentationEndpoint = Uri.parse('$baseUrl/segmentar-imagen');
 
       final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
           ? dotenv.env['CEDULA']!.trim()
@@ -1187,157 +1186,104 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       // ignore: avoid_print
       print('[PoseCapturePage] 📏 Imagen JPEG lista para validación: ${highResJpeg.length} bytes (High Res).');
 
-      // STEP 1: Call segmentation endpoint to get MASK ONLY (during "Procesando imagen" step)
-      Uint8List? maskBytes;
-      Uint8List? segmentedImageBytes; // Keep for UI preview compatibility
+      // STEP 1: Send image to server for segmentation and post-processing
+      // The server (utn-movil-asistente-retratos) calls the segmentation API internally
+      Uint8List? segmentedImageBytes;
       try {
-        // ignore: avoid_print
-        print('[PoseCapturePage] 🔄 Llamando a /segmentar-imagen?solo_mascara=true (Esperando hasta 5m)...');
-        final segmentationApi = PortraitValidationApi(
-          endpoint: segmentationEndpoint,
-          allowInsecure: allowInsecure,
-        );
-        // Get only the mask from segmentation API
-        final maskResult = await segmentationApi.obtenerMascara(
-          imageBytes: highResPng, // Se envía FULL RES en PNG (lossless)
-          filename: '$cedula.png',
-          contentType: 'image/png',
-          timeout: const Duration(minutes: 5), 
-        );
-        maskBytes = maskResult;
-        // ignore: avoid_print
-        print('[PoseCapturePage] ✅ MÁSCARA RECIBIDA: ${maskBytes.length} bytes');
-        
-        // Update UI - we don't have segmented image yet, but mask is ready
-        // The server will apply the mask and return the processed image
-        if (mounted && ctl.activeCaptureId == captureId) {
-          setState(() {
-            // Keep segmentedImageBytes null for now - server will process
-            // Still in "Procesando imagen" step
-          });
-        }
-
-        // STEP 1.5: Send ORIGINAL image + MASK via WebRTC for processing
-        // Server will apply mask and do post-processing
-        if (maskBytes != null && widget.poseService is PoseWebrtcServiceImp) {
-          try {
-             // ignore: avoid_print
-             print('[PoseCapturePage] 🔄 Enviando imagen original + máscara via WebRTC para procesamiento...');
-             final webrtcService = widget.poseService as PoseWebrtcServiceImp;
-             
-             // Check if WebRTC images DC is ready
-             if (!webrtcService.imagesReady) {
-               throw StateError('WebRTC images data channel not ready');
-             }
-             
-             // Set up listener for processed image response
-             final processedCompleter = Completer<Uint8List>();
-             StreamSubscription? subscription;
-             subscription = webrtcService.imagesProcessed.listen((rx) {
-               if (!processedCompleter.isCompleted) {
-                 // ignore: avoid_print
-                 print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA (WebRTC): ${rx.bytes.length} bytes');
-                 processedCompleter.complete(rx.bytes);
-                 // Block further image reception after successful delivery
-                 webrtcService.blockImageReception();
-               }
-               subscription?.cancel();
-             });
-             
-             // Send the ORIGINAL image with mask in headerExtras
-             // Server will apply mask + do full post-processing
-             await webrtcService.sendImageBytes(
-               highResPng,  // Send ORIGINAL image, not segmented
-               alreadySegmented: false,  // Server needs to apply mask
-               headerExtras: {
-                 'mask_bytes': maskBytes.length,
-                 'mask_base64': base64Encode(maskBytes),  // Send mask as base64 in header
-               },
-             );
-             
-             // Wait for processed result (with timeout)
-             final processedBytes = await processedCompleter.future.timeout(
-               const Duration(minutes: 2),
-               onTimeout: () {
-                 subscription?.cancel();
-                 throw TimeoutException('Post-processing via WebRTC timed out');
-               },
-             );
-             
-             // El servidor devuelve la imagen procesada SIN redimensionar
-             // El redimensionamiento a 375x425 se hace aquí en el cliente
-             // ignore: avoid_print
-             print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes');
-
-             // Validar que la imagen tenga un header válido (JPEG o PNG)
-             bool isValidImage = false;
-             if (processedBytes.length >= 3) {
-               // JPEG: FF D8 FF
-               if (processedBytes[0] == 0xFF && processedBytes[1] == 0xD8 && processedBytes[2] == 0xFF) {
-                 isValidImage = true;
-                 print('[PoseCapturePage] 📦 Formato detectado: JPEG');
-               }
-               // PNG: 89 50 4E 47
-               else if (processedBytes.length >= 4 && 
-                        processedBytes[0] == 0x89 && processedBytes[1] == 0x50 && 
-                        processedBytes[2] == 0x4E && processedBytes[3] == 0x47) {
-                 isValidImage = true;
-                 print('[PoseCapturePage] 📦 Formato detectado: PNG');
-               }
-             }
-             
-             if (!isValidImage) {
-               print('[PoseCapturePage] ❌ Imagen recibida tiene formato inválido o está corrupta');
-               throw StateError('Invalid image format received from server');
-             }
-
-             // Redimensionar a 375x425 en el cliente
-             print('[PoseCapturePage] 🔄 Redimensionando imagen a 375x425 en el cliente...');
-             final resizedBytes = await _resizeCaptureForValidation(processedBytes);
-             print('[PoseCapturePage] ✅ Imagen redimensionada: ${resizedBytes.length} bytes (375x425)');
-
-             segmentedImageBytes = resizedBytes;
-
-             if (mounted && ctl.activeCaptureId == captureId) {
-               setState(() {
-                 _segmentedImageBytes = segmentedImageBytes;
-                 _isSegmenting = false; // FINALLY Move to "Validando requisitos"
-               });
-             }
-          } catch (procErr) {
-             // ignore: avoid_print
-             print('[PoseCapturePage] ⚠️ Error en post-procesamiento via WebRTC: $procErr');
-             // Decide: fail or continue with raw segmented?
-             // Let's continue with raw segmented but stop spinner
-             if (mounted && ctl.activeCaptureId == captureId) {
-               setState(() {
-                 _isSegmenting = false;
-               });
-             }
+        if (widget.poseService is PoseWebrtcServiceImp) {
+          // ignore: avoid_print
+          print('[PoseCapturePage] 🔄 Enviando imagen original via WebRTC para segmentación y procesamiento...');
+          final webrtcService = widget.poseService as PoseWebrtcServiceImp;
+          
+          // Check if WebRTC images DC is ready
+          if (!webrtcService.imagesReady) {
+            throw StateError('WebRTC images data channel not ready');
           }
-        } else if (segmentedImageBytes != null) {
-             // Fallback: WebRTC not available, just continue with segmented image
-             // ignore: avoid_print
-             print('[PoseCapturePage] ⚠️ WebRTC no disponible, usando imagen segmentada sin post-procesamiento');
-             if (mounted && ctl.activeCaptureId == captureId) {
-               setState(() {
-                 _isSegmenting = false;
-               });
-             }
+          
+          // Set up listener for processed image response
+          final processedCompleter = Completer<Uint8List>();
+          StreamSubscription? subscription;
+          subscription = webrtcService.imagesProcessed.listen((rx) {
+            if (!processedCompleter.isCompleted) {
+              // ignore: avoid_print
+              print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA (WebRTC): ${rx.bytes.length} bytes');
+              processedCompleter.complete(rx.bytes);
+              // Block further image reception after successful delivery
+              webrtcService.blockImageReception();
+            }
+            subscription?.cancel();
+          });
+          
+          // Send ONLY the original image - server handles segmentation via API
+          await webrtcService.sendImageBytes(
+            highResPng,  // Send ORIGINAL image
+            alreadySegmented: false,  // Server will call segmentation API
+            // No mask - server handles it internally via procesar_pipeline_integrado()
+          );
+          
+          // Wait for processed result (with timeout - segmentation can take time)
+          final processedBytes = await processedCompleter.future.timeout(
+            const Duration(minutes: 5),  // Allow more time since server calls segmentation API
+            onTimeout: () {
+              subscription?.cancel();
+              throw TimeoutException('Post-processing via WebRTC timed out');
+            },
+          );
+          
+          // ignore: avoid_print
+          print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes');
+
+          // Validar que la imagen tenga un header válido (JPEG o PNG)
+          bool isValidImage = false;
+          if (processedBytes.length >= 3) {
+            // JPEG: FF D8 FF
+            if (processedBytes[0] == 0xFF && processedBytes[1] == 0xD8 && processedBytes[2] == 0xFF) {
+              isValidImage = true;
+              print('[PoseCapturePage] 📦 Formato detectado: JPEG');
+            }
+            // PNG: 89 50 4E 47
+            else if (processedBytes.length >= 4 && 
+                     processedBytes[0] == 0x89 && processedBytes[1] == 0x50 && 
+                     processedBytes[2] == 0x4E && processedBytes[3] == 0x47) {
+              isValidImage = true;
+              print('[PoseCapturePage] 📦 Formato detectado: PNG');
+            }
+          }
+          
+          if (!isValidImage) {
+            print('[PoseCapturePage] ❌ Imagen recibida tiene formato inválido o está corrupta');
+            throw StateError('Invalid image format received from server');
+          }
+
+          // Redimensionar a 375x425 en el cliente
+          print('[PoseCapturePage] 🔄 Redimensionando imagen a 375x425 en el cliente...');
+          final resizedBytes = await _resizeCaptureForValidation(processedBytes);
+          print('[PoseCapturePage] ✅ Imagen redimensionada: ${resizedBytes.length} bytes (375x425)');
+
+          segmentedImageBytes = resizedBytes;
+
+          if (mounted && ctl.activeCaptureId == captureId) {
+            setState(() {
+              _segmentedImageBytes = segmentedImageBytes;
+              _isSegmenting = false; // Move to "Validando requisitos"
+            });
+          }
         } else {
-             if (mounted && ctl.activeCaptureId == captureId) {
-               setState(() {
-                 _isSegmenting = false;
-               });
-             }
+          // WebRTC not available
+          // ignore: avoid_print
+          print('[PoseCapturePage] ⚠️ WebRTC no disponible, omitiendo segmentación');
+          if (mounted && ctl.activeCaptureId == captureId) {
+            setState(() {
+              _isSegmenting = false;
+            });
+          }
         }
-      } catch (segErr) {
+      } catch (procErr) {
         // ignore: avoid_print
-        print('[PoseCapturePage] ⚠️ Error en segmentación: $segErr');
-        // If segmentation fails, we stop "processing" state to allow validation or error to show
+        print('[PoseCapturePage] ⚠️ Error en procesamiento via WebRTC: $procErr');
         if (mounted && ctl.activeCaptureId == captureId) {
           setState(() {
-             _isSegmenting = false;
+            _isSegmenting = false;
           });
         }
       }
