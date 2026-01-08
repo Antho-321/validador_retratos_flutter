@@ -590,6 +590,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     String? status,
     String? photoId,
     String? error,
+    Map<String, dynamic>? validationResult,
   }) {
     if (requestId.isEmpty || _imagesUploadCtrl.isClosed) return;
     _imagesUploadCtrl.add(ImagesUploadAck(
@@ -598,6 +599,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       status: status,
       photoId: photoId,
       error: error,
+      validationResult: validationResult,
     ));
   }
 
@@ -718,7 +720,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             uploadOk != null ||
             status != null ||
             photoId != null ||
-            error != null;
+            error != null ||
+            json.containsKey('validation_result');
         if (shouldEmit) {
           _emitUploadAck(
             requestId: requestId,
@@ -726,6 +729,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
             status: status,
             photoId: photoId,
             error: error,
+            validationResult: json['validation_result'] as Map<String, dynamic>?,
           );
         }
       }

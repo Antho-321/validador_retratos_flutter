@@ -6,6 +6,7 @@ import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData; // Fixed duplicat
 
 import 'dart:math' as math;
 import 'package:image/image.dart' as img; // <-- ADDED
+import 'package:flutter_dotenv/flutter_dotenv.dart'; // <-- ADDED
 import '../../core/face_oval_geometry.dart' show kOvalScale; // NEW
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary; // kept for types
@@ -502,8 +503,27 @@ class PoseCaptureController extends ChangeNotifier {
           isProcessingCapture = true;
           if (!_isDisposed) notifyListeners();
 
+          // Prepare metadata headers for validation
+          final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
+              ? dotenv.env['CEDULA']!.trim()
+              : '1050298650';
+          final nacionalidad = (dotenv.env['NACIONALIDAD'] ?? '').trim().isNotEmpty
+              ? dotenv.env['NACIONALIDAD']!.trim()
+              : 'Ecuatoriana';
+          final etnia = (dotenv.env['ETNIA'] ?? '').trim().isNotEmpty
+              ? dotenv.env['ETNIA']!.trim()
+              : 'Mestiza';
+
           // Intenta enviar la imagen
-          await poseService.sendImageBytes(pngBytes, requestId: captureId);
+          await poseService.sendImageBytes(
+            pngBytes, 
+            requestId: captureId,
+            headerExtras: {
+              'cedula': cedula,
+              'nacionalidad': nacionalidad,
+              'etnia': etnia,
+            },
+          );
 
           // Espera la respuesta del servidor (sin timeout)
           final ImagesRx serverResponse = await responseFuture;

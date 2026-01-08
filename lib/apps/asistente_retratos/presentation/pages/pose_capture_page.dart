@@ -33,8 +33,6 @@ import '../../core/face_oval_geometry.dart' show faceOvalRectFor;
 import '../controllers/pose_capture_controller.dart';
 import '../utils/capture_downloader.dart' show saveCapturedPortrait;
 import '../widgets/formatted_text_box.dart' show FormattedTextBox;
-import '../../infrastructure/services/portrait_validation_api.dart'
-    show PortraitValidationApi;
 
 // ✅ acceso a CaptureTheme (para color de landmarks)
 import 'package:validador_retratos_flutter/apps/asistente_retratos/presentation/styles/colors.dart'
@@ -1186,203 +1184,136 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       // ignore: avoid_print
       print('[PoseCapturePage] 📏 Imagen JPEG lista para validación: ${highResJpeg.length} bytes (High Res).');
 
-      // STEP 1: Send image to server for segmentation and post-processing
-      // The server (utn-movil-asistente-retratos) calls the segmentation API internally
-      Uint8List? segmentedImageBytes;
+      // STEP 1: Send image via WebRTC and wait for validation result
+      String result = '';
+      
+      // We wrap the WebRTC interaction in a try block to handle connection errors
       try {
         if (widget.poseService is PoseWebrtcServiceImp) {
           // ignore: avoid_print
           print('[PoseCapturePage] 🔄 Enviando imagen original via WebRTC para segmentación y procesamiento...');
           final webrtcService = widget.poseService as PoseWebrtcServiceImp;
           
-          // Check if WebRTC images DC is ready
           if (!webrtcService.imagesReady) {
             throw StateError('WebRTC images data channel not ready');
           }
           
-          // Set up listener for processed image response
           final processedCompleter = Completer<Uint8List>();
           StreamSubscription? subscription;
           subscription = webrtcService.imagesProcessed.listen((rx) {
             if (!processedCompleter.isCompleted) {
-              // ignore: avoid_print
               print('[PoseCapturePage] ✅ IMAGEN PROCESADA RECIBIDA (WebRTC): ${rx.bytes.length} bytes');
               processedCompleter.complete(rx.bytes);
-              // Block further image reception after successful delivery
-              webrtcService.blockImageReception();
+              webrtcService.blockImageReception(); // Stop receiving more images for this capture
             }
             subscription?.cancel();
           });
           
-          // Send ONLY the original image - server handles segmentation via API
-          await webrtcService.sendImageBytes(
-            highResPng,  // Send ORIGINAL image
-            alreadySegmented: false,  // Server will call segmentation API
-            // No mask - server handles it internally via procesar_pipeline_integrado()
-          );
-          
-          // Wait for processed result (with timeout - segmentation can take time)
-          final processedBytes = await processedCompleter.future.timeout(
-            const Duration(minutes: 5),  // Allow more time since server calls segmentation API
-            onTimeout: () {
-              subscription?.cancel();
-              throw TimeoutException('Post-processing via WebRTC timed out');
-            },
-          );
-          
-          // ignore: avoid_print
-          print('[PoseCapturePage] ✅ Imagen procesada recibida del servidor: ${processedBytes.length} bytes');
-
-          // Validar que la imagen tenga un header válido (JPEG o PNG)
-          bool isValidImage = false;
-          if (processedBytes.length >= 3) {
-            // JPEG: FF D8 FF
-            if (processedBytes[0] == 0xFF && processedBytes[1] == 0xD8 && processedBytes[2] == 0xFF) {
-              isValidImage = true;
-              print('[PoseCapturePage] 📦 Formato detectado: JPEG');
+          final reqId = 'process-$captureId';
+          final validationCompleter = Completer<ImagesUploadAck>();
+          final validationSub = webrtcService.imageUploads.listen((ack) {
+            if (ack.requestId == reqId && !validationCompleter.isCompleted) {
+                validationCompleter.complete(ack);
             }
-            // PNG: 89 50 4E 47
-            else if (processedBytes.length >= 4 && 
-                     processedBytes[0] == 0x89 && processedBytes[1] == 0x50 && 
-                     processedBytes[2] == 0x4E && processedBytes[3] == 0x47) {
-              isValidImage = true;
-              print('[PoseCapturePage] 📦 Formato detectado: PNG');
+          });
+
+          try {
+            await webrtcService.sendImageBytes(
+              highResPng,
+              requestId: reqId,
+              alreadySegmented: false,
+              headerExtras: {
+                  'cedula': cedula,
+                  'nacionalidad': nacionalidad,
+                  'etnia': etnia,
+              },
+            );
+
+            // Wait for processed image
+            final processedBytes = await processedCompleter.future.timeout(
+              const Duration(minutes: 5),
+              onTimeout: () {
+                validationSub.cancel();
+                subscription?.cancel();
+                throw TimeoutException('Post-processing via WebRTC timed out');
+              },
+            );
+            
+            // Check image format
+            bool isValidImage = false;
+            if (processedBytes.length >= 3) {
+              if (processedBytes[0] == 0xFF && processedBytes[1] == 0xD8 && processedBytes[2] == 0xFF) {
+                isValidImage = true;
+              } else if (processedBytes.length >= 4 && 
+                        processedBytes[0] == 0x89 && processedBytes[1] == 0x50 && 
+                        processedBytes[2] == 0x4E && processedBytes[3] == 0x47) {
+                isValidImage = true;
+              }
             }
-          }
-          
-          if (!isValidImage) {
-            print('[PoseCapturePage] ❌ Imagen recibida tiene formato inválido o está corrupta');
-            throw StateError('Invalid image format received from server');
-          }
+            
+            if (!isValidImage) {
+              throw StateError('Invalid image format received from server');
+            }
 
-          // Usar la imagen procesada directamente (ya viene redimensionada a 375x425 del servidor)
-          // ignore: avoid_print
-          print('[PoseCapturePage] ✅ Usando imagen procesada del servidor directamente (${processedBytes.length} bytes)');
-          segmentedImageBytes = processedBytes;
+            // Update UI with segmented image
+            if (mounted && ctl.activeCaptureId == captureId) {
+              setState(() {
+                _segmentedImageBytes = processedBytes;
+                _isSegmenting = false;
+              });
+            }
 
-          if (mounted && ctl.activeCaptureId == captureId) {
-            setState(() {
-              _segmentedImageBytes = segmentedImageBytes;
-              _isSegmenting = false; // Move to "Validando requisitos"
-            });
+            // Wait for validation result
+            ImagesUploadAck valAck;
+            try {
+               valAck = await validationCompleter.future.timeout(
+                   const Duration(seconds: 120),
+                   onTimeout: () => throw TimeoutException("Validation result timeout"),
+               );
+            } catch (e) {
+               print('[PoseCapturePage] ⚠️ Error esperando resultado validación: $e');
+               valAck = ImagesUploadAck(requestId: reqId, uploadOk: false, error: e.toString());
+            }
+
+            if (!mounted || ctl.activeCaptureId != captureId) {
+                validationSub.cancel();
+                return;
+            }
+
+            if (valAck.validationResult != null) {
+                result = jsonEncode(valAck.validationResult);
+            } else {
+                result = jsonEncode({
+                    'valido': false, 
+                    'error': valAck.error ?? 'Unknown server error during validation'
+                });
+            }
+          } finally {
+            validationSub.cancel();
+            subscription?.cancel();
           }
         } else {
-          // WebRTC not available
-          // ignore: avoid_print
-          print('[PoseCapturePage] ⚠️ WebRTC no disponible, omitiendo segmentación');
-          if (mounted && ctl.activeCaptureId == captureId) {
+           // Not WebRTC service
+           result = jsonEncode({'valido': false, 'error': 'WebRTC Service not available'});
+           if (mounted && ctl.activeCaptureId == captureId) {
             setState(() {
-              _isSegmenting = false;
+               _isSegmenting = false;
             });
-          }
+           }
         }
-      } catch (procErr) {
-        // ignore: avoid_print
-        print('[PoseCapturePage] ⚠️ Error en procesamiento via WebRTC: $procErr');
-        if (mounted && ctl.activeCaptureId == captureId) {
-          setState(() {
-            _isSegmenting = false;
-          });
-        }
+      } catch (e) {
+         print('[PoseCapturePage] ⚠️ Error in WebRTC flow: $e');
+         result = jsonEncode({'valido': false, 'error': e.toString()});
+         if (mounted && ctl.activeCaptureId == captureId) {
+            setState(() {
+               _isSegmenting = false;
+            });
+         }
       }
 
+      // Process validation result
       if (!mounted || ctl.activeCaptureId != captureId) return;
-
-      // STEP 2: Call validation endpoint (during "Validando requisitos" step)
-      final api = PortraitValidationApi(
-        endpoint: validationEndpoint,
-        allowInsecure: allowInsecure,
-      );
-
-      String result;
-      // STEP 2: Call validation endpoint (during "Validando requisitos" step)
-      // If we have a processed segmented image, we use it for validation.
-      if (segmentedImageBytes != null) {
-          // === DEBUG LOGS ===
-          // ignore: avoid_print
-          print('[PoseCapturePage] 📊 DEBUG: segmentedImageBytes.length = ${segmentedImageBytes!.length}');
-          if (segmentedImageBytes!.length >= 10) {
-            final header = segmentedImageBytes!.sublist(0, 10).map((b) => b.toRadixString(16).padLeft(2, '0')).join(' ');
-            print('[PoseCapturePage] 📊 DEBUG: First 10 bytes = $header');
-          }
-          // Check image format
-          String detectedFormat = 'unknown';
-          if (segmentedImageBytes!.length >= 3 && 
-              segmentedImageBytes![0] == 0xFF && 
-              segmentedImageBytes![1] == 0xD8 && 
-              segmentedImageBytes![2] == 0xFF) {
-            detectedFormat = 'JPEG';
-          } else if (segmentedImageBytes!.length >= 4 && 
-                     segmentedImageBytes![0] == 0x89 && 
-                     segmentedImageBytes![1] == 0x50 && 
-                     segmentedImageBytes![2] == 0x4E && 
-                     segmentedImageBytes![3] == 0x47) {
-            detectedFormat = 'PNG';
-          }
-          print('[PoseCapturePage] 📊 DEBUG: Detected format = $detectedFormat');
-          // === END DEBUG LOGS ===
-
-          // Convert to JPEG if PNG
-          if (detectedFormat == 'PNG') {
-            print('[PoseCapturePage] 🔄 Convirtiendo PNG a JPEG localmente...');
-            try {
-              final image = img.decodeImage(segmentedImageBytes!);
-              if (image != null) {
-                // Encode to JPEG with quality 90
-                final jpegBytes = img.encodeJpg(image, quality: 90);
-                segmentedImageBytes = Uint8List.fromList(jpegBytes);
-                detectedFormat = 'JPEG';
-                print('[PoseCapturePage] ✅ Conversión a JPEG exitosa: ${segmentedImageBytes!.length} bytes');
-              } else {
-                print('[PoseCapturePage] ⚠️ No se pudo decodificar la imagen PNG para conversión');
-              }
-            } catch (e) {
-              print('[PoseCapturePage] ❌ Error convirtiendo a JPEG: $e');
-              // Continue with original bytes if conversion fails
-            }
-          }
-          
-          // ignore: avoid_print
-          print('[PoseCapturePage] 🚀 Enviando imagen PROCESADA (High Res / Server Output) a validación');
-          result = await api.validarImagen(
-            imageBytes: segmentedImageBytes!,
-            filename: '$cedula.jpg', // Podríamos cambiar extensión si el procesado es png, pero el backend deducirá
-            contentType: 'image/jpeg', // o 'image/png'
-            cedula: cedula,
-            nacionalidad: nacionalidad,
-            etnia: etnia,
-          );
-      } else {
-         // Fallback to original capture if segmentation failed or wasn't available
-         // ignore: avoid_print
-         print('[PoseCapturePage] ⚠️ Enviando captura ORIGINAL (High Res) a validación (fallback)');
-         result = await api.validarImagen(
-          imageBytes: highResJpeg, // FALLBACK HIGH RES
-          filename: '$cedula.jpg',
-          contentType: 'image/jpeg',
-          cedula: cedula,
-          nacionalidad: nacionalidad,
-          etnia: etnia,
-        );
-      }
-
-      // Parse JSON response for any additional segmented image (fallback)
-      if (segmentedImageBytes == null) {
-        try {
-          final jsonResponse = jsonDecode(result) as Map<String, dynamic>;
-          final segmentedImageB64 = jsonResponse['imagen_segmentada_base64'];
-          if (segmentedImageB64 != null && segmentedImageB64 is String && segmentedImageB64.isNotEmpty) {
-            segmentedImageBytes = base64Decode(segmentedImageB64);
-            // ignore: avoid_print
-            print('[PoseCapturePage] ✅ IMAGEN SEGMENTADA (fallback) DECODIFICADA: ${segmentedImageBytes.length} bytes');
-          }
-        } catch (jsonErr) {
-          // ignore: avoid_print
-          print('[PoseCapturePage] ⚠️ Error al parsear imagen segmentada del JSON: $jsonErr');
-        }
-      }
-
-      if (!mounted || ctl.activeCaptureId != captureId) return;
+      
       bool? validationOk;
       String? validationError;
       String validationPayload = result;
@@ -1399,19 +1330,15 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       } catch (jsonErr) {
         validationError = jsonErr.toString();
       }
-      final uploadBytes = segmentedImageBytes ?? highResJpeg;
-      // ignore: avoid_print
-      print('[PoseCapturePage] 📊 DEBUG: Validation completed successfully');
-      print('[PoseCapturePage] 📊 DEBUG: _segmentedImageBytes before setState = ${_segmentedImageBytes?.length ?? 'null'} bytes');
-      print('[PoseCapturePage] 📊 DEBUG: segmentedImageBytes to set = ${segmentedImageBytes?.length ?? 'null'} bytes');
+
+      final uploadBytes = _segmentedImageBytes ?? highResJpeg;
+      
       setState(() {
         _isValidatingRemote = false;
         _validationResultText = result;
         _validationErrorText = null;
-        _segmentedImageBytes = segmentedImageBytes ?? _segmentedImageBytes;
       });
-      // ignore: avoid_print
-      print('[PoseCapturePage] 📊 DEBUG: setState completed, _segmentedImageBytes = ${_segmentedImageBytes?.length ?? 'null'} bytes');
+
       if (uploadBytes.isNotEmpty) {
         unawaited(_sendValidatedPhotoToOracle(
           captureId: captureId,
@@ -1422,6 +1349,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
           validationPayload: validationPayload,
         ));
       }
+
     } catch (e, stackTrace) {
       // ignore: avoid_print
       print('[PoseCapturePage] ❌ ERROR in _runRemoteValidation: $e');
