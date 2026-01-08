@@ -340,6 +340,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'],
     this.kfMinGapMs = 500, // configurable KF pacing
+    this.targetLandmarkFps = 0, // 0 = no throttle, otherwise limit landmark updates
     Map<String, Map<String, dynamic>>? initialTaskParams,
     RtcVideoEncoder? encoder,
     Set<String>? jsonTasks,
@@ -422,6 +423,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final List<Size>? _captureResolutionHints;
   final Map<String, Map<String, dynamic>> taskParams;
   final int kfMinGapMs;
+  final int targetLandmarkFps; // Target FPS for landmark updates (0 = unlimited)
   final int sctpStreamMod;
   final int ctrlDcId;
   final int? dcImagesIdOverride;
@@ -979,12 +981,20 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   @override
   bool get isImageReceptionBlocked => _imageReceptionBlocked;
 
-  int _minEmitIntervalMsFor(String task) =>
-      lowLatency ? 1 : (1000 ~/ idealFps).clamp(8, 1000);
+  int _minEmitIntervalMsFor(String task) {
+    // If targetLandmarkFps is set, use it explicitly (overrides lowLatency)
+    if (targetLandmarkFps > 0) {
+      return (1000 ~/ targetLandmarkFps).clamp(8, 1000);
+    }
+    // Otherwise use default behavior: low latency = minimal throttle
+    return lowLatency ? 1 : (1000 ~/ idealFps).clamp(8, 1000);
+  }
 
   // ===== Pre-parse drop helpers ===============================================
   bool _tooSoonForParse(String task) {
-    if (lowLatency) return false;
+    // If targetLandmarkFps is set, always apply throttling (even in lowLatency mode)
+    // Otherwise, skip throttling in lowLatency mode
+    if (targetLandmarkFps <= 0 && lowLatency) return false;
     final lastUs = _lastEmitUsByTask[task];
     if (lastUs == null) return false;
     final nowUs = _nowUs();
