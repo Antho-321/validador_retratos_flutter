@@ -1594,7 +1594,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       ..negotiated = true
       ..id = dcId
       ..ordered = false
-      ..maxRetransmits = 0;
+      ..maxRetransmits = 1;  // Allow 1 retransmit to reduce KF thrashing
     _log(
         'createLossyDC[$task]: negotiated=${lossy.negotiated} id=${lossy.id} ordered=${lossy.ordered} maxRetransmits=${lossy.maxRetransmits}');
     final ch = await _pc!.createDataChannel('results:$task', lossy);
