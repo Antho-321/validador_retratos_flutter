@@ -146,3 +146,28 @@ String patchAppMLinePorts(String sdp) {
     if (!changed) return sdp;
     return out.join('\r\n');
   }
+
+/// Adds SDP attributes to minimize receive-side jitter buffer delay.
+/// WARNING: Works best on stable networks; may cause choppy video on lossy connections.
+String addZeroJitterHints(String sdp) {
+  final lines = sdp.split(RegExp(r'\r?\n'));
+  final out = <String>[];
+  bool inVideo = false;
+  bool addedHint = false;
+
+  for (final l in lines) {
+    out.add(l);
+    if (l.startsWith('m=')) {
+      inVideo = l.startsWith('m=video');
+      addedHint = false;
+    }
+    // Insert after c= line in video section
+    if (inVideo && !addedHint && l.startsWith('c=')) {
+      // Request minimal jitter buffer (implies receiver should use small playout delay)
+      out.add('a=x-google-min-playout-delay:0');
+      out.add('a=x-google-max-playout-delay:100');
+      addedHint = true;
+    }
+  }
+  return out.join('\r\n');
+}

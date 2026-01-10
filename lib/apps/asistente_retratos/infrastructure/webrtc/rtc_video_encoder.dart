@@ -241,6 +241,9 @@ class RtcVideoEncoder {
           'x-google-min-bitrate': minKbps(startKbps),
           'x-google-max-bitrate': '$startKbps',
           if (frames != null) 'max-fr': '$frames',
+          // === LOW-LATENCY ENCODER HINTS ===
+          'x-google-buffer-latency': '100',      // Request 100ms encode buffer (vs default ~500ms)
+          'level-asymmetry-allowed': '1',        // Allow encoder to adapt dynamically
         };
 
     String mergeFmtp(String current, Map<String, String> inject) {

@@ -339,7 +339,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     this.stripRtxAndNackFromSdp = true,
     this.keepTransportCcOnly = true,
     this.requestedTasks = const ['pose', 'face'],
-    this.kfMinGapMs = 500, // configurable KF pacing
+    this.kfMinGapMs = 200, // ⬅️ Reduced for faster recovery after packet loss
     this.targetLandmarkFps = 0, // 0 = no throttle, otherwise limit landmark updates
     Map<String, Map<String, dynamic>>? initialTaskParams,
     RtcVideoEncoder? encoder,
@@ -1496,6 +1496,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     }
     sdp = keepOnlyVideoCodecs(sdp, preferHevc ? const ['h265'] : const ['h264']);
     sdp = patchAppMLinePorts(sdp);
+    if (lowLatency) {
+      sdp = addZeroJitterHints(sdp);
+    }
     offer = RTCSessionDescription(sdp, offer.type);
 
     await _pc!.setLocalDescription(offer);
