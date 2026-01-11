@@ -666,8 +666,42 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       return;
     }
 
+    // Handle PREVIEW message - segmented image preview before full post-processing
+    if (type == 'PREVIEW') {
+      final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      if (rid.isEmpty) return;
+
+      final fmt = (json['format'] ?? 'jpeg').toString().toLowerCase();
+      final dynamic bfield = json['bytes'] ??
+          json['nbytes'] ??
+          json['size'] ??
+          json['length'] ??
+          json['total'];
+      final serverExpectedBytes = _toInt(bfield);
+
+      // Create preview pending state
+      _previewPending = _RxPending(rid, fmt, serverExpectedBytes);
+      _dcl('preview RX begin id=$rid expected=$serverExpectedBytes fmt=$fmt');
+      return;
+    }
+
     if (type == 'EOS') {
       final rid = (json['request_id'] ?? json['requestId'] ?? '').toString();
+      final isPreview = json['preview'] == true;
+      
+      if (isPreview) {
+        // Handle preview EOS - emit preview image
+        final previewPending = _previewPending;
+        if (previewPending != null) {
+          final received = previewPending.sink.length;
+          if (previewPending.expectedBytes <= 0 || received < previewPending.expectedBytes) {
+            previewPending.expectedBytes = received;
+          }
+          _emitPendingPreview(force: true);
+        }
+        return;
+      }
+      
       final current = _rxPending;
       if (current != null && rid.isNotEmpty && rid != current.requestId) {
         _warn('EOS con requestId distinto: got=$rid current=${current.requestId}');
@@ -873,6 +907,40 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _rxPending = null;
   }
 
+  /// Emit pending preview image (segmented image before full post-processing)
+  void _emitPendingPreview({bool force = false}) {
+    final pending = _previewPending;
+    if (pending == null) return;
+    
+    final received = pending.sink.length;
+    if (!force && pending.expectedBytes > 0 && received < pending.expectedBytes) {
+      return;
+    }
+
+    var bytes = pending.sink.takeBytes();
+
+    // Trim to expected size if necessary
+    if (pending.expectedBytes > 0 && bytes.length > pending.expectedBytes) {
+      bytes = Uint8List.sublistView(bytes, 0, pending.expectedBytes);
+    }
+
+    // Fix image bytes if needed
+    bytes = _fixImageBytes(bytes);
+
+    _dcl('preview RX done id=${pending.requestId} recv=$received final=${bytes.length}');
+
+    if (!_previewImageCtrl.isClosed) {
+      _previewImageCtrl.add(ImagesRx(
+        requestId: pending.requestId,
+        format: pending.format,
+        bytes: bytes,
+        okHash: null,
+        okSize: null,
+      ));
+    }
+    _previewPending = null;
+  }
+
   String get _primaryTask =>
       (requestedTasks.isNotEmpty ? requestedTasks.first : 'pose').toLowerCase();
 
@@ -976,6 +1044,12 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   final _imagesUploadCtrl =
       StreamController<ImagesUploadAck>.broadcast(sync: true);
   final _uiStepCtrl = StreamController<UiStepEvent>.broadcast(sync: true); // ✅ UI STEP ctrl
+  
+  // Preview image stream for segmented image previews (before full post-processing)
+  _RxPending? _previewPending;
+  final _previewImageCtrl = StreamController<ImagesRx>.broadcast(sync: true);
+  @override
+  Stream<ImagesRx> get previewImages => _previewImageCtrl.stream;
 
   @override
   Stream<ImagesUploadAck> get imageUploads => _imagesUploadCtrl.stream;
@@ -1689,7 +1763,9 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
     _cancelImageAckTimer();
     await _imagesProcessedCtrl.close();
     await _imagesUploadCtrl.close();
+    await _previewImageCtrl.close();
     _rxPending = null;
+    _previewPending = null;
     await _framesCtrl.close();
     await _jsonEventsCtrl.close();
 
@@ -2009,6 +2085,18 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
           _dcl('images <= binary ${m.binary.length}B IGNORED (reception blocked)');
           return;
         }
+        
+        // Check if we have a preview pending - route bytes there first
+        final previewPending = _previewPending;
+        if (previewPending != null) {
+          previewPending.sink.add(m.binary);
+          if (previewPending.expectedBytes <= 0 ||
+              previewPending.sink.length >= previewPending.expectedBytes) {
+            _emitPendingPreview();
+          }
+          return;
+        }
+        
         final pending = _rxPending;
         if (pending != null) {
           pending.sink.add(m.binary);

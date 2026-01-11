@@ -25,6 +25,7 @@ import '../../infrastructure/services/pose_webrtc_service_imp.dart'
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/images_upload_ack.dart'
     show ImagesUploadAck;
+import '../../infrastructure/model/images_rx.dart' show ImagesRx;
 import '../../domain/model/ui_step_event.dart'; // ✅ import UI STEP
 
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
@@ -878,6 +879,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   String? _uploadCaptureId;
   StreamSubscription<ImagesUploadAck>? _uploadSubscription;
   StreamSubscription<UiStepEvent>? _uiStepSub; // ✅ UI STEP sub
+  StreamSubscription<ImagesRx>? _previewSub; // ✅ Preview images sub
   
   // Estado de conexión inicial con el servidor
   bool _isConnecting = true;
@@ -959,6 +961,21 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     });
   }
 
+  /// Handle preview image received from server (segmented image before full post-processing)
+  void _handlePreviewImage(ImagesRx rx) {
+    if (!mounted) return;
+    if (rx.bytes.isEmpty) return;
+    
+    debugPrint('[PoseCapturePage] PREVIEW received: ${rx.bytes.length} bytes');
+    
+    // Only update if we're in segmenting state
+    if (_isSegmenting) {
+      setState(() {
+        _segmentedImageBytes = rx.bytes;
+      });
+    }
+  }
+
   String? _mergeUploadIntoDetails(String? raw, ImagesUploadAck ack) {
     if (raw == null || raw.trim().isEmpty) return raw;
     try {
@@ -1033,6 +1050,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _uploadSubscription =
         widget.poseService.imageUploads.listen(_handleUploadAck);
     _uiStepSub = widget.poseService.uiStepEvents.listen(_handleUiStepEvent);
+    _previewSub = widget.poseService.previewImages.listen(_handlePreviewImage);
   }
   
   /// Listener para detectar cuando llegan frames válidos del servidor
@@ -1558,6 +1576,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _connectionSubscription?.cancel();
     _uploadSubscription?.cancel();
     _uiStepSub?.cancel();
+    _previewSub?.cancel();
     widget.poseService.latestFrame.removeListener(_onLatestFrameChanged);
     ctl.removeListener(_handleControllerChanged);
     ctl.dispose();

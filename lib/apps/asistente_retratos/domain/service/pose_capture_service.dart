@@ -41,6 +41,7 @@ abstract class PoseCaptureService {
 
   // ⬇️ NUEVO: Images DataChannel
   Stream<ImagesRx> get imagesProcessed;                 // <<--- AÑADIR
+  Stream<ImagesRx> get previewImages;                   // <<--- Preview images before full processing
   Stream<ImagesUploadAck> get imageUploads;             // <<--- AÑADIR
   Stream<UiStepEvent> get uiStepEvents;                 // <<--- AÑADIR UI STEP
   bool get imagesReady; // DC open?
