@@ -48,3 +48,4 @@ commit_messages.txt
 build_log*.txt
 **/check*.dart
 analysis_*.txt
+*.sh
