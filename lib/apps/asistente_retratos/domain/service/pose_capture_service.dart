@@ -12,6 +12,7 @@ import '../../infrastructure/model/pose_point.dart' show PosePoint;
 // ⬇️ NUEVO: el tipo del stream
 import '../../infrastructure/model/images_rx.dart' show ImagesRx;
 import '../../infrastructure/model/images_upload_ack.dart' show ImagesUploadAck;
+import '../model/ui_step_event.dart';
 
 abstract class PoseCaptureService {
   Future<void> init();
@@ -41,6 +42,7 @@ abstract class PoseCaptureService {
   // ⬇️ NUEVO: Images DataChannel
   Stream<ImagesRx> get imagesProcessed;                 // <<--- AÑADIR
   Stream<ImagesUploadAck> get imageUploads;             // <<--- AÑADIR
+  Stream<UiStepEvent> get uiStepEvents;                 // <<--- AÑADIR UI STEP
   bool get imagesReady; // DC open?
   Future<void> sendImageBytes(
     Uint8List bytes, {

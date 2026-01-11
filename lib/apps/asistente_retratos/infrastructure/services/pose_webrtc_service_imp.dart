@@ -26,6 +26,7 @@ import '../webrtc/sdp_utils.dart';
 import '../model/pose_point.dart';
 import '../model/images_rx.dart';
 import '../model/images_upload_ack.dart';
+import '../../domain/model/ui_step_event.dart'; // ✅ import UI STEP
 import '../parsers/pose_parse_isolate.dart' show poseParseIsolateEntry;
 import '../parsers/pose_binary_parser.dart';
 import '../parsers/pose_json_parser.dart';
@@ -737,6 +738,19 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
       }
       return;
     }
+
+    if (type == 'UI_STEP') {
+      try {
+        final event = UiStepEvent.fromJson(json);
+        _dcl('UI_STEP: ${event.step} (${event.label})');
+        if (!_uiStepCtrl.isClosed) {
+          _uiStepCtrl.add(event);
+        }
+      } catch (e) {
+        _warn('Failed to parse UI_STEP: $e');
+      }
+      return;
+    }
   }
 
   void _emitPendingImage({bool force = false}) {
@@ -961,8 +975,13 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   Stream<ImagesRx> get imagesProcessed => _imagesProcessedCtrl.stream;
   final _imagesUploadCtrl =
       StreamController<ImagesUploadAck>.broadcast(sync: true);
+  final _uiStepCtrl = StreamController<UiStepEvent>.broadcast(sync: true); // ✅ UI STEP ctrl
+
   @override
   Stream<ImagesUploadAck> get imageUploads => _imagesUploadCtrl.stream;
+
+  @override
+  Stream<UiStepEvent> get uiStepEvents => _uiStepCtrl.stream; // ✅ UI STEP stream
 
   // Image reception control - block further images after processing completes
   @override
@@ -1655,7 +1674,8 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
 
     await _dc.safeClose();
     await _ctrl.safeClose();
-    await _imagesDc.safeClose(); // <-- ADDED
+    await _imagesDc.safeClose();
+    await _uiStepCtrl.close(); // ✅ Close UI STEP ctrl // <-- ADDED
     await _silenceAsync(() async { await _pc?.close(); });
 
     _silence(() => _localStream?.getTracks().forEach((t) { _silence(() { t.stop(); }); }));

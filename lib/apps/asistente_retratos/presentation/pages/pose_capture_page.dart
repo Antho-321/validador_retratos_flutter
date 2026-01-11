@@ -25,6 +25,7 @@ import '../../infrastructure/services/pose_webrtc_service_imp.dart'
 import '../../infrastructure/model/pose_frame.dart' show PoseFrame;
 import '../../infrastructure/model/images_upload_ack.dart'
     show ImagesUploadAck;
+import '../../domain/model/ui_step_event.dart'; // ✅ import UI STEP
 
 import '../widgets/portrait_validator_hud.dart' show PortraitValidatorHUD;
 import '../widgets/frame_sequence_overlay.dart' show FrameSequenceOverlay;
@@ -876,6 +877,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   String? _uploadPhotoId;
   String? _uploadCaptureId;
   StreamSubscription<ImagesUploadAck>? _uploadSubscription;
+  StreamSubscription<UiStepEvent>? _uiStepSub; // ✅ UI STEP sub
   
   // Estado de conexión inicial con el servidor
   bool _isConnecting = true;
@@ -920,41 +922,41 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   }
 
   void _handleUploadAck(ImagesUploadAck ack) {
-    final captureId = _captureIdFromUploadRequestId(ack.requestId);
-    if (captureId == null || captureId.isEmpty) return;
-    if (_uploadCaptureId != captureId) return;
+    if (!mounted) return;
 
-    bool? ok = ack.uploadOk;
-    final statusUpper = ack.status?.toUpperCase();
-    if (ok == null && statusUpper != null) {
-      if (statusUpper == 'UPLOADED' || statusUpper == 'APPROVED') ok = true;
-      if (statusUpper == 'FAILED') ok = false;
+    if (ack.photoId != null) {
+      debugPrint('Photo uploaded OK: ${ack.photoId}');
     }
-    if (ack.error != null && ack.error!.trim().isNotEmpty) {
-      ok = false;
-    }
+    
+    // Si terminó la subida (éxito o error), quitamos el overlay de "Subiendo..."
+    // PERO solo después de un breve delay si es éxito, para que se vea el check
+    // (Opcional: aquí simplemente actualizamos el estado)
 
-    if (mounted) {
-      setState(() {
-        _isUploading = false;
-        _uploadOk = ok;
-        _uploadStatus = ack.status;
-        _uploadError = ack.error;
-        _uploadPhotoId = ack.photoId;
-        _validationResultText =
-            _mergeUploadIntoDetails(_validationResultText, ack);
-        _validationErrorText =
-            _mergeUploadIntoDetails(_validationErrorText, ack);
-      });
-    } else {
+    setState(() {
       _isUploading = false;
-      _uploadOk = ok;
+      _uploadOk = ack.uploadOk;
       _uploadStatus = ack.status;
       _uploadError = ack.error;
       _uploadPhotoId = ack.photoId;
-      _validationResultText = _mergeUploadIntoDetails(_validationResultText, ack);
-      _validationErrorText = _mergeUploadIntoDetails(_validationErrorText, ack);
+    });
+
+    if (ack.uploadOk == true) {
+      // Éxito final -> ir a pantalla de éxito
     }
+  }
+
+  void _handleUiStepEvent(UiStepEvent event) {
+    if (!mounted) return;
+    debugPrint('[PoseCapturePage] UI_STEP: ${event.step}');
+    setState(() {
+      if (event.step == 'validando_requisitos') {
+        _isSegmenting = false;
+        _isValidatingRemote = true;
+      } else if (event.step == 'procesando_imagen') {
+        _isSegmenting = true;
+        _isValidatingRemote = true; 
+      }
+    });
   }
 
   String? _mergeUploadIntoDetails(String? raw, ImagesUploadAck ack) {
@@ -1030,6 +1032,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
     _setupFrameListener();
     _uploadSubscription =
         widget.poseService.imageUploads.listen(_handleUploadAck);
+    _uiStepSub = widget.poseService.uiStepEvents.listen(_handleUiStepEvent);
   }
   
   /// Listener para detectar cuando llegan frames válidos del servidor
@@ -1554,6 +1557,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
   void dispose() {
     _connectionSubscription?.cancel();
     _uploadSubscription?.cancel();
+    _uiStepSub?.cancel();
     widget.poseService.latestFrame.removeListener(_onLatestFrameChanged);
     ctl.removeListener(_handleControllerChanged);
     ctl.dispose();
