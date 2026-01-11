@@ -53,6 +53,7 @@ class PoseCapturePage extends StatefulWidget {
     this.validationsEnabled = true,
     this.drawLandmarks = true, // ⬅️ nuevo
     this.showDownloadButton = false,
+    this.logOnlyAngles = const <String>{}, // ⬅️ NEW: log only specific angles
   });
 
   final PoseCaptureService poseService;
@@ -63,6 +64,8 @@ class PoseCapturePage extends StatefulWidget {
   final bool validationsEnabled;
   final bool drawLandmarks; // ⬅️ nuevo
   final bool showDownloadButton;
+  /// Set of angle IDs to log (e.g., {'azimut'}). Empty = use logEverything behavior.
+  final Set<String> logOnlyAngles;
 
   @override
   State<PoseCapturePage> createState() => _PoseCapturePageState();
@@ -1037,6 +1040,7 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       validationsEnabled: widget.validationsEnabled,
       enableCapturePostProcessing: false, // Avoid double segmentation; post-process after /segmentar-imagen.
       logEverything: logAll,
+      logOnlyAngles: widget.logOnlyAngles,
     );
     ctl.setFallbackSnapshot(_captureSnapshotBytes);
     ctl.attach();

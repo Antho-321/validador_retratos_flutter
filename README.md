@@ -43,6 +43,12 @@ adb devices
 - **Script:** `tool/flutter_run_fast.sh`  
   *(usa `android/local.properties` para ubicar tu Flutter SDK)*
 
+- **Wrapper opcional:** `tool/flutter`  
+  Para seguir usando `flutter run` con los flags rapidos:
+  ```bash
+  PATH="$PWD/tool:$PATH" flutter run
+  ```
+
 - **Dispositivo por defecto:** `DEVICE_ID="SM A135M"`  
   Puedes cambiarlo así:
   ```bash

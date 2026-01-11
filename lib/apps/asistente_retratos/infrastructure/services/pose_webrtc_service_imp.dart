@@ -437,6 +437,7 @@ class PoseWebrtcServiceImp implements PoseCaptureService {
   }
 
   void _warn(String message) {
+    if (!logEverything) return; // Respect logging settings
     debugPrint('[PoseWebRTC][WARN] $message');
   }
 

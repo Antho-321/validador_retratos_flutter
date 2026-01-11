@@ -1,9 +1,31 @@
 // lib/apps/asistente_retratos/presentation/controllers/pose_capture_controller.onframe.dart
 part of 'pose_capture_controller.dart';
 
+/// General logging function (respects logEverything and logOnlyAngles).
+/// When logOnlyAngles is non-empty, this function only logs if logEverything is true.
 void _poseCtrlLog(PoseCaptureController ctrl, String message) {
+  // If logOnlyAngles has entries, skip general logs unless logEverything is on
+  if (ctrl.logOnlyAngles.isNotEmpty && !ctrl.logEverything) {
+    return;
+  }
   if (ctrl.logEverything) {
     debugPrint('[PoseCapture] $message');
+  }
+}
+
+/// Angle-specific logging function.
+/// Logs when:
+/// - logOnlyAngles contains this angleId, OR
+/// - logEverything is true AND logOnlyAngles is empty
+void _poseCtrlLogAngle(
+  PoseCaptureController ctrl,
+  String angleId,
+  String message,
+) {
+  final bool logThisAngle = ctrl.logOnlyAngles.contains(angleId);
+  final bool logAll = ctrl.logEverything && ctrl.logOnlyAngles.isEmpty;
+  if (logThisAngle || logAll) {
+    debugPrint('[PoseCapture][$angleId] $message');
   }
 }
 
@@ -207,8 +229,8 @@ _ValidationRule makeAzimutRule(ValidationProfile p) {
 
       ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
       final txt = (lastDir == _TurnDir.left)
-          ? 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás'
-          : 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás';
+          ? 'Gira ligeramente el torso moviendo el hombro derecho hacia atrás'
+          : 'Gira ligeramente el torso moviendo el hombro izquierdo hacia atrás';
       return _HintAnim(_Axis.none, txt);
     },
   );
@@ -590,10 +612,25 @@ extension _OnFrameLogicExt on PoseCaptureController {
     double? azDegHUD;
     if (lms3dRec != null) {
       final double zToPx = _zToPxScale ?? inputs.imageSize.width; // mismo fallback
-      azDegHUD = geom.estimateAzimutBiacromial3D(
+      final rawAzDeg = geom.estimateAzimutBiacromial3D(
         poseLandmarks3D: lms3dRec,
+        xToPx: inputs.imageSize.width,
         zToPx: zToPx,
         mirror: inputs.mirror,
+      );
+      // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
+      azDegHUD = (rawAzDeg != null) ? geom.normalizeAzimutTo180(rawAzDeg) : null;
+      
+      // ⬇️ Always print normalized azimut for debugging
+      debugPrint('[Azimut] normalized=${azDegHUD?.toStringAsFixed(2)}° (raw=${rawAzDeg?.toStringAsFixed(2)}°) band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]');
+      
+      // ⬇️ NEW: Angle-specific logging for azimut
+      _poseCtrlLogAngle(
+        this,
+        'azimut',
+        'raw=${rawAzDeg?.toStringAsFixed(2)}°, '
+        'normalized=${azDegHUD?.toStringAsFixed(2)}°, '
+        'band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]',
       );
     }
 

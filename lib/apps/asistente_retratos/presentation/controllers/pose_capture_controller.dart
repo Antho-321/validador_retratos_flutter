@@ -395,6 +395,7 @@ class PoseCaptureController extends ChangeNotifier {
     this.validationsEnabled = true, // ⇠ NEW
     this.enableCapturePostProcessing = true,
     this.logEverything = false,
+    this.logOnlyAngles = const <String>{}, // ⇠ NEW: log only specific angles (empty = all)
     ValidationProfile? validationProfile, // ⇠ NEW: inject data-driven thresholds
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
@@ -601,6 +602,12 @@ class PoseCaptureController extends ChangeNotifier {
 
   final bool logEverything;
 
+  /// NEW: Set of angle IDs to log (e.g., {'azimut', 'shoulders'}). 
+  /// Empty set means log all angles when logEverything is true.
+  /// Non-empty set enables logging only for the specified angles,
+  /// regardless of logEverything value.
+  final Set<String> logOnlyAngles;
+
   /// ⇠ NEW: Perfil de validación inyectado (bandas y deadbands data-driven)
   final ValidationProfile profile;
 
@@ -667,6 +674,26 @@ class PoseCaptureController extends ChangeNotifier {
     _activeCaptureId = null;
     _readySince = null;
     _wasFaceOk = false; // reset hysteresis
+    
+    // 3. Reset validation flow and gate memory (including azimuth firstAttemptDone)
+    _resetFlow();
+    
+    // 4. Reset EMA/smoothing state for angles
+    _emaYawDeg = _emaPitchDeg = _emaRollDeg = null;
+    _lastSampleAt = null;
+    
+    // 5. Reset roll kinematics (unwrap/EMA/dps)
+    _rollSmoothedDeg = null;
+    _rollSmoothedAt = null;
+    _lastRollDps = null;
+    
+    // 6. Hide any active animation sequences
+    if (showTurnRightSeq) {
+      showTurnRightSeq = false;
+      try {
+        seq.pause();
+      } catch (_) {}
+    }
     
     // Clear HUD countdown/progress
     final cur = hud.value;
@@ -826,15 +853,19 @@ class PoseCaptureController extends ChangeNotifier {
       return _normalizeTilt90(ang);
     });
 
-    // Azimut del torso (3D)
+    // Azimut del torso (3D) — normalizado para que 0° = mirando a la cámara
     _metricRegistry.register(MetricKeys.azimutSigned, (i) {
       if (i.poseLandmarks3D == null) return null;
       final double zToPx = _zToPxScale ?? i.imageSize.width; // fallback
-      return geom.estimateAzimutBiacromial3D(
+      final rawDeg = geom.estimateAzimutBiacromial3D(
         poseLandmarks3D: i.poseLandmarks3D,
+        xToPx: i.imageSize.width,
         zToPx: zToPx,
         mirror: i.mirror,
       );
+      if (rawDeg == null) return null;
+      // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
+      return geom.normalizeAzimutTo180(rawDeg);
     });
   }
 

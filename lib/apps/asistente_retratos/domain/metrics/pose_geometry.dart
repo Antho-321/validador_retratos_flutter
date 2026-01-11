@@ -81,30 +81,60 @@ double? calcularAnguloHombros(
 }
 
 /// Estima el azimut biacromial usando landmarks 3D (hombros 11 y 12).
-/// - `zToPx`: factor para llevar ΔZ a “px” (usa tu _zToPxScale o, por defecto, el ancho de imagen).
+/// - `xToPx`: factor para llevar ΔX a "px" (e.g., imageWidth si x es normalizado).
+/// - `zToPx`: factor para llevar ΔZ a "px" (e.g., imageWidth si z está en "image-width units").
 /// - `mirror`: si la vista está espejada, invierte el signo para UX consistente.
+/// - `invertZ`: toggle para invertir eje Z después de calibración real.
 double? estimateAzimutBiacromial3D({
   required List<dynamic>? poseLandmarks3D,
+  required double xToPx,
   required double zToPx,
   required bool mirror,
+  bool invertZ = false,
 }) {
   if (poseLandmarks3D == null || poseLandmarks3D.length <= 12) return null;
 
   final ls = poseLandmarks3D[11]; // left shoulder
   final rs = poseLandmarks3D[12]; // right shoulder
 
-  final double? rx = (rs.x as num?)?.toDouble();
-  final double? lx = (ls.x as num?)?.toDouble();
-  final double? rz = (rs.z as num?)?.toDouble();
-  final double? lz = (ls.z as num?)?.toDouble();
-  if (rx == null || lx == null || rz == null || lz == null) return null;
+  final lx = (ls.x as num?)?.toDouble();
+  final rx = (rs.x as num?)?.toDouble();
+  final lz = (ls.z as num?)?.toDouble();
+  final rz = (rs.z as num?)?.toDouble();
+  if (lx == null || rx == null || lz == null || rz == null) return null;
 
-  final double dxPx = (rx - lx).abs();
-  if (dxPx <= 1e-6) return 0.0;
+  // Keep units consistent
+  double dx = (rx - lx) * xToPx;
+  double dz = (rz - lz) * zToPx;
+  if (invertZ) dz = -dz;
 
-  final double dzPx = (rz - lz) * zToPx;
+  const eps = 1e-6;
+  double deg;
+  if (dx.abs() < eps) {
+    deg = (dz >= 0) ? 90.0 : -90.0;
+  } else {
+    deg = math.atan2(dz, dx) * 180.0 / math.pi;
+  }
 
-  double deg = math.atan2(dzPx, dxPx) * 180.0 / math.pi;
   if (mirror) deg = -deg;
   return deg;
+}
+
+/// Normaliza el ángulo de azimut para que 0° represente "mirando a la cámara".
+/// 
+/// El cálculo raw de `estimateAzimutBiacromial3D` devuelve valores cerca de ±180°
+/// cuando el usuario mira a la cámara (hombros paralelos al plano de la imagen).
+/// Esta función convierte ese valor a una desviación desde 180°:
+/// - 0° = perfectamente de frente a la cámara
+/// - valores positivos = torso girado hacia un lado
+/// - valores negativos = torso girado hacia el otro lado
+/// 
+/// El resultado está en el rango (-180°, 180°].
+double normalizeAzimutTo180(double rawAzimutDeg) {
+  // Envolver a (-180, 180] relativo a 180°
+  double delta = rawAzimutDeg - 180.0;
+  // Normalizar a (-180, 180]
+  while (delta > 180.0) delta -= 360.0;
+  while (delta <= -180.0) delta += 360.0;
+  return delta;
 }

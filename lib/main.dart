@@ -19,6 +19,15 @@ import 'apps/asistente_retratos/presentation/widgets/retry_button.dart';
 const drawLandmarks = true;
 const validationsEnabled = true;
 
+// ── Logging configuration ─────────────────────────────────────────────────
+/// Set to true to disable ALL logs (overrides logOnlyAngles).
+const disableAllLogs = false;
+
+/// Set of angle IDs to log (e.g., {'azimut', 'shoulders', 'yaw', 'pitch', 'roll'}).
+/// When non-empty, only these angles will be logged.
+/// When empty AND disableAllLogs is false, uses logEverything behavior.
+const Set<String> logOnlyAngles = {'azimut'}; // Currently: log only azimut angle
+
 const exampleValidationJson = r'''
 {
   "cedula": "1050298650",
@@ -138,10 +147,13 @@ class _PoseAppState extends State<PoseApp> {
       final cedula = dotenv.env['CEDULA']?.trim();
 
       if (!GetIt.I.isRegistered<PostureRepository>()) {
+        // When logOnlyAngles is non-empty, we want logEverything=false so only specific angles log.
+        // When disableAllLogs is true, we set logEverything=false.
+        final shouldLogEverything = !disableAllLogs && logOnlyAngles.isEmpty;
         registrarDependenciasPosture(
           offerUri: Uri.parse(offerUrl),
           cedula: cedula,
-          logEverything: true,
+          logEverything: shouldLogEverything,
         );
       }
 
@@ -205,6 +217,7 @@ class _PoseAppState extends State<PoseApp> {
         validationsEnabled: validationsEnabled,
         drawLandmarks: drawLandmarks,
         resultText: exampleValidationJson,
+        logOnlyAngles: disableAllLogs ? const <String>{} : logOnlyAngles,
       );
     }
 

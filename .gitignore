@@ -49,3 +49,4 @@ build_log*.txt
 **/check*.dart
 analysis_*.txt
 *.sh
+tool
