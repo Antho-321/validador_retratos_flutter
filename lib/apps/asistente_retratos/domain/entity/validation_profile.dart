@@ -140,12 +140,13 @@ class ValidationProfile {
     ),
 
     // Torso azimut
-    azimutBand: Band(-2.3, 3.2),
+    // Izquierdo al frente más positivo
+    azimutBand: Band(9, 11),
     azimutGate: GateConfig(
       baseDeadband: 0.0,
-      tighten: 0.8,
-      hysteresis: 0.9,
-      extraRelaxAfterFirst: 0.2 * _azimutScale,
+      tighten: 0.5,
+      hysteresis: 1,
+      extraRelaxAfterFirst: 0,
       maxOffDeg: 20.0 * _azimutScale, // (no usado por ahora, pero queda centralizado)
     ),
 

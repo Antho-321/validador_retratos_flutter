@@ -222,7 +222,8 @@ _ValidationRule makeAzimutRule(ValidationProfile p) {
       // Mantener guía direccional hasta dwell (usa el signo del azimut)
       final a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
       if (a != null) {
-        lastDir = (a < 0.0) ? _TurnDir.left : _TurnDir.right;
+        final double mid = (p.azimutBand.lo + p.azimutBand.hi) / 2;
+        lastDir = (a < mid) ? _TurnDir.left : _TurnDir.right;
       }
 
       ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames

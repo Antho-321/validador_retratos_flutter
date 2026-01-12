@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:get_it/get_it.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
+import 'apps/asistente_retratos/core/pose_config.dart';
 import 'apps/asistente_retratos/dependencias_posture.dart';
 import 'apps/asistente_retratos/domain/repository/posture_repository.dart';
 import 'apps/asistente_retratos/domain/service/pose_capture_service.dart';
@@ -144,6 +145,15 @@ class _PoseAppState extends State<PoseApp> {
       }
 
       final cedula = dotenv.env['CEDULA']?.trim();
+      final etnia = dotenv.env['ETNIA']?.trim();
+
+      // Fix: Ensure PoseConfig is initialized with .env values
+      if (cedula != null || etnia != null) {
+        PoseConfig.configure({
+          if (cedula != null) 'cedula': cedula,
+          if (etnia != null) 'etnia': etnia,
+        });
+      }
 
       if (!GetIt.I.isRegistered<PostureRepository>()) {
         // When logOnlyAngles is non-empty, we want logEverything=false so only specific angles log.
