@@ -861,7 +861,8 @@ class PoseCaptureController extends ChangeNotifier {
       );
       if (rawDeg == null) return null;
       // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
-      return geom.normalizeAzimutTo180(rawDeg);
+      final normalized = geom.normalizeAzimutTo180(rawDeg);
+      return geom.omitAzimutDeadzone(normalized);
     });
   }
 

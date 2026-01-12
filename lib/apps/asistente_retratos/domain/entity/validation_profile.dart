@@ -3,6 +3,9 @@
 /// Public sense for gates in the domain layer (no underscores → not private).
 enum GateSense { insideIsOk, outsideIsOk }
 
+// Escala de grados para alinear azimut con referencias.
+const double _azimutScale = 1000.0;
+
 /// Configuración de gating por eje (enter/exit bands, dwell, etc.)
 /// Ahora también incluye `maxOffDeg` para mapear progreso en validadores tipo `checkAngle`.
 class GateConfig {
@@ -70,7 +73,7 @@ class UiTuning {
     this.pitchHintDeadzoneDeg = 0.15,
     this.rollHintDeadzoneDeg = 0.30,
     this.shouldersHintDeadzoneDeg = 0.20,
-    this.azimutHintDeadzoneDeg = 0.30,
+    this.azimutHintDeadzoneDeg = 0.30 * _azimutScale,
   });
 }
 
@@ -137,12 +140,13 @@ class ValidationProfile {
     ),
 
     // Torso azimut
-    azimutBand: Band(-0.02, 0.02),
+    azimutBand: Band(-2.3, 3.2),
     azimutGate: GateConfig(
       baseDeadband: 0.0,
-      tighten: 0.015,
-      hysteresis: 0.008,
-      maxOffDeg: 20.0, // (no usado por ahora, pero queda centralizado)
+      tighten: 0.8,
+      hysteresis: 0.9,
+      extraRelaxAfterFirst: 0.2 * _azimutScale,
+      maxOffDeg: 20.0 * _azimutScale, // (no usado por ahora, pero queda centralizado)
     ),
 
     // UX

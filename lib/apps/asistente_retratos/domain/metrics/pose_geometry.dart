@@ -129,12 +129,21 @@ double? estimateAzimutBiacromial3D({
 /// - valores positivos = torso girado hacia un lado
 /// - valores negativos = torso girado hacia el otro lado
 /// 
-/// El resultado está en el rango (-180°, 180°].
+/// El resultado está en el rango (-180°, 180°] y luego se escala x1000 (mdeg).
 double normalizeAzimutTo180(double rawAzimutDeg) {
   // Envolver a (-180, 180] relativo a 180°
   double delta = rawAzimutDeg - 180.0;
   // Normalizar a (-180, 180]
   while (delta > 180.0) delta -= 360.0;
   while (delta <= -180.0) delta += 360.0;
-  return delta;
+  return delta * 1000.0;
+}
+
+/// Absolute range to omit for azimut values (after normalization).
+const double kAzimutOmitAbs = 0.3;
+
+/// Returns null when |azimut| <= kAzimutOmitAbs to skip near-zero values.
+double? omitAzimutDeadzone(double? azimutDeg) {
+  if (azimutDeg == null) return null;
+  return (azimutDeg.abs() <= kAzimutOmitAbs) ? null : azimutDeg;
 }

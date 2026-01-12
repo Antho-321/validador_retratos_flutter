@@ -70,6 +70,6 @@ class MetricKeys {
 
   // Torso / Hombros
   static const shouldersSigned = MetricKey('shoulders.signed'); // deg firmado
-  static const azimutSigned    = MetricKey('azimut.signed');    // deg firmado
+  static const azimutSigned    = MetricKey('azimut.signed');    // deg firmado * 1000 (mdeg)
 
 }

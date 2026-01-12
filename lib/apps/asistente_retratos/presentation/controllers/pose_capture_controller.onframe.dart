@@ -204,7 +204,8 @@ _ValidationRule makeAzimutRule(ValidationProfile p) {
     blockInterruptionDuranteValidacion: true,
     metric: (c) {
       final double? a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
-      if (a == null) return null;
+      // Omit exact 0 values as they indicate no valid pose data
+      if (a == null || a == 0.0) return null;
       return _metricSignedBand(
         a,
         gate,
@@ -218,13 +219,10 @@ _ValidationRule makeAzimutRule(ValidationProfile p) {
         return const _HintAnim(_Axis.none, 'Mantén el torso recto');
       }
 
-      // Mantener guía direccional hasta dwell (con deadzone y último lado)
+      // Mantener guía direccional hasta dwell (usa el signo del azimut)
       final a = c.metrics.get<double>(MetricKeys.azimutSigned, c.inputs);
       if (a != null) {
-        final center = (p.azimutBand.lo + p.azimutBand.hi) / 2.0;
-        if ((a - center).abs() > p.ui.azimutHintDeadzoneDeg) {
-          lastDir = (a < center) ? _TurnDir.left : _TurnDir.right;
-        }
+        lastDir = (a < 0.0) ? _TurnDir.left : _TurnDir.right;
       }
 
       ctrl._hideAnimationIfVisible(); // azimut no usa animación de frames
@@ -619,19 +617,24 @@ extension _OnFrameLogicExt on PoseCaptureController {
         mirror: inputs.mirror,
       );
       // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
-      azDegHUD = (rawAzDeg != null) ? geom.normalizeAzimutTo180(rawAzDeg) : null;
-      
-      // ⬇️ Always print normalized azimut for debugging
-      debugPrint('[Azimut] normalized=${azDegHUD?.toStringAsFixed(2)}° (raw=${rawAzDeg?.toStringAsFixed(2)}°) band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]');
-      
-      // ⬇️ NEW: Angle-specific logging for azimut
-      _poseCtrlLogAngle(
-        this,
-        'azimut',
-        'raw=${rawAzDeg?.toStringAsFixed(2)}°, '
-        'normalized=${azDegHUD?.toStringAsFixed(2)}°, '
-        'band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]',
-      );
+      azDegHUD = (rawAzDeg != null)
+          ? geom.omitAzimutDeadzone(geom.normalizeAzimutTo180(rawAzDeg))
+          : null;
+
+      final bool logAzimut = azDegHUD != null;
+      if (logAzimut) {
+        // ⬇️ Always print normalized azimut for debugging
+        debugPrint('[Azimut] normalized=${azDegHUD?.toStringAsFixed(2)}° (raw=${rawAzDeg?.toStringAsFixed(2)}°) band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]');
+
+        // ⬇️ NEW: Angle-specific logging for azimut
+        _poseCtrlLogAngle(
+          this,
+          'azimut',
+          'raw=${rawAzDeg?.toStringAsFixed(2)}°, '
+          'normalized=${azDegHUD?.toStringAsFixed(2)}°, '
+          'band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]',
+        );
+      }
     }
 
     // Limpia el registry (lazy cache por frame)
