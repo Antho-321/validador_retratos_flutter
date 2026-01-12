@@ -32,7 +32,13 @@ class MetricRegistry {
 /// Minimal inputs you already have (face landmarks, pose, sizes, mirror…)
 /// ─────────────────────────────────────────────────────────────────────
 
-typedef PoseLms3DPoint = ({double x, double y, double z});
+typedef PoseLms3DPoint = ({
+  double x,
+  double y,
+  double z,
+  double? visibility,
+  double? presence,
+});
 
 class FrameInputs {
   FrameInputs({

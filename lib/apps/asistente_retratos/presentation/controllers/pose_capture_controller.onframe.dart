@@ -553,6 +553,7 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     _emaYawDeg = _emaPitchDeg = _emaRollDeg = null;
     _lastSampleAt = null;
+    _azimutFilter.reset();
 
     // Reset roll kinematics (unwrap/EMA/dps)
     _rollSmoothedDeg = null;
@@ -592,7 +593,13 @@ extension _OnFrameLogicExt on PoseCaptureController {
 
     // Mapea PosePoint → records ({x,y,z}) para cumplir FrameInputs
     final lms3dRec = lms3d
-        ?.map((p) => (x: p.x.toDouble(), y: p.y.toDouble(), z: (p.z ?? 0.0).toDouble()))
+        ?.map((p) => (
+              x: p.x.toDouble(),
+              y: p.y.toDouble(),
+              z: (p.z ?? 0.0).toDouble(),
+              visibility: null,
+              presence: null,
+            ))
         .toList();
 
     // Construye Inputs UNA sola vez para este frame
@@ -611,28 +618,25 @@ extension _OnFrameLogicExt on PoseCaptureController {
     double? azDegHUD;
     if (lms3dRec != null) {
       final double zToPx = _zToPxScale ?? inputs.imageSize.width; // mismo fallback
-      final rawAzDeg = geom.estimateAzimutBiacromial3D(
+      final rawAzDeg = geom.estimateAzimutTorso3D(
         poseLandmarks3D: lms3dRec,
         xToPx: inputs.imageSize.width,
         zToPx: zToPx,
         mirror: inputs.mirror,
       );
-      // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
-      azDegHUD = (rawAzDeg != null)
-          ? geom.omitAzimutDeadzone(geom.normalizeAzimutTo180(rawAzDeg))
-          : null;
+      azDegHUD = _computeStableAzimut(inputs);
 
       final bool logAzimut = azDegHUD != null;
       if (logAzimut) {
-        // ⬇️ Always print normalized azimut for debugging
-        debugPrint('[Azimut] normalized=${azDegHUD?.toStringAsFixed(2)}° (raw=${rawAzDeg?.toStringAsFixed(2)}°) band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]');
+        // ⬇️ Always print stable azimut for debugging
+        debugPrint('[Azimut] stable=${azDegHUD?.toStringAsFixed(2)}° (raw=${rawAzDeg?.toStringAsFixed(2)}°) band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]');
 
         // ⬇️ NEW: Angle-specific logging for azimut
         _poseCtrlLogAngle(
           this,
           'azimut',
           'raw=${rawAzDeg?.toStringAsFixed(2)}°, '
-          'normalized=${azDegHUD?.toStringAsFixed(2)}°, '
+          'stable=${azDegHUD?.toStringAsFixed(2)}°, '
           'band=[${profile.azimutBand.lo}, ${profile.azimutBand.hi}]',
         );
       }

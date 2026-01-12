@@ -400,6 +400,13 @@ class PoseCaptureController extends ChangeNotifier {
   })  : assert(countdownFps > 0, 'countdownFps must be > 0'),
         assert(countdownSpeed > 0, 'countdownSpeed must be > 0'),
         profile = validationProfile ?? ValidationProfile.defaultProfile, // ⇠ NEW
+        _azimutFilter = geom.AzimutStabilizer(
+          shoulderWeight: 0.7,
+          hipWeight: 0.3,
+          windowSize: 5,
+          minAxisPx: 1.0,
+          decayFractionPerSecond: 0.7,
+        ),
         hud = PortraitUiController(
           const PortraitUiModel(
             primaryMessage: 'Ubica tu rostro dentro del óvalo',
@@ -677,6 +684,7 @@ class PoseCaptureController extends ChangeNotifier {
     // 4. Reset EMA/smoothing state for angles
     _emaYawDeg = _emaPitchDeg = _emaRollDeg = null;
     _lastSampleAt = null;
+    _azimutFilter.reset();
     
     // 5. Reset roll kinematics (unwrap/EMA/dps)
     _rollSmoothedDeg = null;
@@ -752,6 +760,8 @@ class PoseCaptureController extends ChangeNotifier {
 
   // ── Dinámica de ROLL modular ──────────────────────────────────────────
   final _RollFilter _rollFilter = _RollFilter(tauMs: 150.0);
+
+  final geom.AzimutStabilizer _azimutFilter;
 
   /// Envuelve ángulos a (-180, 180]
   double _wrapDeg180(double x) => ((x + 180.0) % 360.0) - 180.0;
@@ -851,19 +861,21 @@ class PoseCaptureController extends ChangeNotifier {
 
     // Azimut del torso (3D) — normalizado para que 0° = mirando a la cámara
     _metricRegistry.register(MetricKeys.azimutSigned, (i) {
-      if (i.poseLandmarks3D == null) return null;
-      final double zToPx = _zToPxScale ?? i.imageSize.width; // fallback
-      final rawDeg = geom.estimateAzimutBiacromial3D(
-        poseLandmarks3D: i.poseLandmarks3D,
-        xToPx: i.imageSize.width,
-        zToPx: zToPx,
-        mirror: i.mirror,
-      );
-      if (rawDeg == null) return null;
-      // Normalizar: 0° = de frente a la cámara (raw ≈ ±180°)
-      final normalized = geom.normalizeAzimutTo180(rawDeg);
-      return geom.omitAzimutDeadzone(normalized);
+      return _computeStableAzimut(i);
     });
+  }
+
+  double? _computeStableAzimut(FrameInputs i) {
+    if (i.poseLandmarks3D == null) return null;
+    final double zToPx = _zToPxScale ?? i.imageSize.width; // fallback
+    final filtered = _azimutFilter.update(
+      poseLandmarks3D: i.poseLandmarks3D,
+      now: i.now,
+      xToPx: i.imageSize.width,
+      zToPx: zToPx,
+      mirror: i.mirror,
+    );
+    return geom.omitAzimutDeadzone(filtered);
   }
 
   // ── Suscripción de frames (por instancia) ─────────────────────────────
