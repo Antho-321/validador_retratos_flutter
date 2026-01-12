@@ -11,7 +11,7 @@ import 'package:flutter/foundation.dart' show compute, kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
+import '../../core/pose_config.dart';
 
 import 'package:image/image.dart' as img;
 
@@ -1165,25 +1165,20 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
 
   Future<void> _runRemoteValidation(String captureId, Uint8List bytes) async {
     try {
-      final endpointRaw = (dotenv.env['VALIDAR_IMAGEN_URL'] ?? '').trim();
+      final endpointRaw = PoseConfig.validarImagenUrl.trim();
       final baseUrl = endpointRaw.isNotEmpty
           ? endpointRaw.replaceAll('/validar-imagen', '')
           : 'https://127.0.0.1:5001';
       final validationEndpoint = Uri.parse('$baseUrl/validar-imagen');
 
-      final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
-          ? dotenv.env['CEDULA']!.trim()
+      final cedula = PoseConfig.cedula.trim().isNotEmpty
+          ? PoseConfig.cedula.trim()
           : '1050298650';
-      final nacionalidad =
-          (dotenv.env['NACIONALIDAD'] ?? '').trim().isNotEmpty
-              ? dotenv.env['NACIONALIDAD']!.trim()
-              : 'Ecuatoriana';
-      final etnia = (dotenv.env['ETNIA'] ?? '').trim().isNotEmpty
-          ? dotenv.env['ETNIA']!.trim()
+      final etnia = PoseConfig.etnia.trim().isNotEmpty
+          ? PoseConfig.etnia.trim()
           : 'Mestiza';
 
-      final allowInsecureFromEnv =
-          (dotenv.env['ALLOW_INSECURE_SSL'] ?? '').trim().toLowerCase() == 'true';
+      final allowInsecureFromEnv = PoseConfig.allowInsecureSsl;
       final isLocalHost = validationEndpoint.host == '127.0.0.1' ||
           validationEndpoint.host == 'localhost' ||
           validationEndpoint.host == '10.0.2.2';
@@ -1249,7 +1244,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
               alreadySegmented: false,
               headerExtras: {
                   'cedula': cedula,
-                  'nacionalidad': nacionalidad,
                   'etnia': etnia,
               },
             );

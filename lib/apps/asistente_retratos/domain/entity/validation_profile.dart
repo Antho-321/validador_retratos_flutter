@@ -141,7 +141,7 @@ class ValidationProfile {
     azimutGate: GateConfig(
       baseDeadband: 0.0,
       tighten: 0.015,
-      hysteresis: 0.009,
+      hysteresis: 0.008,
       maxOffDeg: 20.0, // (no usado por ahora, pero queda centralizado)
     ),
 

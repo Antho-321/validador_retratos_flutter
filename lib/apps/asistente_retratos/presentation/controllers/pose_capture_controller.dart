@@ -6,7 +6,7 @@ import 'dart:typed_data' show Uint8List, ByteBuffer, ByteData; // Fixed duplicat
 
 import 'dart:math' as math;
 import 'package:image/image.dart' as img; // <-- ADDED
-import 'package:flutter_dotenv/flutter_dotenv.dart'; // <-- ADDED
+import '../../core/pose_config.dart';
 import '../../core/face_oval_geometry.dart' show kOvalScale; // NEW
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart' show RenderRepaintBoundary; // kept for types
@@ -505,14 +505,11 @@ class PoseCaptureController extends ChangeNotifier {
           if (!_isDisposed) notifyListeners();
 
           // Prepare metadata headers for validation
-          final cedula = (dotenv.env['CEDULA'] ?? '').trim().isNotEmpty
-              ? dotenv.env['CEDULA']!.trim()
+          final cedula = PoseConfig.cedula.trim().isNotEmpty
+              ? PoseConfig.cedula.trim()
               : '1050298650';
-          final nacionalidad = (dotenv.env['NACIONALIDAD'] ?? '').trim().isNotEmpty
-              ? dotenv.env['NACIONALIDAD']!.trim()
-              : 'Ecuatoriana';
-          final etnia = (dotenv.env['ETNIA'] ?? '').trim().isNotEmpty
-              ? dotenv.env['ETNIA']!.trim()
+          final etnia = PoseConfig.etnia.trim().isNotEmpty
+              ? PoseConfig.etnia.trim()
               : 'Mestiza';
 
           // Intenta enviar la imagen
@@ -521,7 +518,6 @@ class PoseCaptureController extends ChangeNotifier {
             requestId: captureId,
             headerExtras: {
               'cedula': cedula,
-              'nacionalidad': nacionalidad,
               'etnia': etnia,
             },
           );

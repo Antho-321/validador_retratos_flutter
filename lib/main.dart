@@ -31,7 +31,6 @@ const Set<String> logOnlyAngles = {'azimut'}; // Currently: log only azimut angl
 const exampleValidationJson = r'''
 {
   "cedula": "1050298650",
-  "nacionalidad": "ecuatoriana",
   "etnia": "mestiza",
   "metadatos": {
     "valido": "True",
