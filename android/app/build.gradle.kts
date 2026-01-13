@@ -7,6 +7,9 @@ plugins {
 
 android {
     val includeX86 = (project.findProperty("includeX86") as String?)?.toBoolean() == true
+    // Optional: compress native libs to shrink APKs (faster installs over ADB).
+    val compressNativeLibs =
+        (project.findProperty("compressNativeLibs") as String?)?.toBoolean() == true
     val targetPlatforms = (project.findProperty("target-platform") as String?)
         ?.split(',')
         ?.map { it.trim() }
@@ -80,6 +83,7 @@ android {
 
     packaging {
         jniLibs {
+            useLegacyPackaging = compressNativeLibs
             val excluded = buildSet {
                 if (!selectedAbis.contains("armeabi-v7a")) add("**/armeabi-v7a/**")
                 if (!selectedAbis.contains("arm64-v8a")) add("**/arm64-v8a/**")

@@ -1174,9 +1174,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
       final cedula = PoseConfig.cedula.trim().isNotEmpty
           ? PoseConfig.cedula.trim()
           : '1050298650';
-      final etnia = PoseConfig.etnia.trim().isNotEmpty
-          ? PoseConfig.etnia.trim()
-          : 'Mestiza';
 
       final allowInsecureFromEnv = PoseConfig.allowInsecureSsl;
       final isLocalHost = validationEndpoint.host == '127.0.0.1' ||
@@ -1244,7 +1241,6 @@ class _PoseCapturePageState extends State<PoseCapturePage> {
               alreadySegmented: false,
               headerExtras: {
                   'cedula': cedula,
-                  'etnia': etnia,
               },
             );
 

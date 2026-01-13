@@ -515,9 +515,6 @@ class PoseCaptureController extends ChangeNotifier {
           final cedula = PoseConfig.cedula.trim().isNotEmpty
               ? PoseConfig.cedula.trim()
               : '1050298650';
-          final etnia = PoseConfig.etnia.trim().isNotEmpty
-              ? PoseConfig.etnia.trim()
-              : 'Mestiza';
 
           // Intenta enviar la imagen
           await poseService.sendImageBytes(
@@ -525,7 +522,6 @@ class PoseCaptureController extends ChangeNotifier {
             requestId: captureId,
             headerExtras: {
               'cedula': cedula,
-              'etnia': etnia,
             },
           );
 

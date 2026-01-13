@@ -32,7 +32,6 @@ const Set<String> logOnlyAngles = {'azimut'}; // Currently: log only azimut angl
 const exampleValidationJson = r'''
 {
   "cedula": "1050298650",
-  "etnia": "mestiza",
   "metadatos": {
     "valido": "True",
     "nombre": "1050298650",
@@ -145,13 +144,11 @@ class _PoseAppState extends State<PoseApp> {
       }
 
       final cedula = dotenv.env['CEDULA']?.trim();
-      final etnia = dotenv.env['ETNIA']?.trim();
 
       // Fix: Ensure PoseConfig is initialized with .env values
-      if (cedula != null || etnia != null) {
+      if (cedula != null) {
         PoseConfig.configure({
           if (cedula != null) 'cedula': cedula,
-          if (etnia != null) 'etnia': etnia,
         });
       }
 

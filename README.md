@@ -59,6 +59,7 @@ adb devices
   - `--no-pub`
   - `--no-track-widget-creation`
   - `--android-skip-build-dependency-validation`
+  - `--android-project-arg=compressNativeLibs=true` (reduce el APK para instalaciones más rápidas; desactivar con `COMPRESS_NATIVE_LIBS=false`)
 
 ---
 

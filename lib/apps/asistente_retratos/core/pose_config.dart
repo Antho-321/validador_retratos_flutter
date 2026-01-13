@@ -47,7 +47,6 @@ class PoseConfig {
   // Identidad del usuario (valores por defecto, normalmente se pasan en runtime)
   // ─────────────────────────────────────────────────────────────────────────
   static String cedula = '';
-  static String etnia = 'mestiza';
 
   // ─────────────────────────────────────────────────────────────────────────
   // Feature flags
@@ -107,9 +106,6 @@ class PoseConfig {
     }
     if (overrides.containsKey('cedula')) {
       cedula = overrides['cedula'] as String;
-    }
-    if (overrides.containsKey('etnia')) {
-      etnia = overrides['etnia'] as String;
     }
   }
 }
